@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.env.*
+# Re-admit the template: it lists variable names with no values, and other
+# developers need it to know what to configure.
+!.env.example
+*.local
+.DS_Store

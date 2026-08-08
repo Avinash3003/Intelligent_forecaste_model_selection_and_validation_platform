@@ -1,0 +1,68 @@
+# PyTorch's own package index, for the CPU-only build. Declared as an
+# `--extra-index-url` (not `--index-url`) so pip still falls through to
+# PyPI for every other package here — only `torch` itself has a build on
+# this index. Without this, `pip install torch` resolves the default PyPI
+# wheel, which pulls the CUDA runtime (~2GB of nvidia-*-cu12 packages)
+# nothing in this codebase uses: `tft_model.py` hardcodes `accelerator="cpu"`
+# unconditionally. Kept in requirements.txt itself (not a build-time flag)
+# so `pip install -r requirements.txt` resolves identically everywhere —
+# a developer's laptop, CI, and the Docker image all get the same graph.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Core engine — required, imported unconditionally at module load time.
+# numpy is capped below 2.0: prophet's cmdstanpy backend and the pinned
+# mlflow version below are not yet verified against the numpy 2.x ABI
+# change, and every other pin in this file resolves cleanly under 1.x.
+pandas>=2.2,<3.0
+numpy>=1.26,<2.0
+scipy>=1.11,<2.0          # Drift Detection (s09_drift): scipy.stats, scipy.spatial.distance
+openpyxl>=3.1,<4.0
+scikit-learn>=1.4,<2.0
+
+# Forecasting model libraries. Each is optional at runtime: the Model
+# Registry lazily imports the library a model needs and records that model
+# as Unavailable if it is missing, so a deployment can ship only the model
+# families it intends to use without the pipeline failing.
+statsmodels>=0.14,<0.15   # ARIMA / SARIMA
+xgboost-cpu>=2.0,<3.0     # XGBoost, CPU-only build. Same `xgboost` import name and API as the
+                          # standard package, verified on the exact version this pins (2.1.4) —
+                          # the standard `xgboost` wheel unconditionally depends on
+                          # nvidia-nccl-cu12 (~300MB) for GPU-distributed training this platform
+                          # never uses (no `device`/`tree_method` override anywhere in
+                          # config/model_config.py); `xgboost-cpu` simply doesn't bundle that
+                          # code path, so there is nothing to strip after install.
+lightgbm>=4.3,<5.0        # LightGBM
+prophet>=1.1,<2.0         # Prophet — ships its own precompiled Stan model binary and its own
+                          # copy of libtbb; no separate CmdStan installation is needed at
+                          # runtime (verified: `ldd` on the bundled binary links against
+                          # prophet's own libtbb, not a system CmdStan).
+
+# Temporal Fusion Transformer. A supported production model like every
+# other entry in this file — local and deployed environments must have
+# identical capabilities, so this is not conditionally excluded. The CPU
+# wheel (via the extra index above) keeps this from ballooning the image;
+# `tft_model.py` never requests a GPU, so there is nothing a CUDA build
+# would buy here.
+pytorch-forecasting>=1.0,<2.0
+torch>=2.2,<3.0
+
+# Model Explainability (Section 6.7, s07_explainability). Optional at
+# runtime, like the model libraries above: guarded by an importlib
+# find_spec check in shap_engine.py, so a deployment without it simply
+# reports explainability as unavailable rather than failing the pipeline.
+shap>=0.45,<0.47            # SHAP / permutation importance for ranking's stability sub-score
+
+# LLM Business Insights (Section 6.12). Optional at runtime, like the model
+# libraries above: imported lazily by AzureOpenAIService, so a deployment
+# with no Azure OpenAI access simply reports insights as unavailable rather
+# than failing the pipeline.
+openai>=1.30,<2.0           # Azure OpenAI Chat Completions client
+
+# MLflow Experiment Tracking & Model Registry (Section 6.13). Optional at
+# runtime: imported lazily by forecast_engine.tracking.MLflowClient, so a
+# deployment with tracking disabled is never forced to install it. Capped
+# below 3.0 and floored at 2.15 to stay compatible with the backend's own
+# pinned `mlflow-skinny==2.17.2` client, since both processes read/write
+# the same tracking store — re-verify this range if that pin ever changes.
+mlflow>=2.15,<3.0           # Experiment tracking, artifact logging, model registry
+matplotlib>=3.8,<4.0         # Forecast plot artifacts (installed transitively by mlflow)

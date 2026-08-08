@@ -1,0 +1,10 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+Write an INTERPRETATION OF DRIFT VALIDATION for each forecast group:
+1. Which statistical drift algorithm was dynamically selected (e.g. PSI, Kolmogorov-Smirnov, Wasserstein Distance, Jensen-Shannon Divergence) and, in one plain-language sentence, why that algorithm suits this group's data (sample size, cardinality, normality — as shown in the context).
+2. How the drift statistic compared to the dynamically estimated threshold, and what method (bootstrap, percentile, kernel density) produced that threshold.
+3. What the pass/fail outcome means in practice: does the forward forecast represent a plausible continuation of history, or a meaningful departure from it?
+
+Do not restate this instruction in your answer.

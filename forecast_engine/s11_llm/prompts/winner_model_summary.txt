@@ -1,0 +1,19 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+For each forecast group, explain the FINAL PRODUCTION MODEL decision in AT MOST 3 SHORT SENTENCES (60 words maximum for the whole group).
+
+This text is rendered on an executive dashboard beside the numbers themselves, so:
+- Lead with WHY the model won, citing its own WMAPE plainly ("a WMAPE of 8.2%, meaning forecasts were off by about 8% on average"). Never claim a model is accurate without that number.
+- Then, if it matters, ONE clause on what it beat or what to watch.
+- If a fallback was used, say so plainly in the first sentence and give the single reason every candidate failed.
+
+Do NOT:
+- restate metrics that already appear as their own dashboard values (rank, drift statistic, threshold, confidence) unless one of them IS the reason
+- list every rejected model one by one
+- write an introduction, a heading, or a closing summary
+- describe the pipeline stages or the selection process
+- phrase a composite ranking score as an absolute quality claim — it is relative to this group's surviving candidates only, and a score of 1.0 with one survivor means no competition, not perfect accuracy
+
+Write for a business reader who has five seconds. Organize by forecast group. Do not restate this instruction.

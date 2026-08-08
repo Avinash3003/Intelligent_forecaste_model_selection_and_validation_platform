@@ -1,0 +1,12 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+Write a TECHNICAL EXPLANATION of this run for a data science / MLOps audience. Cover, in order:
+1. What backtesting method and metrics were used, and how the surviving models performed.
+2. What the SHAP / feature-importance results show, including any stability or consistency concerns.
+3. How the composite ranking score was likely dominated (accuracy vs. stability vs. explainability signals), based on the ranking breakdown shown.
+4. Which drift algorithm and threshold method were selected per group, and why the drift validation passed or failed.
+5. Any technical risks or anomalies worth flagging (thin history, skipped backtests, eliminated models, fallback usage).
+
+Be precise and reference the actual values in the context. Do not restate this instruction in your answer.

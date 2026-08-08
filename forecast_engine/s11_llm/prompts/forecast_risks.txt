@@ -1,0 +1,11 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+Identify FORECAST RISKS AND OBSERVATIONS a business user should know about before relying on this forecast. Consider, where present in the context:
+1. Forecast groups with thin history, skipped backtests, or a high proportion of eliminated models.
+2. Groups where a fallback model was used (meaning no ranked candidate was trustworthy enough to pass drift validation).
+3. Any drift validation that passed narrowly (statistic close to the threshold) versus comfortably.
+4. Explainability instability (features whose importance shifted significantly, per the "significant_changes" data).
+
+List these as concise bullet points, ordered by severity. If there is genuinely nothing notable, say so rather than inventing a risk. Do not restate this instruction in your answer.

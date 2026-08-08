@@ -1,0 +1,10 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+Summarize the IMPORTANT FEATURES influencing each forecast, based on the SHAP / feature-importance section of the context:
+1. For each forecast group's selected model, name the dominant feature(s) and what share of the model's decision they represent.
+2. Interpret the SHAP/importance stability metrics: is the dominant feature consistent across resampling and time windows, or does it shift (a sign of an unstable, less trustworthy explanation)?
+3. If a model has no explainable features (a purely statistical/univariate model), say so explicitly rather than omitting it.
+
+Do not restate this instruction in your answer.

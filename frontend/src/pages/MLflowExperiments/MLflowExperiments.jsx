@@ -1,0 +1,248 @@
+import { useCallback, useEffect, useState } from 'react'
+import { FlaskConical, AlertCircle } from 'lucide-react'
+import PageContainer from '../../components/common/PageContainer'
+import SectionContainer from '../../components/layout/SectionContainer'
+import EmptyState from '../../components/ui/EmptyState'
+import Loader from '../../components/ui/Loader'
+import Select from '../../components/ui/Select'
+import { fetchDeployments, fetchMLflowRun } from '../../services'
+import { formatRunLabel } from '../../utils/formatDateTime'
+
+/**
+ * MLflow Experiments — the run-level audit view.
+ *
+ * Deliberately not a second Results page: Results explains one key's decision
+ * with its chart and narrative, while this shows what the run as a whole
+ * logged to the tracking store and how every key came out. The overlap is
+ * limited to naming the winning model, which is the join key between the two
+ * views rather than duplicated content.
+ */
+
+function StatTile({ label, value, sub, tone = 'default' }) {
+  const tones = {
+    default: 'text-slate-800 dark:text-slate-100',
+    good: 'text-emerald-600 dark:text-emerald-400',
+    warn: 'text-amber-600 dark:text-amber-400',
+  }
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
+      <div className={`mt-1.5 text-xl font-semibold tabular-nums ${tones[tone]}`}>{value}</div>
+      {sub && <div className="mt-0.5 text-[11px] text-slate-400">{sub}</div>}
+    </div>
+  )
+}
+
+// A compact bar rather than a number alone: with ten-plus keys the relative
+// accuracy across keys is the thing worth seeing at a glance.
+function AccuracyBar({ value }) {
+  if (value == null) return <span className="text-xs text-slate-400">—</span>
+  const tone = value >= 70 ? 'bg-emerald-500' : value >= 50 ? 'bg-amber-500' : 'bg-rose-500'
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+        <div className={`h-full rounded-full ${tone}`} style={{ width: `${Math.min(100, value)}%` }} />
+      </div>
+      <span className="w-11 text-right text-xs tabular-nums text-slate-600 dark:text-slate-300">
+        {value.toFixed(1)}%
+      </span>
+    </div>
+  )
+}
+
+export default function MLflowExperiments() {
+  const [runs, setRuns] = useState([])
+  const [run, setRun] = useState('')
+  const [detail, setDetail] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    fetchDeployments()
+      .then((rows) => {
+        // Only completed runs have a tracking record to show.
+        const done = rows.filter((r) => r.status === 'Completed')
+        setRuns(done.map((r) => ({ value: r.id, label: formatRunLabel(r.startTimeRaw || r.start_time, r.dataset) })))
+        if (done.length) setRun(done[0].id)
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const load = useCallback(async (runId) => {
+    if (!runId) return
+    setLoading(true)
+    setError(null)
+    try {
+      setDetail(await fetchMLflowRun(runId))
+    } catch (e) {
+      setError(String(e.message || e))
+      setDetail(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (run) load(run)
+  }, [run, load])
+
+  if (!loading && !runs.length) {
+    return (
+      <PageContainer>
+        <SectionContainer title="MLflow Experiments" subtitle="Experiment tracking and run lineage">
+          <EmptyState
+            icon={FlaskConical}
+            title="No completed runs yet"
+            description="Deploy a forecast run; its parameters, metrics and registered models will be tracked here."
+          />
+        </SectionContainer>
+      </PageContainer>
+    )
+  }
+
+  const s = detail?.summary
+
+  return (
+    <PageContainer>
+      <div className="mb-5">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-800 dark:text-slate-100">
+          MLflow Experiments
+        </h1>
+        <p className="mt-1 text-sm text-slate-400">
+          Run traceability — what this execution logged to the tracking store, and how every key came out.
+        </p>
+      </div>
+
+      {runs.length > 0 && (
+        <div className="mb-5 sm:max-w-md">
+          <Select value={run} onChange={setRun} options={runs} placeholder="Select a run" />
+        </div>
+      )}
+
+      {error && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-sm text-rose-600 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
+          <AlertCircle size={16} className="mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {loading && <SectionContainer><Loader label="Loading tracking record…" /></SectionContainer>}
+
+      {!loading && detail && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <StatTile label="Keys processed" value={s.keys_processed} />
+            <StatTile label="Models trained" value={s.models_trained} />
+            <StatTile
+              label="Fallback used"
+              value={s.fallback_used}
+              sub={`${s.keys_processed - s.fallback_used} selected on merit`}
+              tone={s.fallback_used > 0 ? 'warn' : 'good'}
+            />
+            <StatTile
+              label="Avg accuracy"
+              value={s.average_accuracy == null ? 'N/A' : `${s.average_accuracy}%`}
+              sub="100 − WMAPE"
+              tone={s.average_accuracy >= 70 ? 'good' : 'warn'}
+            />
+          </div>
+
+          {/* Tracking identity — the ids an auditor needs to find this run in
+              MLflow itself, rather than a restatement of the forecast. */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {[
+                ['MLflow run', detail.mlflow_run_id],
+                ['Experiment', detail.experiment],
+                ['Tracking store', detail.tracking_uri],
+                ['Status', detail.status],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>
+                  <div className="mt-0.5 truncate font-mono text-xs text-slate-700 dark:text-slate-200" title={value || '—'}>
+                    {value || '—'}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-4 border-t border-slate-100 pt-3 text-xs text-slate-500 dark:border-slate-800">
+              <span><b className="tabular-nums text-slate-700 dark:text-slate-200">{s.parameters_logged}</b> parameters</span>
+              <span><b className="tabular-nums text-slate-700 dark:text-slate-200">{s.metrics_logged}</b> metrics</span>
+              <span><b className="tabular-nums text-slate-700 dark:text-slate-200">{s.models_registered}</b> models registered</span>
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
+                Parameters logged
+              </h3>
+              <dl className="space-y-1.5">
+                {detail.parameters.map((p) => (
+                  <div key={p.name} className="flex justify-between gap-3 text-xs">
+                    <dt className="font-mono text-slate-400">{p.name}</dt>
+                    <dd className="truncate text-right text-slate-700 dark:text-slate-200" title={p.value}>
+                      {p.value}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+
+            {/* Child runs by key — the per-key roll-up, matching the reference
+                traceability view. Decisions link back to Results for detail. */}
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white lg:col-span-2 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+                <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Child runs by key</h3>
+                <span className="text-[11px] text-slate-400">{detail.per_key.length} keys</span>
+              </div>
+              <div className="max-h-96 overflow-auto">
+                <table className="w-full min-w-[620px] text-left">
+                  <thead className="sticky top-0 bg-white dark:bg-slate-900">
+                    <tr className="border-b border-slate-100 text-[10px] uppercase tracking-wide text-slate-400 dark:border-slate-800">
+                      <th className="px-4 py-2 font-medium">Key</th>
+                      <th className="px-4 py-2 font-medium">Model</th>
+                      <th className="px-4 py-2 font-medium">Accuracy</th>
+                      <th className="px-4 py-2 font-medium">Drift test</th>
+                      <th className="px-4 py-2 text-right font-medium">Statistic</th>
+                      <th className="px-4 py-2 text-right font-medium">Threshold</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.per_key.map((k) => (
+                      <tr key={k.group_id} className="border-b border-slate-50 text-sm dark:border-slate-800/60">
+                        <td className="px-4 py-2 font-mono text-xs text-slate-700 dark:text-slate-200">{k.group_id}</td>
+                        <td className="px-4 py-2">
+                          <span className="text-xs font-medium text-slate-800 dark:text-slate-100">{k.model || '—'}</span>
+                          {k.fallback_used && (
+                            <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+                              fallback
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2"><AccuracyBar value={k.accuracy} /></td>
+                        <td className="px-4 py-2 text-xs text-slate-500">
+                          {k.drift_algorithm ? k.drift_algorithm.replace(/_/g, ' ') : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right text-xs tabular-nums text-slate-500">
+                          {k.drift_statistic != null ? k.drift_statistic.toFixed(4) : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right text-xs tabular-nums text-slate-500">
+                          {k.threshold_value != null ? k.threshold_value.toFixed(4) : '—'}
+                          {k.threshold_method && (
+                            <span className="ml-1 text-[10px] text-slate-400">{k.threshold_method}</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </PageContainer>
+  )
+}

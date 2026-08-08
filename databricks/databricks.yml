@@ -1,0 +1,166 @@
+# ForecastIQ — Databricks Asset Bundle
+#
+# Deployment model:
+#   DCS Docker image (runtime + dependencies, from ACR)
+#     + forecast_engine wheel (application code, uploaded by this bundle)
+#     -> Databricks Job -> forecast_engine pipeline execution
+#
+# The Docker image deliberately contains no application code; the wheel
+# deliberately contains no dependencies. This bundle joins the two.
+
+bundle:
+  name: forecastiq
+
+# ---------------------------------------------------------------------
+# Variables — every environment-specific value lives here, not inline.
+# Override per target below, or on the CLI: --var="key=value".
+# ---------------------------------------------------------------------
+variables:
+  job_name:
+    description: Display name of the Databricks Job.
+    default: forecastiq-forecast-pipeline
+
+  catalog:
+    description: Existing Unity Catalog catalog.
+    default: forecastiq
+
+  schema:
+    description: Existing Unity Catalog schema.
+    default: forecasting
+
+  acr_image:
+    description: >-
+      Fully qualified ACR image, without tag — e.g.
+      myregistry.azurecr.io/forecast-engine.
+
+      Intentionally has no default: the registry name identifies the Azure
+      tenant, so it is supplied by the environment rather than committed.
+      Set BUNDLE_VAR_acr_image (see .env.example) or pass
+      --var="acr_image=...". A missing value fails validation immediately.
+
+  acr_image_tag:
+    description: Image tag deployed to ACR.
+    default: 0.1.1
+
+  secret_scope:
+    description: >-
+      Databricks secret scope holding ACR and Azure OpenAI credentials.
+      Must exist before deploy — see the Phase 1 report for creation steps.
+    default: forecastiq
+
+  node_type_id:
+    description: Driver node size. 8 vCPU / 32 GB to match the project requirement.
+    default: Standard_D8s_v5
+
+  volume:
+    description: Existing Unity Catalog external volume holding datasets and run output.
+    default: forecast_files
+
+  spark_version:
+    description: Databricks Runtime version for the job cluster.
+    default: 15.4.x-scala2.12
+
+  mlflow_experiment:
+    description: MLflow experiment path in the Databricks workspace.
+    default: /Shared/forecastiq/forecast-engine
+
+  # Azure OpenAI (LLM business insights, s11_llm) — genuinely optional.
+  #
+  # These hold the *values* of the cluster's AZURE_OPENAI_* env vars, and
+  # default to empty on purpose. Databricks resolves `{{secrets/...}}` in
+  # spark_env_vars during cluster init, before any Python runs, so hardcoding a
+  # secret reference here makes the whole job fail to start when that secret is
+  # absent — the engine's own graceful degradation never gets a chance to apply.
+  # Empty means no secret lookup happens at all, and forecast_engine's `_env()`
+  # reads blank as "not configured" and reports insights as unavailable.
+  #
+  # To enable, point these at real secrets in a target below (see `dev`).
+  azure_openai_endpoint:
+    description: Value for AZURE_OPENAI_ENDPOINT. Empty disables LLM insights.
+    default: ""
+
+  azure_openai_api_key:
+    description: Value for AZURE_OPENAI_API_KEY. Empty disables LLM insights.
+    default: ""
+
+  azure_openai_deployment:
+    description: Value for AZURE_OPENAI_DEPLOYMENT_NAME. Empty disables LLM insights.
+    default: ""
+
+  volumes_root:
+    description: >-
+      Unity Catalog Volume root. forecast_engine reads and writes with
+      pandas/pathlib, which need POSIX paths — UC Volumes provide those over the
+      existing ADLS containers, where abfss:// URIs would not be directly
+      readable. A UC volume path is /Volumes/<catalog>/<schema>/<volume>, so the
+      volume name must be included: forecastiq.forecasting.forecast_files is an
+      EXTERNAL volume over the deployment's `uploads` container.
+    # Composed from catalog/schema above so retargeting a environment means
+    # changing those two values, not editing a path in three places.
+    default: /Volumes/${var.catalog}/${var.schema}/${var.volume}
+
+# ---------------------------------------------------------------------
+# Artifacts — the wheel is built and uploaded by the bundle itself.
+# `path: ..` is the repo root (this file lives in databricks/), where
+# pyproject.toml and dist/ are.
+# ---------------------------------------------------------------------
+artifacts:
+  forecast_engine_wheel:
+    type: whl
+    path: ..
+    # `pip wheel` rather than `python -m build`: setuptools writes its
+    # intermediate output to a `build/` directory in the repo root, which then
+    # shadows the PyPI `build` module as an implicit namespace package, so
+    # `python -m build` fails with "No module named build.__main__" on any
+    # machine that has built once. pip is never shadowed and needs no extra
+    # dependency installed. Both drive the same pyproject.toml setuptools
+    # backend and emit the same wheel.
+    build: python3 -m pip wheel . --no-deps --wheel-dir dist
+
+include:
+  - resources/*.yml
+
+# ---------------------------------------------------------------------
+# Targets
+# ---------------------------------------------------------------------
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      # No `host:` here: the workspace URL identifies the Azure tenant, so it
+      # is supplied by the environment instead of committed. DAB does not
+      # allow variable interpolation on this field ("Interpolation is not
+      # supported for the field workspace.host"), so DATABRICKS_HOST is the
+      # supported mechanism — see .env.example.
+      #
+      # Set DATABRICKS_HOST *and* an auth variable together. DATABRICKS_HOST
+      # alone loses to `default_profile` in ~/.databrickscfg, which silently
+      # targets whichever workspace that profile names.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      # Enabled for dev: these three secrets are populated in the `forecastiq`
+      # scope in this workspace. Remove this block (or blank the values) and the
+      # job still starts — insights are simply reported as unavailable.
+      azure_openai_endpoint: "{{secrets/forecastiq/azure-openai-endpoint}}"
+      azure_openai_api_key: "{{secrets/forecastiq/azure-openai-api-key}}"
+      azure_openai_deployment: "{{secrets/forecastiq/azure-openai-deployment}}"
+
+      # Dev/integration override ONLY — the benchmark default stays Standard_D8s_v5
+      # above and must be used for any real performance evaluation.
+      #
+      # This subscription is capped at 4 total regional vCPUs in eastus, and every
+      # D/DS/E/F v2-v5 4-vCPU SKU is NotAvailableForSubscription there (verified via
+      # `az vm list-skus`, restriction type Location + all three Zones). The v7
+      # families are the only unrestricted 4-vCPU SKUs with non-zero quota, so the
+      # smoke test runs on F4as_v7 (4 vCPU / 16 GB, general-purpose CPU, no GPU).
+      # 4 vCPU / 16 GB, fits the 4-vCPU regional quota, and is one of the 39 node
+      # types Databricks Container Services accepts.
+      #
+      # BLOCKED AS OF NOW: this subscription reports NotAvailableForSubscription
+      # for ALL 39 DCS-supported node types, in eastus and in eastus2/centralus/
+      # westus2 — so this is a subscription authorization issue, not quota and not
+      # regional capacity. The v6/v7 families this subscription *can* use (e.g.
+      # Standard_F4as_v7) are rejected by DCS as unsupported node types. This value
+      # is therefore the correct target the moment the subscription is unblocked.
+      node_type_id: Standard_D4s_v5

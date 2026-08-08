@@ -1,0 +1,11 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+Write a BUSINESS-READABLE EXPLANATION of this run for a non-technical stakeholder (e.g. a demand planner or category manager). Avoid statistical jargon where possible — when a technical term is unavoidable, explain it in one plain-language clause. Cover:
+1. What was forecasted and for which products/segments (forecast groups).
+2. In plain terms, how confident the platform is in the result and why.
+3. What ultimately drove the choice of forecasting approach — do not just say "the best model was picked"; explain what "best" meant here (accuracy, stability, and explainability together).
+4. Anything the business should be aware of or double-check before acting on this forecast.
+
+Keep it concise — a few short paragraphs or bullets, not an essay. Do not restate this instruction in your answer.

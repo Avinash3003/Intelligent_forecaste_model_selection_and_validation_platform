@@ -1,0 +1,5 @@
+Below is the complete execution record of one forecasting pipeline run.
+
+$context
+
+Write a brief OVERALL PIPELINE EXECUTION SUMMARY (this doubles as the executive-level overview). In 4-6 sentences, state: how many forecast groups were processed, how many models survived evaluation versus were eliminated, whether ranking and drift validation completed normally, and the high-level outcome (e.g. "N groups received a validated production model, M required the fallback model"). This is a top-of-page summary — keep it dense with facts, not narrative flourish. Do not restate this instruction in your answer.

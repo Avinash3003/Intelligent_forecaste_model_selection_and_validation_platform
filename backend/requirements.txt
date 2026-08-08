@@ -1,0 +1,18 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-multipart==0.0.9
+pandas==2.2.2
+openpyxl==3.1.5
+# Client-only MLflow: the backend reads completed-run history from the
+# tracking store but never trains or serves a model, so the full mlflow
+# distribution (server, UI, ML frameworks) is not needed. Bundles the
+# Databricks SDK, which is what lets the same reader work against a
+# Databricks tracking server with only the URI changing.
+mlflow-skinny==2.17.2
+
+# Dataset preview: reads the uploaded file back from ADLS for the Results
+# page. Read-only — the backend is given a container-scoped SAS, never an
+# account key.
+azure-storage-blob>=12.19,<13

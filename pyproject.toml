@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forecast-engine"
+version = "0.1.0"
+description = "Demand forecasting pipeline: preprocessing, model training, backtesting, drift-gated selection, and MLflow tracking."
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Forecast Engine Team" }]
+
+# Only the dependencies every pipeline run needs regardless of which
+# forecasting models or optional stages are enabled. Everything the
+# engine imports lazily (a specific model library, SHAP, MLflow, the LLM
+# client) is declared as an extra below instead, mirroring how the code
+# itself treats them: missing means "unavailable," never "broken."
+dependencies = [
+    "pandas>=2.2,<3.0",
+    "numpy>=1.26,<2.0",
+    "scipy>=1.11,<2.0",
+    "scikit-learn>=1.4,<2.0",
+    "openpyxl>=3.1,<4.0",
+]
+
+[project.optional-dependencies]
+# Forecasting model libraries beyond the always-available Seasonal Naive.
+models = [
+    "statsmodels>=0.14,<0.15",
+    "xgboost>=2.0,<3.0",
+    "lightgbm>=4.3,<5.0",
+    "prophet>=1.1,<2.0",
+]
+# Temporal Fusion Transformer. Kept out of every other extra deliberately
+# — it pulls PyTorch (multi-GB) — install explicitly where TFT is needed.
+tft = [
+    "pytorch-forecasting>=1.0,<2.0",
+    "torch>=2.2,<3.0",
+]
+explainability = [
+    "shap>=0.45,<0.47",
+]
+llm = [
+    "openai>=1.30,<2.0",
+]
+tracking = [
+    "mlflow>=2.15,<3.0",
+    "matplotlib>=3.8,<4.0",
+]
+# Everything the default `requirements.txt` installs today (every model
+# library, SHAP, the LLM client, and MLflow) — excluding TFT, which stays
+# opt-in only. `pip install forecast-engine[all]` reproduces that install.
+all = [
+    "forecast-engine[models,explainability,llm,tracking]",
+]
+
+[project.scripts]
+forecast-engine = "forecast_engine.run_pipeline:main"
+
+[tool.setuptools.packages.find]
+include = ["forecast_engine*"]
+exclude = ["forecast_engine.tests*"]
+
+[tool.setuptools.package-data]
+"forecast_engine.s11_llm" = ["prompts/*.txt"]
+
+[tool.setuptools]
+include-package-data = true
