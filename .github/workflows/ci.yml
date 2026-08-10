@@ -190,11 +190,19 @@ jobs:
 
       - uses: databricks/setup-cli@v1.11.0
         if: steps.creds.outputs.available == 'true'
+        with:
+          # The action tag does not pin the CLI; `version` defaults to
+          # latest. Pinned to the version the bundle is validated against.
+          version: 1.11.0
 
       - name: databricks bundle validate -t dev
         if: steps.creds.outputs.available == 'true'
         working-directory: databricks
         env:
+          # The service principal authenticates with a Databricks OAuth
+          # secret, so the provider is named rather than left to the
+          # CLI's default resolution, which varies between versions.
+          DATABRICKS_AUTH_TYPE: oauth-m2m
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}

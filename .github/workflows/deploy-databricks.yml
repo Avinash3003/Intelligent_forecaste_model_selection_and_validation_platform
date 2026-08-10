@@ -141,11 +141,19 @@ jobs:
         run: python -m pip wheel . --no-deps --wheel-dir dist
 
       - uses: databricks/setup-cli@v1.11.0
+        with:
+          # The action tag does not pin the CLI; `version` defaults to
+          # latest. Pinned to the version the bundle is validated against.
+          version: 1.11.0
 
       # Stage 3: validate the production target.
       - name: databricks bundle validate -t prod
         working-directory: databricks
         env:
+          # The service principal authenticates with a Databricks OAuth
+          # secret, so the provider is named rather than left to the
+          # CLI's default resolution, which varies between versions.
+          DATABRICKS_AUTH_TYPE: oauth-m2m
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
@@ -160,6 +168,10 @@ jobs:
       - name: databricks bundle deploy -t prod
         working-directory: databricks
         env:
+          # The service principal authenticates with a Databricks OAuth
+          # secret, so the provider is named rather than left to the
+          # CLI's default resolution, which varies between versions.
+          DATABRICKS_AUTH_TYPE: oauth-m2m
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
