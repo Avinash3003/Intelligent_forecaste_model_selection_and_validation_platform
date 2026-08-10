@@ -163,7 +163,19 @@ jobs:
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
           BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
-        run: databricks bundle validate -t dev
+        # On failure the CLI's own message is re-emitted as an annotation, so
+        # the reason shows on the run summary instead of only inside the full
+        # log. GitHub masks registered secret values in annotations exactly as
+        # it does in logs, so nothing sensitive is surfaced by doing this.
+        run: |
+          set +e
+          output=$(databricks bundle validate -t dev 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -ne 0 ]; then
+            echo "::error title=bundle validate -t dev failed::$(echo "$output" | tr '\n' ' ' | tail -c 900)"
+          fi
+          exit "$code"
 
       - name: Skipped — Databricks configuration incomplete
         if: steps.creds.outputs.available != 'true'
