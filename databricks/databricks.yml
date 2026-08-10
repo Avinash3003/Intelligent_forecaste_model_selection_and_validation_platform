@@ -52,8 +52,13 @@ variables:
       --var="acr_image=...". A missing value fails validation immediately.
 
   acr_image_tag:
-    description: Image tag deployed to ACR.
-    default: 0.1.1
+    description: >-
+      Image tag the DCS job pulls. `latest` by design: CI republishes that
+      tag whenever the image's inputs change, so a new image is picked up
+      without editing a pinned version here. CI also pushes the commit SHA
+      as a second tag, so any deployed image is still traceable to its
+      source — override this with that SHA to pin an exact build.
+    default: latest
 
   secret_scope:
     description: >-
