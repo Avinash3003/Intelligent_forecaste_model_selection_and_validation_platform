@@ -177,6 +177,15 @@ jobs:
             echo "::error title=Databricks secrets are malformed::$(printf '%b' "$problems" | tr '\n' ' ')"
             exit 1
           fi
+
+          # Identity fingerprints, so a configured value can be compared with
+          # the one known to work without either being revealed. A truncated
+          # SHA-256 of a high-entropy credential is not reversible, and for
+          # the client secret it is directly comparable to the `secret_hash`
+          # Databricks itself records for that service principal.
+          fp() { printf '%s' "$1" | sha256sum | cut -c1-8; }
+          echo "::notice title=Databricks credential fingerprints::HOST len=${#host} fp=$(fp "$host") | CLIENT_ID len=${#cid} fp=$(fp "$cid") | CLIENT_SECRET len=${#csec} fp=$(fp "$csec")"
+
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
