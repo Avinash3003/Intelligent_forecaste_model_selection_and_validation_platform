@@ -88,19 +88,24 @@ jobs:
       # Authenticates docker to the registry using the same service
       # principal everything else uses (it holds AcrPush) — no registry
       # admin user, and no registry password stored in GitHub.
+      # The image reference is read from the environment rather than
+      # interpolated into the command, so neither it nor the registry name
+      # derived from it is ever rendered into the executed command line.
       - name: Sign in to the container registry
         if: steps.decide.outputs.build == 'true'
-        run: az acr login --name "$(echo '${{ secrets.ACR_IMAGE }}' | cut -d. -f1)"
+        env:
+          ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
+        run: az acr login --name "${ACR_IMAGE%%.*}"
 
       - name: Build and push
         if: steps.decide.outputs.build == 'true'
+        env:
+          ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
+          IMAGE_SHA: ${{ github.sha }}
         run: |
-          docker build \
-            -t "${{ secrets.ACR_IMAGE }}:${{ github.sha }}" \
-            -t "${{ secrets.ACR_IMAGE }}:latest" \
-            .
-          docker push "${{ secrets.ACR_IMAGE }}:${{ github.sha }}"
-          docker push "${{ secrets.ACR_IMAGE }}:latest"
+          docker build -t "$ACR_IMAGE:$IMAGE_SHA" -t "$ACR_IMAGE:latest" .
+          docker push "$ACR_IMAGE:$IMAGE_SHA"
+          docker push "$ACR_IMAGE:latest"
 
   # Stages 3-5: build the wheel, validate the PRODUCTION target
   # specifically, then deploy it. Every Databricks-facing step in this job
