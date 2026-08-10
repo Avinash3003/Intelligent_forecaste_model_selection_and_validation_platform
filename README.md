@@ -230,6 +230,11 @@ Production deployment is automated — a push to `main` runs the tested, validat
 through GitHub Actions rather than a manual `bundle deploy`. See **`docs/ci-cd.md`** for the CI/CD
 pipeline, required GitHub secrets, and rollback.
 
+Three workflows cover it: `ci.yml` (tests and build validation, also reused as the pre-deploy gate),
+`deploy-databricks.yml` (job definitions and the DCS container image), and `deploy-app.yml` (backend
+and frontend). Every environment-specific value comes from an encrypted Actions secret, so no
+resource name, hostname or identifier is committed.
+
 ---
 
 ## Governance
