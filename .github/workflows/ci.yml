@@ -130,17 +130,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Values are read from the environment and only ever measured or
+      # shape-checked — never printed. A secret that is present but
+      # malformed (a stray newline from a paste, a truncated value, an
+      # image reference carrying a tag) otherwise surfaces much later as an
+      # opaque "cannot configure default credentials" from the CLI, which
+      # says nothing about which value is at fault.
       - name: Check Databricks configuration is complete
         id: creds
+        env:
+          DBX_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DBX_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DBX_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DBX_ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
         run: |
-          if [ -n "${{ secrets.DATABRICKS_HOST }}" ] \
-             && [ -n "${{ secrets.DATABRICKS_CLIENT_ID }}" ] \
-             && [ -n "${{ secrets.DATABRICKS_CLIENT_SECRET }}" ] \
-             && [ -n "${{ secrets.ACR_IMAGE }}" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
+          # Trim surrounding whitespace/newlines before judging anything.
+          host=$(printf '%s' "$DBX_HOST" | tr -d '[:space:]')
+          cid=$(printf '%s' "$DBX_CLIENT_ID" | tr -d '[:space:]')
+          csec=$(printf '%s' "$DBX_CLIENT_SECRET" | tr -d '[:space:]')
+          acr=$(printf '%s' "$DBX_ACR_IMAGE" | tr -d '[:space:]')
+
+          if [ -z "$host" ] || [ -z "$cid" ] || [ -z "$csec" ] || [ -z "$acr" ]; then
             echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          problems=""
+          case "$host" in
+            https://*.azuredatabricks.net) ;;
+            *) problems="$problems\n  - DATABRICKS_HOST must look like https://adb-<id>.<n>.azuredatabricks.net (no trailing slash or path)";;
+          esac
+          [ ${#cid} -ne 36 ] && problems="$problems\n  - DATABRICKS_CLIENT_ID should be a 36-character application id (got ${#cid} characters)"
+          [ ${#csec} -lt 20 ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET looks truncated (only ${#csec} characters)"
+          case "$acr" in
+            *:*) problems="$problems\n  - ACR_IMAGE must not include a tag; the bundle appends one itself";;
+          esac
+          # A pasted value that differs from its trimmed form carries stray
+          # whitespace, which the CLI takes literally.
+          [ "$DBX_HOST" != "$host" ] && problems="$problems\n  - DATABRICKS_HOST has leading/trailing whitespace"
+          [ "$DBX_CLIENT_ID" != "$cid" ] && problems="$problems\n  - DATABRICKS_CLIENT_ID has leading/trailing whitespace"
+          [ "$DBX_CLIENT_SECRET" != "$csec" ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET has leading/trailing whitespace"
+          [ "$DBX_ACR_IMAGE" != "$acr" ] && problems="$problems\n  - ACR_IMAGE has leading/trailing whitespace"
+
+          if [ -n "$problems" ]; then
+            printf 'Databricks configuration is present but malformed:%b\n' "$problems"
+            echo "::error title=Databricks secrets are malformed::$(printf '%b' "$problems" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         if: steps.creds.outputs.available == 'true'
