@@ -115,11 +115,14 @@ jobs:
   # check on every PR/push, not a production gate (deploy-databricks.yml
   # runs its own `-t prod` validate immediately before its own deploy).
   #
-  # Skips cleanly (not a failure) when DATABRICKS_HOST isn't configured as
-  # a repository secret — e.g. a fork PR, where GitHub never exposes
-  # secrets regardless, or a maintainer who simply hasn't wired this up
-  # yet. Every other job above still runs and still gates the PR; only
-  # this one step ever touches a live workspace, and only optionally.
+  # Skips cleanly (not a failure) unless EVERY input it needs is configured
+  # — a fork PR (where GitHub never exposes secrets at all), or a repository
+  # that simply has not wired these up yet. Checking all four rather than
+  # just the host matters: the bundle's `acr_image` and
+  # `cicd_service_principal_id` deliberately have no defaults, so a partial
+  # configuration fails validation for a reason that has nothing to do with
+  # the change under test. Every other job above still gates the PR; only
+  # this one ever touches a live workspace, and only optionally.
   # ---------------------------------------------------------------------
   databricks-bundle-validate:
     name: Databricks bundle validation (dev)
@@ -127,9 +130,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Databricks credentials are configured
+      - name: Check Databricks configuration is complete
         id: creds
-        run: echo "available=${{ secrets.DATABRICKS_HOST != '' }}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ -n "${{ secrets.DATABRICKS_HOST }}" ] \
+             && [ -n "${{ secrets.DATABRICKS_CLIENT_ID }}" ] \
+             && [ -n "${{ secrets.DATABRICKS_CLIENT_SECRET }}" ] \
+             && [ -n "${{ secrets.ACR_IMAGE }}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-python@v5
         if: steps.creds.outputs.available == 'true'
@@ -154,6 +165,9 @@ jobs:
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
         run: databricks bundle validate -t dev
 
-      - name: Skipped — no Databricks credentials configured
+      - name: Skipped — Databricks configuration incomplete
         if: steps.creds.outputs.available != 'true'
-        run: echo "DATABRICKS_HOST secret not set; skipping bundle validation for this run."
+        run: |
+          echo "Skipping bundle validation: this repository does not have all of"
+          echo "DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET"
+          echo "and ACR_IMAGE configured as Actions secrets."
