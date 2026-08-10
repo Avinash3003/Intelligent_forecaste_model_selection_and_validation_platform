@@ -16,3 +16,21 @@ mlflow-skinny==2.17.2
 # page. Read-only — the backend is given a container-scoped SAS, never an
 # account key.
 azure-storage-blob>=12.19,<13
+
+# Entra ID token validation (app/auth/entra.py) — RS256 signature
+# verification against the tenant's public JWKS via PyJWKClient, hence the
+# `crypto` extra (pulls in `cryptography`). Was already installed in every
+# developer's venv but missing from this file — nothing new is added to
+# auth itself, this only makes the existing dependency reproducible.
+PyJWT[crypto]==2.13.0
+
+# Test-only: fastapi.testclient.TestClient (Starlette) requires httpx to be
+# installed to instantiate at all, even though no test imports it directly.
+httpx==0.28.1
+
+# Production WSGI process manager for Azure App Service (Linux). uvicorn
+# alone is fine for local `uvicorn app.main:app --reload`; App Service's
+# startup command runs gunicorn with uvicorn's own worker class instead, for
+# proper multi-worker process management and signal handling under a real
+# process supervisor.
+gunicorn==23.0.0

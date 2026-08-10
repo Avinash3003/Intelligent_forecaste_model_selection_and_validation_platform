@@ -481,9 +481,17 @@ class ResultService:
         rejection_reasons = list(payload.get("rejection_reasons") or [])
         caveats = list(payload.get("caveats") or [])
 
-        paragraphs = [summary] if summary else []
+        # `summary` is already shown verbatim in the card body (via
+        # `insight.summary` below) — repeating it here as `paragraphs[0]`
+        # made "Full explanation" expand to the exact same sentence the
+        # user was just reading. `paragraphs` now holds only content the
+        # compact card doesn't already show: the full rejection-reason list,
+        # and any caveats beyond the single one the card surfaces.
+        paragraphs = []
         if rejection_reasons:
             paragraphs.append("Rejected candidates: " + "; ".join(rejection_reasons))
+        if len(caveats) > 1:
+            paragraphs.append("Additional caveats: " + "; ".join(caveats[1:]))
 
         headline = f"{selected_model} — fallback used" if fallback_used else f"{selected_model} selected"
 

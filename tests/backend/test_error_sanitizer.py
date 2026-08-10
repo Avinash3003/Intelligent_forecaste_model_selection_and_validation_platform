@@ -20,8 +20,8 @@ def test_databricks_secret_failure_becomes_an_actionable_message():
 
 
 def test_workspace_urls_never_survive_redaction():
-    raw = "Failed calling https://adb-7405615696929344.4.azuredatabricks.net/api/2.2/jobs/run-now"
-    assert "adb-7405615696929344" not in redact(raw)
+    raw = "Failed calling https://adb-1234567890123456.4.azuredatabricks.net/api/2.2/jobs/run-now"
+    assert "adb-1234567890123456" not in redact(raw)
     assert "azuredatabricks.net" not in redact(raw)
 
 

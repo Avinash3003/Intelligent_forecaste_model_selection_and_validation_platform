@@ -133,6 +133,9 @@ class DatabricksRunner(PipelineRunner):
         settings: Settings,
         history: MLflowHistoryStore | None = None,
         workspace_client: Any | None = None,
+        execution_backend: ExecutionBackend = ExecutionBackend.DATABRICKS,
+        job_name: str | None = None,
+        job_id: int | None = None,
     ) -> None:
         self._settings = settings
         self._jobs: dict[str, _DatabricksJobRecord] = {}
@@ -143,7 +146,13 @@ class DatabricksRunner(PipelineRunner):
         # history behave the same in both execution modes.
         self._history = history or MLflowHistoryStore(settings)
         self._client = workspace_client
-        self._job_id: int | None = settings.databricks_job_id
+        # Which reported backend and which deployed Job — everything else
+        # (staging, submit/poll/retrieve, error translation) is identical
+        # between Serverless and DCS, which is what lets `DcsRunner` be a
+        # three-line subclass instead of a second implementation.
+        self._execution_backend = execution_backend
+        self._job_name = job_name or settings.databricks_job_name
+        self._job_id: int | None = job_id if job_id is not None else settings.databricks_job_id
 
     # ------------------------------------------------------------------
     # Workspace client
@@ -258,7 +267,7 @@ class DatabricksRunner(PipelineRunner):
             return PipelineExecutionResult(
                 run_id=run_id,
                 job_status=record.status,
-                execution_backend=ExecutionBackend.DATABRICKS,
+                execution_backend=self._execution_backend,
                 started_at=record.started_at,
                 completed_at=record.completed_at,
                 duration_seconds=record.duration_seconds,
@@ -267,7 +276,7 @@ class DatabricksRunner(PipelineRunner):
 
         return map_summary_to_result(
             run_id=run_id,
-            execution_backend=ExecutionBackend.DATABRICKS,
+            execution_backend=self._execution_backend,
             job_status=record.status,
             summary=record.summary,
             started_at=record.started_at,
@@ -291,7 +300,7 @@ class DatabricksRunner(PipelineRunner):
             return PipelineExecutionResult(
                 run_id=run_id,
                 job_status=listing.job_status,
-                execution_backend=ExecutionBackend.DATABRICKS,
+                execution_backend=self._execution_backend,
                 started_at=listing.started_at,
                 completed_at=listing.completed_at,
                 duration_seconds=listing.duration_seconds,
@@ -300,7 +309,7 @@ class DatabricksRunner(PipelineRunner):
 
         return map_summary_to_result(
             run_id=run_id,
-            execution_backend=ExecutionBackend.DATABRICKS,
+            execution_backend=self._execution_backend,
             job_status=listing.job_status,
             summary=summary,
             started_at=listing.started_at,
@@ -441,7 +450,7 @@ class DatabricksRunner(PipelineRunner):
         if self._job_id is not None:
             return self._job_id
 
-        name = self._settings.databricks_job_name
+        name = self._job_name
         try:
             matches = list(self._workspace.jobs.list(name=name))
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
@@ -568,7 +577,7 @@ class DatabricksRunner(PipelineRunner):
             run_id=record.run_id,
             dataset_name=record.dataset_name,
             job_status=record.status,
-            execution_backend=ExecutionBackend.DATABRICKS,
+            execution_backend=self._execution_backend,
             started_at=record.started_at,
             completed_at=record.completed_at,
             duration_seconds=record.duration_seconds,

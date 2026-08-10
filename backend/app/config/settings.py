@@ -23,11 +23,15 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     max_upload_size_mb: int = 200
 
-    # Pipeline Orchestration & Execution Layer (Section 6.14). "local" runs
-    # the forecast_engine pipeline as a local subprocess; "databricks" would
-    # run it as a Databricks Job (architecture only in this phase — see
-    # app/orchestration/databricks_runner.py). Retargeting environments is
-    # this one value changing, never a code change.
+    # Pipeline Orchestration & Execution Layer (Section 6.14). One of:
+    #   local          runs forecast_engine directly, as a local subprocess.
+    #   databricks     submits to the Databricks Serverless job (primary
+    #                  cloud path — see app/orchestration/databricks_runner.py).
+    #   databricks_dcs submits to the Databricks Container Services job (the
+    #                  ACR/Docker path — see app/orchestration/dcs_runner.py).
+    # Retargeting environments is this one value changing, never a code
+    # change. An unrecognized value fails Runner construction with a clear
+    # configuration error rather than silently falling back to another mode.
     execution_mode: str = "local"
 
     # Where the standalone forecast_engine package (and its own venv) live,
@@ -122,6 +126,15 @@ class Settings(BaseSettings):
     databricks_job_name: str = "forecastiq-forecast-pipeline"
     # Set to pin an exact job id and skip the name lookup entirely.
     databricks_job_id: int | None = None
+
+    # The DCS counterpart of the two settings above — read only when
+    # EXECUTION_MODE=databricks_dcs. A separate job (and name/id), not a
+    # second meaning for the same setting: Serverless and DCS are deployed
+    # as two distinct Job resources (databricks/resources/
+    # forecast_job_serverless.yml and forecast_job_dcs.yml) so redeploying
+    # one bundle target never repoints the other mode at the wrong job.
+    databricks_dcs_job_name: str = "forecastiq-forecast-pipeline-dcs"
+    databricks_dcs_job_id: int | None = None
 
     # Unity Catalog external volume (over the ADLS `uploads` container) used
     # to stage datasets and read run output back. Matches

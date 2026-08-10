@@ -1,0 +1,156 @@
+name: Deploy Application (App Service)
+
+# Deploys the FastAPI backend and the built frontend to Azure App Service.
+# Separate from deploy-databricks.yml on purpose — this workflow never
+# touches the Databricks bundle, and that one never touches App Service.
+# Both call ci.yml as their pre-deploy gate.
+#
+# No resource name, hostname, tenant or subscription id appears in this
+# file: every environment-specific value comes from a GitHub Actions
+# variable or secret, so the workflow is safe to read publicly.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-app-production
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ---------------------------------------------------------------------
+  # Backend — FastAPI on App Service (Linux, Python). API only: forecasting
+  # runs on Databricks Serverless, never on this box.
+  #
+  # Authenticates to Azure by OIDC federation, so no Azure client secret is
+  # stored anywhere. The client id doubles as the Databricks service
+  # principal's — one identity for the whole pipeline, never a second one.
+  # ---------------------------------------------------------------------
+  deploy-backend:
+    name: Deploy backend
+    needs: tests
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Re-asserted on every deploy — idempotent, and stops portal drift
+      # from silently changing how the app starts.
+      #
+      # --workers 1 is deliberate and load-bearing: the Pipeline Executor
+      # holds submitted-run state in process memory, so a second worker
+      # would answer half the polls from a registry that never saw the run
+      # (the "no deployments, then refresh shows them" defect).
+      - name: Ensure backend startup command
+        run: |
+          az webapp config set \
+            --resource-group ${{ secrets.APP_SERVICE_RESOURCE_GROUP }} \
+            --name ${{ secrets.BACKEND_APP_NAME }} \
+            --startup-file "gunicorn --bind=0.0.0.0 --timeout 600 --workers 1 -k uvicorn.workers.UvicornWorker app.main:app"
+
+      - name: Package backend
+        run: |
+          cd backend
+          zip -rq ../backend-deploy.zip . -x ".venv/*" -x "uploads/*" -x "__pycache__/*" -x "*.pyc" -x ".env"
+
+      # Kudu zip-deploy, not the newer OneDeploy default: only this endpoint
+      # honours SCM_DO_BUILD_DURING_DEPLOYMENT, which is what installs
+      # requirements.txt. OneDeploy silently shipped a dependency-less app.
+      - name: Deploy backend
+        run: |
+          az webapp deployment source config-zip \
+            --resource-group ${{ secrets.APP_SERVICE_RESOURCE_GROUP }} \
+            --name ${{ secrets.BACKEND_APP_NAME }} \
+            --src backend-deploy.zip
+
+      - name: Verify backend health
+        run: |
+          for attempt in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ secrets.BACKEND_HOSTNAME }}/health" || true)
+            if [ "$code" = "200" ]; then echo "backend healthy"; exit 0; fi
+            echo "attempt $attempt: HTTP $code — retrying"; sleep 15
+          done
+          echo "backend did not become healthy"; exit 1
+
+  # ---------------------------------------------------------------------
+  # Frontend — the Vite build, served as static files by App Service.
+  #
+  # VITE_API_BASE_URL is baked in at build time; the Entra client id,
+  # tenant and scope are NOT — the app fetches those from the backend's
+  # /auth/config at runtime, so no tenant identifier is ever compiled into
+  # the bundle.
+  # ---------------------------------------------------------------------
+  deploy-frontend:
+    name: Deploy frontend
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: https://${{ secrets.BACKEND_HOSTNAME }}
+        run: npm run build
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # `pm2 serve --spa` rewrites unknown paths to index.html so client-side
+      # routes survive a hard refresh instead of 404ing.
+      - name: Ensure frontend startup command
+        run: |
+          az webapp config set \
+            --resource-group ${{ secrets.APP_SERVICE_RESOURCE_GROUP }} \
+            --name ${{ secrets.FRONTEND_APP_NAME }} \
+            --startup-file "pm2 serve /home/site/wwwroot --no-daemon --spa"
+
+      - name: Package frontend
+        run: cd frontend/dist && zip -rq ../../frontend-deploy.zip .
+
+      - name: Deploy frontend
+        run: |
+          az webapp deployment source config-zip \
+            --resource-group ${{ secrets.APP_SERVICE_RESOURCE_GROUP }} \
+            --name ${{ secrets.FRONTEND_APP_NAME }} \
+            --src frontend-deploy.zip
+
+      - name: Verify frontend responds
+        run: |
+          for attempt in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ secrets.FRONTEND_HOSTNAME }}/" || true)
+            if [ "$code" = "200" ]; then echo "frontend serving"; exit 0; fi
+            echo "attempt $attempt: HTTP $code — retrying"; sleep 15
+          done
+          echo "frontend did not respond"; exit 1

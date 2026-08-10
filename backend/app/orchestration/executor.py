@@ -22,6 +22,7 @@ from functools import lru_cache
 
 from app.config.settings import Settings, get_settings
 from app.orchestration.databricks_runner import DatabricksRunner
+from app.orchestration.dcs_runner import DcsRunner
 from app.orchestration.exceptions import RunnerConfigurationError
 from app.orchestration.local_runner import LocalRunner
 from app.orchestration.runner_base import PipelineRunner
@@ -67,8 +68,8 @@ def build_runner(settings: Settings) -> PipelineRunner:
     """Select the Runner `settings.execution_mode` names.
 
     Raises:
-        RunnerConfigurationError: for any value other than the two this
-            phase supports — an unambiguous failure beats silently
+        RunnerConfigurationError: for any value other than the ones this
+            platform supports — an unambiguous failure beats silently
             defaulting to a backend the deployment did not ask for.
     """
     try:
@@ -79,8 +80,14 @@ def build_runner(settings: Settings) -> PipelineRunner:
             f"Unknown execution_mode '{settings.execution_mode}'. Supported values are: {supported}."
         ) from exc
 
+    # Every branch is explicit — an `else: LocalRunner()` fallthrough would
+    # silently run a future/misconfigured cloud mode locally instead of
+    # failing, which is exactly what the ValueError branch above exists to
+    # prevent.
     if mode is ExecutionBackend.DATABRICKS:
         return DatabricksRunner(settings)
+    if mode is ExecutionBackend.DATABRICKS_DCS:
+        return DcsRunner(settings)
     return LocalRunner(settings)
 
 

@@ -230,7 +230,7 @@ def test_failure_message_is_translated_not_echoed(settings, dataset):
         life_cycle_state="TERMINATED",
         result_state="FAILED",
         state_message=(
-            "Run failed on https://adb-7405615696929344.4.azuredatabricks.net with "
+            "Run failed on https://adb-1234567890123456.4.azuredatabricks.net with "
             "X_SecretResolutionFailure"
         ),
     )
@@ -239,7 +239,7 @@ def test_failure_message_is_translated_not_echoed(settings, dataset):
 
     assert runner.get_status(run_id) is JobStatus.FAILED
     error = runner.get_run(run_id).error
-    assert "adb-7405615696929344" not in error
+    assert "adb-1234567890123456" not in error
     assert "X_SecretResolutionFailure" not in error
     assert "credential" in error.lower()
 

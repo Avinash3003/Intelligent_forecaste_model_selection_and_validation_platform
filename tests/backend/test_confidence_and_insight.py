@@ -81,9 +81,9 @@ def test_each_group_shows_only_its_own_decision():
     narrative_1_4 = service._explainability(result, True, "1 | 4")
     narrative_1_5 = service._explainability(result, False, "1 | 5")
 
-    assert "XGBoost was selected" in narrative_1_1.paragraphs[0]
-    assert "LightGBM was used as a fallback" in narrative_1_4.paragraphs[0]
-    assert "ARIMA was selected" in narrative_1_5.paragraphs[0]
+    assert "XGBoost was selected" in narrative_1_1.insight.summary
+    assert "LightGBM was used as a fallback" in narrative_1_4.insight.summary
+    assert "ARIMA was selected" in narrative_1_5.insight.summary
 
 
 def test_a_group_the_run_never_produced_an_insight_for_shows_unavailable():
@@ -100,7 +100,7 @@ def test_fallback_group_carries_its_own_caveat_and_rejection_reason():
 
     assert narrative.insight.caveat == "fallback model used"
     assert narrative.insight.key_reason == "Fallback model used"
-    assert "Rejected candidates" in narrative.paragraphs[1]
+    assert "Rejected candidates" in narrative.paragraphs[0]
 
 
 def test_key_reason_reflects_rejection_count_when_not_a_fallback():
@@ -125,6 +125,52 @@ def test_no_business_insights_at_all_is_handled_cleanly():
     narrative = service._explainability(_result({}), False, "1 | 1")
     assert narrative.available is False
     assert narrative.insight.summary is None
+
+
+def test_full_explanation_never_repeats_the_card_summary():
+    """The defect: "Full explanation" expanded to the exact sentence already
+    shown in the card body, because `paragraphs[0]` was the same
+    `concise_summary` string as `insight.summary`. `paragraphs` must only
+    ever carry content the compact card doesn't already show.
+    """
+    service = _service()
+
+    # A group with no rejection reasons and no caveats: nothing new to add,
+    # so there is nothing to expand into — never a restated summary.
+    narrative = service._explainability(_result(BUSINESS_INSIGHTS), False, "1 | 1")
+    assert narrative.paragraphs == []
+
+    # A group with a rejection reason: paragraphs carries that reason, never
+    # the summary text itself.
+    narrative_fallback = service._explainability(_result(BUSINESS_INSIGHTS), True, "1 | 4")
+    assert narrative_fallback.insight.summary not in narrative_fallback.paragraphs
+    assert all("was used as a fallback" not in p for p in narrative_fallback.paragraphs)
+
+
+def test_only_caveats_beyond_the_first_appear_in_paragraphs():
+    # caveats[0] is already shown as `insight.caveat` on the card; only the
+    # rest belong in the expanded view.
+    insights = {
+        "groups": {
+            "g": {
+                "insight": {
+                    "selected_model": "xgboost",
+                    "rejection_reasons": [],
+                    "confidence": 80.0,
+                    "caveats": ["short history", "high variance", "one outlier period"],
+                    "concise_summary": "XGBoost was selected.",
+                },
+            }
+        }
+    }
+    service = _service()
+    narrative = service._explainability(_result(insights), False, "g")
+
+    assert narrative.insight.caveat == "short history"
+    assert len(narrative.paragraphs) == 1
+    assert "high variance" in narrative.paragraphs[0]
+    assert "one outlier period" in narrative.paragraphs[0]
+    assert "short history" not in narrative.paragraphs[0]
 
 
 # ---------------------------------------------------------------------

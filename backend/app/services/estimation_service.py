@@ -133,7 +133,11 @@ class EstimationService:
 
         runtime_seconds = self._estimate_runtime_seconds(period_counts, dataset, workload, calibration)
         backend = (self._settings.execution_mode or "local").strip().lower()
-        startup_seconds = _DATABRICKS_STARTUP_SECONDS if backend == "databricks" else 0.0
+        # Both cloud modes pay a cluster/environment startup cost local
+        # execution never does; DCS's is typically longer (image pull), but
+        # a distinct figure would be invented rather than measured, so both
+        # share the one calibrated constant.
+        startup_seconds = _DATABRICKS_STARTUP_SECONDS if backend in ("databricks", "databricks_dcs") else 0.0
 
         total_seconds = runtime_seconds + startup_seconds
         low_minutes = (startup_seconds + runtime_seconds * _LOW_FACTOR) / 60.0
@@ -459,10 +463,10 @@ class EstimationService:
         databricks_low = databricks_high = None
         databricks_available = False
 
-        # Only priced when running on Databricks — local execution has no
-        # cluster cost.
+        # Only priced when running on Databricks (either cloud mode) — local
+        # execution has no cluster cost.
         rate = self._settings.compute_cost_per_hour
-        if backend == "databricks" and rate is not None and rate > 0:
+        if backend in ("databricks", "databricks_dcs") and rate is not None and rate > 0:
             databricks_low = round(low_minutes / 60.0 * rate, 2)
             databricks_high = round(high_minutes / 60.0 * rate, 2)
             databricks_available = True

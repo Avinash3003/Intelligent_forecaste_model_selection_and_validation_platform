@@ -1,0 +1,97 @@
+name: Deploy Databricks Bundle (Production)
+
+# Controlled production deployment. Triggers:
+#   - a push to main (a merged, reviewed PR)
+#   - workflow_dispatch, for a manual trigger from the Actions tab
+#
+# This workflow deploys the JOB DEFINITIONS only (the Serverless job's code,
+# dependencies and config). It never submits a run — `bundle deploy` only
+# registers/updates what `jobs run-now` would later execute. A forecast is
+# always triggered by a user through the backend (EXECUTION_MODE=databricks
+# -> DatabricksRunner -> Jobs API run-now), never by this workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Never two production deploys racing each other; never cancel one that's
+# already writing to the workspace mid-flight.
+concurrency:
+  group: deploy-databricks-production
+  cancel-in-progress: false
+
+jobs:
+  # Stage 1: tests — the identical CI checks (backend, forecast_engine,
+  # frontend build, package validation, dev bundle validation), reused via
+  # workflow_call rather than duplicated. A deploy never proceeds on code
+  # that doesn't pass what every PR is already held to.
+  tests:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # Stages 2-4: build the wheel, validate the PRODUCTION target
+  # specifically, then deploy it. Every Databricks-facing step in this job
+  # names `-t prod` explicitly — nothing here can silently fall back to
+  # `dev` (the bundle's `default: true` target), because no step omits
+  # `-t`.
+  deploy-databricks:
+    name: Build, validate and deploy (prod)
+    needs: tests
+    runs-on: ubuntu-latest
+    # A GitHub Environment named "production" — lets this deployment be
+    # gated with required reviewers / a wait timer in repo settings without
+    # any workflow change, and scopes where the production secrets below
+    # are expected to be configured.
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Stage 2: build forecast_engine wheel. The same one-line command
+      # databricks.yml's own `artifacts.forecast_engine_wheel.build` runs —
+      # built explicitly here so `bundle validate` (which does not invoke
+      # the artifact build step itself) has a wheel to check the DCS job's
+      # `libraries: whl:` glob against. `bundle deploy` below rebuilds this
+      # same wheel again itself; harmless, and identical to what running
+      # `databricks bundle deploy` locally already does.
+      - name: Build forecast_engine wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - uses: databricks/setup-cli@v0.9.0
+
+      # Stage 3: validate the production target.
+      - name: databricks bundle validate -t prod
+        working-directory: databricks
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
+          BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+        run: databricks bundle validate -t prod
+
+      # Stage 4/5: deploy — updates both job definitions (Serverless and
+      # DCS; DCS stays deployed-but-inactive per the existing subscription
+      # limitation, unchanged from before this phase) and uploads the
+      # wheel. Never runs the forecast job itself.
+      - name: databricks bundle deploy -t prod
+        working-directory: databricks
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
+          BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+        run: databricks bundle deploy -t prod
+
+  # App Service deployment is intentionally not part of this workflow yet —
+  # the App Service infrastructure doesn't exist. When it does, it becomes
+  # its own job here (or its own workflow file, deploy-app-service.yml) after
+  # `deploy-databricks`, without restructuring anything above. See
+  # docs/ci-cd.md.

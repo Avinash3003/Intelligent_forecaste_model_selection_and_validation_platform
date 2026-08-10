@@ -1,0 +1,121 @@
+# ForecastIQ — forecast pipeline Job, Databricks Serverless variant.
+#
+# The primary cloud execution path (see docs/execution-modes.md): no VM,
+# no Docker image, no ACR pull — Databricks-managed compute resolves the
+# wheel's dependencies from the `environments:` spec below. Same wheel,
+# same entry point, same four-parameter contract as
+# forecast_job_dcs.yml — the only thing that differs above the runtime
+# boundary is which compute layer runs it.
+#
+# ONE task running the complete existing forecast_engine workflow, exactly
+# as the DCS job does — the engine already sequences all 14 stages
+# internally, so splitting it into Databricks tasks here would duplicate
+# that orchestration.
+
+resources:
+  jobs:
+    forecast_pipeline_serverless:
+      name: ${var.job_name}
+      description: >-
+        Runs the complete forecast_engine pipeline (load -> preprocess -> train ->
+        evaluate -> explain -> rank -> drift-gate -> select -> insights -> MLflow)
+        as a single task on Databricks Serverless compute.
+
+      # Identical four-parameter contract to forecast_job_dcs.yml — see that
+      # file for why per-run values travel in `config` rather than as flat
+      # job parameters. Kept in lockstep on purpose: the backend's
+      # DatabricksRunner (parameterized to target either job — see
+      # app/orchestration/databricks_runner.py) builds the same job_parameters
+      # dict for both.
+      parameters:
+        - name: dataset
+          # --dataset. No default: a forgotten `--params` must fail loudly,
+          # not silently forecast whatever file was last named.
+          default: ""
+
+        - name: config
+          # --config. The complete run configuration as JSON.
+          default: ""
+
+        - name: summary_out
+          default: ${var.volumes_root}/runs/{{job.run_id}}/summary.json
+
+        - name: live_status_out
+          default: ${var.volumes_root}/runs/{{job.run_id}}/live_status.json
+
+      tasks:
+        - task_key: run_forecast_pipeline_serverless
+          # Required for python_wheel_task on serverless compute; resolves
+          # dependencies from the `environments:` spec below instead of a
+          # `libraries:` stanza on a cluster (serverless has no cluster).
+          environment_key: forecast_env
+
+          # Console script declared in pyproject.toml:
+          #   [project.scripts] forecast-engine = "forecast_engine.run_pipeline:main"
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+
+      environments:
+        - environment_key: forecast_env
+          spec:
+            client: "3"
+            dependencies:
+              # Built and uploaded by this bundle — never uploaded by hand.
+              - ../../dist/*.whl
+
+              # Everything the DCS Docker image would otherwise provide.
+              # Versions copied verbatim from forecast_engine/requirements.txt.
+              #
+              # torch / pytorch-forecasting (TFT) are deliberately omitted:
+              # ~900 MB, and proven here (forecast_job_smoke.yml) to be worth
+              # avoiding on serverless. This is a real capability gap versus
+              # DCS, not an oversight — see docs/execution-modes.md. The
+              # engine already reports TFT "Unavailable" and continues
+              # rather than failing when a model can't run, so this costs
+              # one model class, not the run.
+              - pandas>=2.2,<3.0
+              - numpy>=1.26,<2.0
+              - scipy>=1.11,<2.0
+              - scikit-learn>=1.4,<2.0
+              - openpyxl>=3.1,<4.0
+              - statsmodels>=0.14,<0.15
+              - xgboost-cpu>=2.0,<3.0
+              - lightgbm>=4.3,<5.0
+              - prophet>=1.1,<2.0
+              - shap>=0.45,<0.47
+              - openai>=1.30,<2.0
+              - mlflow>=2.15,<3.0
+
+      # MLflow tracking: Databricks compute (serverless included) defaults
+      # `MLFLOW_TRACKING_URI` to its own managed store with no environment
+      # variable needed — this is standard MLflow-on-Databricks behavior,
+      # not something this job configures. What the DCS job's
+      # `spark_env_vars` sets explicitly and this job CANNOT currently set:
+      #   - MLFLOW_REGISTRY_URI=databricks-uc (Unity Catalog model registry)
+      #   - AZURE_OPENAI_* (LLM business insights)
+      # `python_wheel_task` on serverless has no `spark_env_vars` equivalent
+      # available in this bundle's Databricks CLI version (verified against
+      # the installed CLI's bundle schema — `environment_variables` /
+      # `environment_variables_key` are not yet present). Until the CLI is
+      # upgraded to a version whose schema includes them, this job registers
+      # winning models to the legacy workspace registry rather than Unity
+      # Catalog, and reports business insights as unavailable — both fail
+      # soft by design (see forecast_engine's own graceful-degradation
+      # behavior), never a hard failure. See docs/execution-modes.md.
+
+      # A forecasting run is long; two concurrent runs would contend for the
+      # same MLflow experiment and output paths.
+      max_concurrent_runs: 1
+
+      queue:
+        enabled: true

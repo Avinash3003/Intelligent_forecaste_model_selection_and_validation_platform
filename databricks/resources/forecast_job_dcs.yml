@@ -1,14 +1,25 @@
-# ForecastIQ — forecast pipeline Job.
+# ForecastIQ — forecast pipeline Job, Databricks Container Services variant.
 #
 # ONE task running the complete existing forecast_engine workflow. The engine
 # already sequences all 14 stages internally, so splitting it into Databricks
-# tasks here would duplicate that orchestration; the first cloud deployment
-# runs it as a single reliable unit.
+# tasks here would duplicate that orchestration; the run executes as a single
+# reliable unit.
+#
+# Kept as a separate Job resource from forecast_job_serverless.yml (distinct
+# name/key) rather than a mode flag on one job: DCS and Serverless differ in
+# their whole compute block (Docker image vs. serverless environment), and
+# backend/app/orchestration/dcs_runner.py resolves this job by its own name
+# (DATABRICKS_DCS_JOB_NAME), independent of the Serverless job's id.
+#
+# Isolated deliberately (see the `dcs` target in databricks.yml): this
+# subscription cannot currently provision any DCS-supported node type, so
+# this job is deployed but not the active production path — see
+# docs/execution-modes.md.
 
 resources:
   jobs:
-    forecast_pipeline:
-      name: ${var.job_name}
+    forecast_pipeline_dcs:
+      name: ${var.dcs_job_name}
       description: >-
         Runs the complete forecast_engine pipeline (load -> preprocess -> train ->
         evaluate -> explain -> rank -> drift-gate -> select -> insights -> MLflow)
@@ -26,9 +37,9 @@ resources:
       # reads via --config. It is also the only way to express multi-valued
       # key/feature columns, which one flat job parameter cannot represent.
       #
-      # The backend's DatabricksRunner writes that file to the UC volume and
-      # sets all four parameters on every submission. For a manual run:
-      #   databricks bundle run forecast_pipeline \
+      # The backend's DcsRunner writes that file to the UC volume and sets
+      # all four parameters on every submission. For a manual run:
+      #   databricks bundle run forecast_pipeline_dcs \
       #     --params dataset=/Volumes/.../data.csv,config=/Volumes/.../config.json,...
       # -----------------------------------------------------------------
       parameters:

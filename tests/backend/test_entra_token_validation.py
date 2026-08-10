@@ -24,8 +24,8 @@ from app.auth.entra import EntraTokenValidator, TokenValidationError
 from app.auth.models import Permission, Role
 from app.config.settings import Settings
 
-TENANT = "7388a08a-fd82-4a91-973d-ed37e9ca568a"
-API_CLIENT_ID = "2c51f53a-fb90-4819-bc63-04093a045b32"
+TENANT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+API_CLIENT_ID = "66666666-7777-8888-9999-000000000000"
 API_AUDIENCE = f"api://{API_CLIENT_ID}"
 ISSUER = f"https://login.microsoftonline.com/{TENANT}/v2.0"
 

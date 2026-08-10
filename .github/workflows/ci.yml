@@ -1,0 +1,159 @@
+name: CI
+
+# Tests and build validation — pull requests and pushes to main. Also
+# `workflow_call`, so deploy-databricks.yml can run these exact checks as
+# its own pre-deploy gate instead of duplicating any of them.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_call: {}
+
+# A newer push/PR update supersedes an in-flight CI run for the same ref —
+# no reason to keep testing a commit that's already been replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Backend tests — no forecast_engine import, no Databricks/Azure
+  # credentials. LocalRunner/DatabricksRunner both treat forecast_engine as
+  # an external process, never an in-process import, so the backend's own
+  # test suite needs only its own dependencies.
+  # ---------------------------------------------------------------------
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt pytest
+
+      - name: Run backend tests
+        run: pytest tests/backend -q
+
+  # ---------------------------------------------------------------------
+  # 2. Forecast-engine tests — installs the package via pyproject.toml's
+  # `all` extra (models, explainability, llm, tracking). TFT/torch is
+  # deliberately excluded from `all` already — no test in tests/engine/
+  # exercises it, so CI stays fast without losing coverage.
+  # ---------------------------------------------------------------------
+  engine-tests:
+    name: Forecast-engine tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install forecast_engine (all extras except TFT)
+        run: pip install -e ".[all]" pytest
+
+      - name: Run forecast-engine tests
+        run: pytest tests/engine -q
+
+  # ---------------------------------------------------------------------
+  # 3. Frontend build
+  # ---------------------------------------------------------------------
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  # ---------------------------------------------------------------------
+  # 4. Python/package validation — builds the identical wheel the
+  # Databricks bundle builds (databricks/databricks.yml's own artifact
+  # command), then sanity-imports it from a clean environment. Not a
+  # second packaging mechanism: same one-line pip command DAB itself runs.
+  # ---------------------------------------------------------------------
+  package-validate:
+    name: Python package validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build forecast_engine wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - name: Install the built wheel into a clean environment and import it
+        run: |
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install dist/*.whl
+          /tmp/wheel-check/bin/python -c "import forecast_engine; print(forecast_engine.__name__, 'imports cleanly')"
+
+  # ---------------------------------------------------------------------
+  # 5. Databricks bundle validation — schema/config only, never deploys or
+  # runs anything. Targets `dev`, never `prod`: this is a cheap structural
+  # check on every PR/push, not a production gate (deploy-databricks.yml
+  # runs its own `-t prod` validate immediately before its own deploy).
+  #
+  # Skips cleanly (not a failure) when DATABRICKS_HOST isn't configured as
+  # a repository secret — e.g. a fork PR, where GitHub never exposes
+  # secrets regardless, or a maintainer who simply hasn't wired this up
+  # yet. Every other job above still runs and still gates the PR; only
+  # this one step ever touches a live workspace, and only optionally.
+  # ---------------------------------------------------------------------
+  databricks-bundle-validate:
+    name: Databricks bundle validation (dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Databricks credentials are configured
+        id: creds
+        run: echo "available=${{ secrets.DATABRICKS_HOST != '' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.creds.outputs.available == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Build forecast_engine wheel
+        if: steps.creds.outputs.available == 'true'
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - uses: databricks/setup-cli@v0.9.0
+        if: steps.creds.outputs.available == 'true'
+
+      - name: databricks bundle validate -t dev
+        if: steps.creds.outputs.available == 'true'
+        working-directory: databricks
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
+          BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+        run: databricks bundle validate -t dev
+
+      - name: Skipped — no Databricks credentials configured
+        if: steps.creds.outputs.available != 'true'
+        run: echo "DATABRICKS_HOST secret not set; skipping bundle validation for this run."

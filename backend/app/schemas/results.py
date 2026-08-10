@@ -51,12 +51,13 @@ class DashboardInsight(BaseModel):
     """The concise, structured form of the LLM narrative that the dashboard
     renders.
 
-    The engine's narrative is written for an audit trail and routinely runs to
-    several hundred words. A dashboard reader needs the decision in seconds, so
-    the fields below are hard-capped server-side (see `_dashboard_insight`)
-    rather than trusting the model to be brief — an over-long response is
-    truncated, never rendered as a wall of text. The full narrative is still
-    available verbatim under `paragraphs` for anyone who opens the details.
+    The engine emits one prose field per group (`concise_summary`), so there
+    is no separate long-form narrative to defer to — the fields below are
+    hard-capped server-side (see `_dashboard_insight`) purely so a future
+    schema change can't push an unbounded string onto the card. The
+    `paragraphs` a caller sees alongside this (via `ExplainabilityNarrative`)
+    never repeats `summary`; it holds only what the card doesn't already
+    show — full rejection reasons and any caveats beyond the first.
     """
 
     summary: str | None = None  # <= 60 words

@@ -34,10 +34,16 @@ class JobStatus(str, Enum):
 class ExecutionBackend(str, Enum):
     """Which Runner executed (or will execute) a run — Section 6.14's
     `execution.mode` configuration value.
+
+    DATABRICKS submits to the Serverless job (the primary cloud path);
+    DATABRICKS_DCS submits to the Container Services job (the ACR/Docker
+    path, kept isolated — see `databricks_runner.py` and
+    `docs/execution-modes.md`).
     """
 
     LOCAL = "local"
     DATABRICKS = "databricks"
+    DATABRICKS_DCS = "databricks_dcs"
 
 
 class PipelineExecutionRequest(BaseModel):

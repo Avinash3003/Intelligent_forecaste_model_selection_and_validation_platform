@@ -1,12 +1,17 @@
 # ForecastIQ — Databricks Asset Bundle
 #
-# Deployment model:
-#   DCS Docker image (runtime + dependencies, from ACR)
-#     + forecast_engine wheel (application code, uploaded by this bundle)
-#     -> Databricks Job -> forecast_engine pipeline execution
+# Deploys TWO Job resources sharing one forecast_engine wheel:
 #
-# The Docker image deliberately contains no application code; the wheel
-# deliberately contains no dependencies. This bundle joins the two.
+#   forecast_job_serverless.yml   Databricks-managed compute, no Docker image.
+#                                  The primary/active cloud execution path.
+#   forecast_job_dcs.yml           DCS Docker image (from ACR) + the wheel.
+#                                  Deployed and ready, kept isolated — this
+#                                  subscription cannot currently provision
+#                                  any DCS-supported node type.
+#
+# See docs/execution-modes.md. The Docker image (DCS only) deliberately
+# contains no application code; the wheel (both jobs) deliberately contains
+# no dependencies. Each job joins what it needs at run time.
 
 bundle:
   name: forecastiq
@@ -17,8 +22,16 @@ bundle:
 # ---------------------------------------------------------------------
 variables:
   job_name:
-    description: Display name of the Databricks Job.
+    description: Display name of the Serverless Databricks Job (the primary cloud execution path).
     default: forecastiq-forecast-pipeline
+
+  dcs_job_name:
+    description: >-
+      Display name of the DCS Databricks Job. A separate name from job_name
+      (not a suffix computed from it) so the backend's DATABRICKS_JOB_NAME and
+      DATABRICKS_DCS_JOB_NAME can each resolve their own job unambiguously by
+      name, per app/config/settings.py.
+    default: forecastiq-forecast-pipeline-dcs
 
   catalog:
     description: Existing Unity Catalog catalog.
@@ -99,6 +112,19 @@ variables:
     # changing those two values, not editing a path in three places.
     default: /Volumes/${var.catalog}/${var.schema}/${var.volume}
 
+  cicd_service_principal_id:
+    description: >-
+      Application (client) id of the CI/CD service principal — the same one
+      CI/CD authenticates as, and the same one the backend authenticates as
+      at runtime. Used to scope the `prod` target's workspace `root_path`
+      under that principal's own folder rather than a shared one.
+
+      Intentionally has no default: the id identifies the Azure tenant, so it
+      is supplied by the environment rather than committed. Set
+      BUNDLE_VAR_cicd_service_principal_id (see .env.example) or pass
+      --var="cicd_service_principal_id=...". A missing value fails
+      validation immediately rather than deploying to the wrong path.
+
 # ---------------------------------------------------------------------
 # Artifacts — the wheel is built and uploaded by the bundle itself.
 # `path: ..` is the repo root (this file lives in databricks/), where
@@ -164,3 +190,37 @@ targets:
       # Standard_F4as_v7) are rejected by DCS as unsupported node types. This value
       # is therefore the correct target the moment the subscription is unblocked.
       node_type_id: Standard_D4s_v5
+
+  prod:
+    mode: production
+    workspace:
+      # A fixed path, not `${workspace.current_user.userName}` — CI/CD deploys
+      # as the sp-forecastiq-cicd service principal, not an interactive user,
+      # and `mode: production` deliberately disallows the per-user identity
+      # this bundle's `dev` target relies on (which is also what `dev` prefixes
+      # every job name with — "[dev <user>] " — and `prod` does not).
+      #
+      # Scoped under the service principal's own id, not /Workspace/Shared —
+      # `bundle validate` warns that /Workspace/Shared is writable by every
+      # workspace user, which fails the least-privilege bar. This path is
+      # readable/writable only by the principal that owns it and workspace
+      # admins.
+      root_path: /Workspace/Users/${var.cicd_service_principal_id}/.bundle/${bundle.name}/${bundle.target}
+    # Deliberately no `run_as:` override. A Databricks job runs as whoever
+    # deployed it by default, and CI/CD always deploys authenticated AS
+    # sp-forecastiq-cicd (its OAuth client_id/secret) — so jobs are already
+    # owned by the right principal with no extra binding needed. Setting
+    # `run_as` explicitly here would require whichever identity deploys to
+    # additionally hold the account-level "Service Principal: User" role on
+    # sp-forecastiq-cicd (a separate, higher-tier grant only an account
+    # admin can make) purely to guard against a human deploying `prod`
+    # manually — a case this bundle discourages by convention (deploy `prod`
+    # through CI) rather than by adding an account-admin dependency for it.
+    variables:
+      # Same secret scope as `dev` — no second Key Vault/secret-scope strategy.
+      azure_openai_endpoint: "{{secrets/forecastiq/azure-openai-endpoint}}"
+      azure_openai_api_key: "{{secrets/forecastiq/azure-openai-api-key}}"
+      azure_openai_deployment: "{{secrets/forecastiq/azure-openai-deployment}}"
+      # node_type_id intentionally NOT overridden here — production keeps the
+      # top-level default (Standard_D8s_v5), unlike dev's quota-constrained
+      # override above.
