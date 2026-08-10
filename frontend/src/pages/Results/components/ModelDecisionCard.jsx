@@ -45,11 +45,20 @@ function ConfidenceStat({ confidence, breakdown }) {
           <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">{breakdown.formula}</p>
           <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Why this number</p>
           <p className="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300">{breakdown.explanation}</p>
-          <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2.5 dark:border-slate-800">
+          {/* Three components, so a weak score always says which part was
+              weak — a high backtest score beside 0% stability is the flat
+              forecast that accuracy alone cannot see. */}
+          <div className="mt-3 grid grid-cols-3 gap-2 border-t border-slate-100 pt-2.5 dark:border-slate-800">
             <div>
-              <p className="text-[11px] text-slate-400">Backtest accuracy</p>
+              <p className="text-[11px] text-slate-400">Backtest</p>
               <p className="text-xs font-medium text-slate-700 dark:text-slate-200">
                 {formatPercent(breakdown.backtestAccuracy)}
+              </p>
+            </div>
+            <div>
+              <p className="text-[11px] text-slate-400">Stability</p>
+              <p className="text-xs font-medium text-slate-700 dark:text-slate-200">
+                {formatPercent(breakdown.forecastStability)}
               </p>
             </div>
             <div>

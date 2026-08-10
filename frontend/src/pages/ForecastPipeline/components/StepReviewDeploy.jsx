@@ -4,19 +4,33 @@ import { useNavigate } from 'react-router-dom'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import Badge from '../../../components/ui/Badge'
 import Button from '../../../components/ui/Button'
+import EstimateCard from './EstimateCard'
 import { formatMonths } from '../../../utils/formatMonths'
 import { forecastModels } from '../../../data/appConfig'
 
-function SummaryRow({ label, value }) {
+// One configuration value. A compact grid cell rather than a full-width
+// row: the whole configuration then fits on one screen without scrolling,
+// which is what makes this a review step instead of a reading exercise.
+function Field({ label, value }) {
   return (
-    <div className="flex items-center justify-between border-b border-slate-50 py-3 last:border-0 dark:border-slate-800/60">
-      <span className="text-sm text-slate-400">{label}</span>
-      <span className="text-sm font-medium text-slate-700 dark:text-slate-200">{value}</span>
+    <div className="min-w-0">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</p>
+      <div className="mt-0.5 truncate text-sm font-medium text-slate-700 dark:text-slate-200">{value}</div>
     </div>
   )
 }
 
-export default function StepReviewDeploy({ file, mapping, config, deployed, deployError, runId }) {
+export default function StepReviewDeploy({
+  file,
+  mapping,
+  config,
+  deployed,
+  deployError,
+  runId,
+  estimate,
+  estimateLoading,
+  estimateError,
+}) {
   const navigate = useNavigate()
 
   const selectedModelNames = forecastModels
@@ -36,10 +50,10 @@ export default function StepReviewDeploy({ file, mapping, config, deployed, depl
             <CheckCircle2 size={30} strokeWidth={1.75} />
           </div>
           <h3 className="text-base font-semibold text-slate-800 dark:text-slate-100">
-            Run submitted successfully
+            Forecast running
           </h3>
           <p className="max-w-sm text-sm text-slate-400">
-            Job {runId} is executing. Open Results to watch it finish — the page updates on its own.
+            Run {runId} is executing. Results appear on their own — no need to open Databricks.
           </p>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2.5">
             <Button icon={LineChart} onClick={() => navigate(`/results?run=${runId}`)}>
@@ -55,7 +69,7 @@ export default function StepReviewDeploy({ file, mapping, config, deployed, depl
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       {deployError && (
         <div className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-sm text-rose-600 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
           <AlertCircle size={16} className="mt-0.5 shrink-0" />
@@ -63,40 +77,36 @@ export default function StepReviewDeploy({ file, mapping, config, deployed, depl
         </div>
       )}
 
-      <SectionContainer title="Run configuration" subtitle="Confirm before deploying to Azure Databricks">
-        <SummaryRow label="Dataset" value={file?.name ?? '—'} />
-        <SummaryRow label="Date Column" value={mapping.dateColumn || '—'} />
-        <SummaryRow label="Target Column" value={mapping.targetColumn || '—'} />
-        <SummaryRow
-          label="Key Column(s)"
-          value={mapping.keyColumns.length ? mapping.keyColumns.join(', ') : '—'}
-        />
-        <SummaryRow
-          label="Feature Column(s)"
-          value={mapping.featureColumns.length ? mapping.featureColumns.join(', ') : 'None'}
-        />
-        <SummaryRow
-          label="Forecast Horizon"
-          value={`${formatMonths(config.horizon)} (${config.horizon} months)`}
-        />
-        <SummaryRow
-          label="Default Fallback Model"
-          value={
-            forecastModels.find((m) => m.id === config.fallbackModel)?.name ?? '—'
-          }
-        />
-        <SummaryRow
-          label="Selected Models"
-          value={
-            <span className="flex flex-wrap justify-end gap-1.5">
+      {/* The estimate leads: it is the one thing on this screen a user has
+          not already seen in an earlier step. */}
+      <EstimateCard estimate={estimate} loading={estimateLoading} error={estimateError} />
+
+      <SectionContainer title="Run configuration">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 lg:grid-cols-3">
+          <Field label="Dataset" value={file?.name ?? '—'} />
+          <Field label="Date" value={mapping.dateColumn || '—'} />
+          <Field label="Target" value={mapping.targetColumn || '—'} />
+          <Field label="Keys" value={mapping.keyColumns.length ? mapping.keyColumns.join(', ') : '—'} />
+          <Field
+            label="Features"
+            value={mapping.featureColumns.length ? mapping.featureColumns.join(', ') : 'None'}
+          />
+          <Field label="Horizon" value={formatMonths(config.horizon)} />
+          <Field
+            label="Fallback"
+            value={forecastModels.find((m) => m.id === config.fallbackModel)?.name ?? '—'}
+          />
+          <div className="col-span-2 min-w-0 lg:col-span-3">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Models</p>
+            <div className="mt-1 flex flex-wrap gap-1.5">
               {selectedModelNames.map((name) => (
                 <Badge key={name} status="neutral">
                   {name}
                 </Badge>
               ))}
-            </span>
-          }
-        />
+            </div>
+          </div>
+        </div>
       </SectionContainer>
     </div>
   )

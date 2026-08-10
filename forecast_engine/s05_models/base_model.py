@@ -98,6 +98,16 @@ class TrainedModel:
     error: str | None = None
     trained_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # The fitted `BaseForecastingModel` wrapper itself (not just its raw
+    # `.model` estimator), kept so a later stage can call `.predict()`
+    # directly instead of reconstructing and refitting an identical model.
+    # Excluded from `to_dict()` like `model` — it is a live in-process
+    # object, not part of the run's serializable record. `predict()` reads
+    # only the state `train()` already wrote (see `SupervisedTreeModel.
+    # predict`'s local `history` copy) and no stage mutates a fitted
+    # wrapper, so calling it more than once is safe.
+    fitted_model: Any = None
+
     # Whether this record represents a successfully trained model
     @property
     def is_trained(self) -> bool:

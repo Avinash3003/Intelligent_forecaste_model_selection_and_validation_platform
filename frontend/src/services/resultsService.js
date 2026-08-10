@@ -20,11 +20,16 @@ export function fetchDebugSummary(runId) {
 }
 
 /**
- * The head of the file a run was built from.
+ * One page of the curated dataset a run trained on (not the raw upload —
+ * curated is the cleaned, post-preprocessing data, and much smaller).
  *
- * Returned as-is: the payload is a flat table with no derived fields, so a
- * normalizer would add a layer without changing what renders.
+ * `page` is 1-indexed: page 1 is rows 1-`pageSize`, page 2 is the next
+ * `pageSize`, and so on. Returned as-is: the payload is a flat table with no
+ * derived fields, so a normalizer would add a layer without changing what
+ * renders.
  */
-export function fetchDatasetPreview(runId) {
-  return apiClient.get(`/results/${encodeURIComponent(runId)}/dataset-preview`)
+export function fetchDatasetPreview(runId, page = 1, pageSize = 50) {
+  return apiClient.get(
+    `/results/${encodeURIComponent(runId)}/dataset-preview?page=${page}&page_size=${pageSize}`
+  )
 }

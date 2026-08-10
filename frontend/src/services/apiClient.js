@@ -27,15 +27,48 @@ async function parseJsonSafely(response) {
   }
 }
 
+// Supplies the Entra ID access token for outgoing requests. Registered
+// once by AuthProvider; until then (and in local development, where the
+// backend issues a development identity) it returns null and requests go
+// out unauthenticated.
+//
+// A function rather than a stored token on purpose: MSAL refreshes tokens
+// behind the scenes, so asking for one per request always gets a live
+// token, where caching a string here would eventually send an expired one.
+let authTokenProvider = async () => null
+
+export function setAuthTokenProvider(provider) {
+  authTokenProvider = provider
+}
+
+async function authHeaders() {
+  try {
+    const token = await authTokenProvider()
+    return token ? { Authorization: `Bearer ${token}` } : {}
+  } catch {
+    // A token that cannot be acquired must not take the request down here
+    // — it goes out unauthenticated and the API answers 401, which the
+    // caller already knows how to show.
+    return {}
+  }
+}
+
 async function request(path, { method = 'GET', body, isFormData = false } = {}) {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+
+  // FormData must set its own multipart boundary, so Content-Type is
+  // omitted for uploads — but the Authorization header applies to both.
+  const headers = {
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    ...(await authHeaders()),
+  }
 
   let response
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       method,
-      headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
+      headers,
       body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     })

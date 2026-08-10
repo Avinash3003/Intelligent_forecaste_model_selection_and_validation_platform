@@ -35,6 +35,7 @@ function normalizeResults(response) {
       confidence: response.model_decision.confidence,
       confidenceExplanation: {
         backtestAccuracy: response.model_decision.confidence_explanation.backtest_accuracy,
+        forecastStability: response.model_decision.confidence_explanation.forecast_stability,
         driftMargin: response.model_decision.confidence_explanation.drift_margin,
         formula: response.model_decision.confidence_explanation.formula,
         explanation: response.model_decision.confidence_explanation.explanation,
@@ -369,10 +370,11 @@ export default function Results() {
 
         {/* Everything below is evidence, not the decision — collapsed so the
             default page stays scannable (progressive disclosure). */}
-        {/* The source file, so a user can confirm the decision was made from
-            the data they think it was. Lazy — the fetch only happens when
-            this section is opened. */}
-        <CollapsibleSection title="Uploaded dataset">
+        {/* The curated (post-preprocessing) data, so a user can confirm the
+            decision was made from what they expect — not the raw upload,
+            which can be far larger and still carry duplicates/bad rows.
+            Lazy — the fetch only happens when this section is opened. */}
+        <CollapsibleSection title="Curated dataset">
           <DatasetPreviewPanel runId={run} />
         </CollapsibleSection>
 

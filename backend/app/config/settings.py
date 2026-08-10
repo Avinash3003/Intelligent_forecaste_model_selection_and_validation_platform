@@ -1,3 +1,4 @@
+import json
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -56,18 +57,76 @@ class Settings(BaseSettings):
     azure_openai_deployment_name: str | None = None
     azure_openai_api_version: str | None = None
 
+    # LLMOps (Section 13) — same names forecast_engine's own LLMConfig reads
+    # (forecast_engine/config/llm_config.py), so this one .env is genuinely
+    # the single place both the run and the pre-run estimate read pricing
+    # and the token budget from. USD per 1,000 tokens; unset means the
+    # estimate reports LLM cost as unavailable rather than a fabricated
+    # figure — never a guessed default.
+    azure_openai_price_input_per_1k: float | None = None
+    azure_openai_price_output_per_1k: float | None = None
+    llm_max_tokens_per_run: int | None = None
+
     mlflow_tracking_uri: str | None = None
     mlflow_registry_uri: str | None = None
     mlflow_experiment_name: str | None = None
     mlflow_artifact_location: str | None = None
 
-    # Reserved for the Azure deployment phase — unused until Databricks/
-    # Azure Storage integration is actually implemented (see
-    # app/orchestration/databricks_runner.py). Left unset by default; no
-    # dummy values are treated as real, and nothing reads these yet.
+    # --- Entra ID authentication (Phase A) --------------------------------
+    #
+    # Off by default so a fresh checkout runs locally with no Azure tenant.
+    # Every deployed environment sets AUTH_ENABLED=true; `main.py` refuses
+    # to start with it false outside `development`, so "works on my laptop"
+    # can never ship as "no authentication in production".
+    auth_enabled: bool = False
+    # Role granted to the local development identity when auth is off.
+    dev_identity_role: str = "Admin"
+
+    entra_tenant_id: str | None = None
+    # App registration (client) id of *this API*. Also accepted as a token
+    # audience, since Entra issues either this or the App ID URI depending
+    # on how the registration is configured.
+    entra_api_client_id: str | None = None
+    # The audience the frontend requests tokens for — normally
+    # `api://<entra_api_client_id>`.
+    entra_api_audience: str | None = None
+    # Sovereign/gov clouds use a different authority host; the default is
+    # the global cloud.
+    entra_authority_host: str = "https://login.microsoftonline.com"
+    # Fallback when a tenant assigns access through security groups rather
+    # than app roles: a JSON object of {"<group object id>": "<Role>"}.
+    entra_group_role_map: str | None = None
+
+    # Values the frontend needs to start a sign-in. All are public
+    # identifiers by design — a SPA client id and authority are visible in
+    # any browser — and no secret is ever served from here.
+    entra_spa_client_id: str | None = None
+
+    # --- Databricks execution (Phase A) -----------------------------------
+    #
+    # Read only when EXECUTION_MODE=databricks. Authentication prefers an
+    # Entra service-principal (OAuth M2M) over a PAT: it is scoped to the
+    # workspace, rotatable, and never a user's personal credential.
     databricks_host: str | None = None
+    databricks_client_id: str | None = None
+    databricks_client_secret: str | None = None
+    # Legacy alternative to the service principal above. Supported because
+    # some workspaces still only issue PATs; the service principal is
+    # preferred wherever both are possible.
     databricks_token: str | None = None
     databricks_workspace_id: str | None = None
+
+    # The existing bundle-deployed Job (databricks/resources/forecast_job.yml).
+    # Resolved to a job id by name at submission time, so redeploying the
+    # bundle — which mints a new job id — needs no configuration change here.
+    databricks_job_name: str = "forecastiq-forecast-pipeline"
+    # Set to pin an exact job id and skip the name lookup entirely.
+    databricks_job_id: int | None = None
+
+    # Unity Catalog external volume (over the ADLS `uploads` container) used
+    # to stage datasets and read run output back. Matches
+    # databricks.yml's `volumes_root`; no second storage location is created.
+    databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
 
     azure_storage_connection_string: str | None = None
     # Dataset preview reads the uploaded file back from ADLS. A container-
@@ -76,9 +135,49 @@ class Settings(BaseSettings):
     azure_storage_account: str | None = None
     azure_storage_sas_token: str | None = None
     azure_uploads_container: str = "uploads"
+
+    # --- Cost estimation --------------------------------------------------
+    #
+    # Blended hourly rate for the compute a run occupies (VM + DBU). Left
+    # unset by default: the correct figure depends on the subscription's
+    # pricing agreement, and inventing one would put a fabricated number on
+    # a screen people budget against. Unset simply hides cost from the
+    # estimate and shows the duration alone.
+    compute_cost_per_hour: float | None = None
+    compute_cost_currency: str = "USD"
+
     azure_tenant_id: str | None = None
     azure_client_id: str | None = None
     azure_client_secret: str | None = None
+
+    @property
+    def entra_group_role_map_parsed(self) -> dict[str, str]:
+        """`entra_group_role_map` as a dict, or empty if unset/malformed.
+
+        Deliberately fails soft: a broken mapping must not take the API
+        down, and an empty map simply means no group grants any role — a
+        closed door, which is the safe direction for an authorization
+        setting to fail in.
+        """
+        raw = (self.entra_group_role_map or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {str(key): str(value) for key, value in parsed.items()}
+
+    @property
+    def is_production_like(self) -> bool:
+        """Anything that is not explicitly local development.
+
+        Used for the startup guard that forbids running with
+        authentication disabled outside a developer's machine.
+        """
+        return (self.app_env or "").strip().lower() not in {"development", "dev", "local", "test"}
 
     @property
     def upload_path(self) -> Path:
@@ -174,6 +273,12 @@ class Settings(BaseSettings):
             "AZURE_OPENAI_API_KEY": self.azure_openai_api_key,
             "AZURE_OPENAI_DEPLOYMENT_NAME": self.azure_openai_deployment_name,
             "AZURE_OPENAI_API_VERSION": self.azure_openai_api_version,
+            # str()-converted: subprocess.Popen's env mapping requires
+            # string values, and these three are the only numeric fields
+            # forwarded here — every other one is already a string.
+            "AZURE_OPENAI_PRICE_INPUT_PER_1K": _stringify(self.azure_openai_price_input_per_1k),
+            "AZURE_OPENAI_PRICE_OUTPUT_PER_1K": _stringify(self.azure_openai_price_output_per_1k),
+            "LLM_MAX_TOKENS_PER_RUN": _stringify(self.llm_max_tokens_per_run),
             "MLFLOW_TRACKING_URI": self.mlflow_tracking_uri,
             "MLFLOW_REGISTRY_URI": self.mlflow_registry_uri,
             "MLFLOW_EXPERIMENT_NAME": self.mlflow_experiment_name,
@@ -182,6 +287,14 @@ class Settings(BaseSettings):
         env = os.environ.copy()
         env.update({key: value for key, value in forwarded.items() if value is not None})
         return env
+
+
+# str()-convert a value for a subprocess environment, or None to omit it —
+# `subprocess.Popen`'s `env` mapping requires every value to be a string,
+# unlike a plain dict, which silently accepts (and Popen then rejects) an
+# int or float.
+def _stringify(value: float | int | None) -> str | None:
+    return None if value is None else str(value)
 
 
 @lru_cache

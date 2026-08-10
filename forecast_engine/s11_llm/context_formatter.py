@@ -15,6 +15,7 @@ from typing import Any
 
 from forecast_engine.config.llm_config import LLMConfig
 from forecast_engine.core.pipeline_result import PipelineResult
+from forecast_engine.s11_llm.security import sanitize_columns, sanitize_for_prompt
 
 
 # Render the shared context block, truncated per config's limits
@@ -42,9 +43,25 @@ def _dataset_section(result: PipelineResult) -> str:
         "## Dataset & Forecast Configuration",
         f"Run ID: {result.run_id}",
         f"Dataset: {meta.get('dataset_path')} ({meta.get('raw_rows')} rows, {meta.get('raw_columns')} columns)",
-        f"Detected frequency: {meta.get('frequency')}; mode: {meta.get('mode')}",
-        f"Date column: {cfg.get('date_column')}; Target column: {cfg.get('target_column')}",
-        f"Key columns: {cfg.get('key_columns')}; Feature columns: {cfg.get('feature_columns')}",
+        f"Source data grain: {meta.get('frequency')}; mode: {meta.get('mode')}",
+        # Without this the narrative described the source grain — "daily
+        # sales" for a run whose every forecast and metric is monthly. The
+        # grain is a platform invariant (Section 6.2: forecasting is month
+        # level only, finer input is aggregated at ingestion), so it is
+        # stated rather than inferred from the detected frequency.
+        (
+            "Forecasting grain: Monthly. Every forecast, horizon step and metric in this run is "
+            "monthly; data finer than monthly was aggregated at ingestion. Describe the forecast "
+            "as monthly regardless of the source grain above."
+        ),
+        # User-supplied column names (Section 13.1, "Guardrails for
+        # injection/leakage") — the one place free text a user typed into
+        # the wizard reaches an LLM prompt, so it is sanitized here rather
+        # than trusted like every other value in this section.
+        f"Date column: {sanitize_for_prompt(cfg.get('date_column'))}; "
+        f"Target column: {sanitize_for_prompt(cfg.get('target_column'))}",
+        f"Key columns: {sanitize_columns(cfg.get('key_columns'))}; "
+        f"Feature columns: {sanitize_columns(cfg.get('feature_columns'))}",
         f"Forecast groups: {meta.get('group_count')}; forecast-ready series: {meta.get('series_count')}",
         f"Models requested: {', '.join(result.selected_models) if result.selected_models else 'all registered models'}",
     ]
@@ -224,3 +241,235 @@ def render_prompt_variables(result: PipelineResult, config: LLMConfig) -> dict[s
         "context": render_context(result, config),
         "run_id": result.run_id,
     }
+
+
+# ----------------------------------------------------------------------
+# Per-group context (Section 13.1 structured output; one call per group)
+# ----------------------------------------------------------------------
+#
+# `render_context` above renders the *entire run* — every group's backtest,
+# ranking and drift results in one block — because the legacy free-text
+# engine wrote one narrative covering every group in a single call. The
+# structured engine calls once per group instead (Section 6.1 Task 10:
+# "Explainable AI Generation... Final model x key"), so it needs a context
+# block scoped to exactly one group: small enough to keep token cost
+# proportional to what is actually being explained, and unambiguous enough
+# that the model has no other group's numbers to confuse this one's with.
+
+
+def render_group_context(result: PipelineResult, config: LLMConfig, group_id: str) -> str:
+    """The context block for one forecast group's structured insight call."""
+    sections = [
+        _dataset_section(result),
+        _group_backtest_section(result, group_id),
+        _group_forward_validation_section(result, group_id),
+        _group_explainability_section(result, group_id, config),
+        _group_ranking_section(result, group_id),
+        _group_drift_section(result, group_id),
+        _group_winner_section(result, group_id, config),
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+def _group_backtest_section(result: PipelineResult, group_id: str) -> str:
+    items = [
+        item for item in result.backtesting_metrics.get("results", []) if item.get("group_id") == group_id
+    ]
+    if not items:
+        return ""
+    lines = ["## Backtesting Metrics (Section 6.4)"]
+    for item in items:
+        overall = (item.get("backtest") or {}).get("overall") or {}
+        lines.append(
+            f"- {item.get('model_name')}: status={item.get('status')}, accuracy={overall.get('accuracy')}, "
+            f"wmape={overall.get('wmape')}, rmse={overall.get('rmse')}, mae={overall.get('mae')}"
+        )
+    return "\n".join(lines)
+
+
+def _group_forward_validation_section(result: PipelineResult, group_id: str) -> str:
+    items = [
+        item for item in result.forward_validation_results.get("results", []) if item.get("group_id") == group_id
+    ]
+    if not items:
+        return ""
+    lines = ["## Forward Forecast Validation (Section 6.5)"]
+    for item in items:
+        reasons = item.get("rejection_reasons") or []
+        lines.append(
+            f"- {item.get('model_name')}: {item.get('status')}"
+            + (f" — rejected for: {', '.join(reasons)}" if reasons else "")
+        )
+    return "\n".join(lines)
+
+
+def _group_explainability_section(result: PipelineResult, group_id: str, config: LLMConfig) -> str:
+    items = [
+        item for item in result.explainability_results.get("results", []) if item.get("group_id") == group_id
+    ]
+    if not items:
+        return ""
+    lines = ["## SHAP / Feature Importance (Section 6.10)"]
+    for item in items:
+        top_features = sorted(
+            (item.get("global_importance") or {}).items(), key=lambda pair: pair[1], reverse=True
+        )[: config.max_important_features]
+        lines.append(f"- {item.get('model_name')}: method={item.get('method')}, top_features={top_features}")
+    return "\n".join(lines)
+
+
+def _group_ranking_section(result: PipelineResult, group_id: str) -> str:
+    models = result.ranking_results.get("rankings", {}).get(group_id)
+    if not models:
+        return ""
+    lines = ["## Model Ranking (Section 6.6)"]
+    for model in models:
+        lines.append(
+            f"    {model.get('final_composite_rank')}. {model.get('model_name')} "
+            f"(composite={model.get('composite_score')}, backtest_rank={model.get('original_backtest_rank')})"
+        )
+    return "\n".join(lines)
+
+
+def _group_drift_section(result: PipelineResult, group_id: str) -> str:
+    drift = result.drift_results.get(group_id)
+    if not drift:
+        return ""
+    threshold = result.threshold_results.get(group_id, {})
+    drift_result = drift.get("result") or {}
+    return (
+        "## Drift Detection & Threshold Estimation (Sections 6.7-6.9)\n"
+        f"algorithm={drift.get('algorithm')}, statistic={drift.get('statistic')}, "
+        f"threshold_method={threshold.get('method')}, threshold_value={threshold.get('value')}, "
+        f"passed={drift_result.get('passed')}"
+    )
+
+
+def _group_winner_section(result: PipelineResult, group_id: str, config: LLMConfig) -> str:
+    winner = next((w for w in result.final_winner_models if w.get("forecast_group") == group_id), None)
+    if not winner:
+        return ""
+    rejected = (winner.get("rejected_candidates") or [])[: config.max_rejected_models_in_prompt]
+    lines = [
+        "## Final Production Model Selection (Section 6.9)",
+        f"model={winner.get('final_production_model')}, status={winner.get('final_selection_status')}, "
+        f"fallback={winner.get('fallback_flag')}, composite_score={winner.get('composite_ranking_score')}, "
+        f"final_rank={winner.get('final_rank')}",
+    ]
+    if rejected:
+        lines.append(f"Rejected candidates: {[(c.get('model_name'), c.get('reason')) for c in rejected]}")
+    if winner.get("fallback_flag"):
+        reasons = (winner.get("failure_reasons") or [])[: config.max_rejected_models_in_prompt]
+        lines.append(f"Configured fallback model: {result.fallback_model}")
+        lines.append(f"Fallback trigger: {winner.get('fallback_trigger')}")
+        if reasons:
+            lines.append(f"Why each original candidate failed: {[(r.get('model_name'), r.get('reason')) for r in reasons]}")
+    return "\n".join(lines)
+
+
+def group_decision_facts(result: PipelineResult, group_id: str) -> dict[str, Any]:
+    """The plain facts one group's structured insight is built from —
+    consumed by both the LLM prompt-variable builder and the deterministic
+    template fallback, so the two paths are guaranteed to agree on what
+    "the facts" are.
+    """
+    winner = next((w for w in result.final_winner_models if w.get("forecast_group") == group_id), {})
+    model_name = winner.get("final_production_model") or "—"
+    is_fallback = bool(winner.get("fallback_flag"))
+
+    backtest_item = next(
+        (
+            item
+            for item in result.backtesting_metrics.get("results", [])
+            if item.get("group_id") == group_id and item.get("model_name") == model_name
+        ),
+        {},
+    )
+    overall = (backtest_item.get("backtest") or {}).get("overall") or {}
+    wmape = _as_float(overall.get("wmape"))
+
+    rejected = [
+        {"model_name": c.get("model_name"), "reason": c.get("reason")}
+        for c in (winner.get("rejected_candidates") or [])
+        if c.get("model_name")
+    ]
+    if is_fallback:
+        rejected = [
+            {"model_name": r.get("model_name"), "reason": r.get("reason")}
+            for r in (winner.get("failure_reasons") or [])
+            if r.get("model_name")
+        ]
+
+    caveats: list[str] = []
+    series = next((g for g in result.forecast_groups if g.get("group_id") == group_id), {})
+    if not series.get("meets_minimum_history", True):
+        caveats.append("short history")
+    if is_fallback:
+        caveats.append("fallback model used")
+
+    # A simple, always-available confidence: backtest accuracy alone. The
+    # richer 3-component score (backtest + forecast stability + drift
+    # margin) lives in the backend (`app/services/confidence.py`) because
+    # forecast stability needs the *rendered* forecast series, which this
+    # engine-side facts extractor does not carry. The dashboard's displayed
+    # confidence uses that richer backend score, not this field — this one
+    # exists so the LLM/template has *something* to reference while writing
+    # about confidence, never as the number of record.
+    confidence_estimate = round(100.0 - wmape, 1) if wmape is not None else None
+
+    return {
+        "group_id": group_id,
+        "selected_model": model_name,
+        "wmape": wmape,
+        "is_fallback": is_fallback,
+        "fallback_trigger": winner.get("fallback_trigger"),
+        "rejected_candidates": rejected,
+        "confidence_estimate": confidence_estimate,
+        "caveats": caveats,
+    }
+
+
+def group_grounding_metrics(result: PipelineResult, group_id: str) -> dict[str, float | int | None]:
+    """Every number that would legitimately appear in this group's
+    insight — the fact set `grounding.check_grounding` verifies claims
+    against.
+    """
+    facts = group_decision_facts(result, group_id)
+    metrics: dict[str, float | int | None] = {
+        "wmape": facts["wmape"],
+        "confidence_estimate": facts["confidence_estimate"],
+    }
+
+    backtest_item = next(
+        (
+            item
+            for item in result.backtesting_metrics.get("results", [])
+            if item.get("group_id") == group_id and item.get("model_name") == facts["selected_model"]
+        ),
+        {},
+    )
+    overall = (backtest_item.get("backtest") or {}).get("overall") or {}
+    for key in ("mape", "rmse", "mae", "smape", "accuracy"):
+        metrics[key] = _as_float(overall.get(key))
+
+    ranking = result.ranking_results.get("rankings", {}).get(group_id) or []
+    winning_rank = next((m for m in ranking if m.get("model_name") == facts["selected_model"]), {})
+    metrics["composite_score"] = _as_float(winning_rank.get("composite_score"))
+    metrics["final_rank"] = _as_float(winning_rank.get("final_composite_rank"))
+    metrics["original_backtest_rank"] = _as_float(winning_rank.get("original_backtest_rank"))
+
+    drift = result.drift_results.get(group_id) or {}
+    metrics["drift_statistic"] = _as_float(drift.get("statistic"))
+    threshold = result.threshold_results.get(group_id) or {}
+    metrics["drift_threshold"] = _as_float(threshold.get("value"))
+
+    return metrics
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

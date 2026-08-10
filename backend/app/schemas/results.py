@@ -14,6 +14,10 @@ class ConfidenceExplanation(BaseModel):
     """
 
     backtest_accuracy: float | None = None
+    # How closely the forward forecast's variation matches the group's own
+    # history. None when either side was too short to have a meaningful
+    # spread — the component is then renormalized away, not scored as zero.
+    forecast_stability: float | None = None
     drift_margin: float | None = None
     formula: str
     explanation: str
@@ -178,6 +182,28 @@ class MLflowRunInfo(BaseModel):
     models_registered: int | None = None
 
 
+class LLMTraceSummary(BaseModel):
+    """Run-level LLM usage (Section 13.4) — every field the phase's
+    expected report names: calls, tokens, latency, cost, prompt version,
+    groundedness, retries. Sourced verbatim from the engine's
+    `LLMTraceStore.summary()`, never recomputed here.
+    """
+
+    call_count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    average_latency_ms: float | None = None
+    # None when no per-call cost could be computed (pricing not
+    # configured) — rendered as "unavailable", never a fabricated $0.
+    estimated_cost_usd: float | None = None
+    retry_count: int = 0
+    groundedness_rate: float | None = None
+    prompt_version: str | None = None
+    token_budget: int | None = None
+    token_budget_exhausted: bool = False
+
+
 class ResultsResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -196,3 +222,4 @@ class ResultsResponse(BaseModel):
     shap_drivers: list[ShapDriver] = Field(default_factory=list)
     underlying_metrics: UnderlyingMetrics
     mlflow_run: MLflowRunInfo = Field(default_factory=MLflowRunInfo)
+    llm_trace: LLMTraceSummary = Field(default_factory=LLMTraceSummary)

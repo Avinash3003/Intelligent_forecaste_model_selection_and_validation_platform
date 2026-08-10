@@ -4,31 +4,33 @@ import RangeSlider from '../../../components/ui/RangeSlider'
 import Checkbox from '../../../components/ui/Checkbox'
 import Select from '../../../components/ui/Select'
 import { formatMonths, formatMonthsShort } from '../../../utils/formatMonths'
-import { forecastModels, forecastHorizonRange, forecastHorizonTicks } from '../../../data/appConfig'
+import {
+  forecastModels,
+  fallbackModelOptions,
+  forecastHorizonRange,
+  forecastHorizonTicks,
+} from '../../../data/appConfig'
 
 export default function StepForecastConfiguration({ config, onChange, errors }) {
-  // The fallback must remain part of the evaluated set, so deselecting it
-  // is blocked here rather than silently corrected after the fact.
   const toggleModel = (modelId, checked) => {
-    if (!checked && modelId === config.fallbackModel) return
     const next = checked
       ? [...config.selectedModels, modelId]
       : config.selectedModels.filter((id) => id !== modelId)
     onChange('selectedModels', next)
   }
 
-  // Choosing a fallback also selects it for evaluation, so the two can
-  // never disagree (the requirement: a fallback is always evaluated too).
-  const selectFallback = (modelId) => {
-    onChange('fallbackModel', modelId)
-    if (!config.selectedModels.includes(modelId)) {
-      onChange('selectedModels', [...config.selectedModels, modelId])
-    }
-  }
+  // The fallback is a baseline, not a competitor — it is deliberately
+  // independent of the evaluated set (Section 6.9). It only ever runs when
+  // every candidate has already failed, so requiring it to also be one of
+  // those candidates would rule out exactly the simple, robust baselines
+  // the fallback path exists to reach for.
+  const selectFallback = (modelId) => onChange('fallbackModel', modelId)
 
-  const fallbackOptions = forecastModels
-    .filter((model) => config.selectedModels.includes(model.id))
-    .map((model) => ({ value: model.id, label: model.name, sublabel: model.description }))
+  const fallbackOptions = fallbackModelOptions.map((model) => ({
+    value: model.id,
+    label: model.name,
+    sublabel: model.description,
+  }))
 
   return (
     <div className="space-y-5">
@@ -71,11 +73,10 @@ export default function StepForecastConfiguration({ config, onChange, errors }) 
                 key={model.id}
                 checked={config.selectedModels.includes(model.id)}
                 onChange={(checked) => toggleModel(model.id, checked)}
-                disabled={isFallback}
-                label={isFallback ? `${model.name} · fallback` : model.name}
+                label={isFallback ? `${model.name} · also fallback` : model.name}
                 description={
                   isFallback
-                    ? 'Selected as the default fallback, so it always participates in evaluation.'
+                    ? 'Also configured as the fallback baseline for this run.'
                     : model.description
                 }
               />
@@ -112,7 +113,8 @@ export default function StepForecastConfiguration({ config, onChange, errors }) 
             error={!!errors?.fallbackModel}
           />
           <p className="mt-1.5 text-xs text-slate-400">
-            Only evaluated models can serve as the fallback.
+            Used only if every candidate fails validation. A simple seasonal baseline is
+            recommended — it always carries the history's seasonality through the horizon.
           </p>
           {errors?.fallbackModel && (
             <p className="mt-1.5 text-xs text-rose-500">{errors.fallbackModel}</p>

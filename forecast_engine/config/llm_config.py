@@ -1,15 +1,23 @@
-"""LLM Business Insights configuration (Section 6.12).
+"""LLM Business Insights configuration (Section 6.12) + LLMOps (Section 13).
 
 The platform uses Azure OpenAI exclusively — there is no provider
-abstraction to configure a choice between. Every value the Azure OpenAI
-Chat Completions call needs (endpoint, credential, deployment, API
+abstraction to configure a choice between providers. Every value an Azure
+OpenAI Chat Completions call needs (endpoint, credential, deployment, API
 version) lives here, centralized, and is populated from environment
 variables rather than ever being hardcoded. A prompt's *wording* is a
-separate concern, kept in `forecast_engine/llm/prompts/`.
+separate concern, kept in `forecast_engine/s11_llm/prompts/`.
 
 Credentials are read from the environment once, at config-construction
 time, and held only in memory for the lifetime of the run — never written
 to a log, a report, or `PipelineResult`.
+
+This module also carries every LLMOps knob Section 13 requires: token
+pricing (13.2 — configurable, never invented), a per-run token budget
+(13.2), model routing between a cheap and a strong deployment (13.2), and
+the fallback deployment used when the primary is unavailable (13.2/11 —
+reliability). All of it defaults to "off" or "unconfigured" rather than a
+guessed value, so an unconfigured deployment degrades visibly instead of
+reporting a number nobody set.
 """
 
 from __future__ import annotations
@@ -26,9 +34,50 @@ AZURE_OPENAI_API_KEY_ENV_VAR = "AZURE_OPENAI_API_KEY"
 AZURE_OPENAI_DEPLOYMENT_NAME_ENV_VAR = "AZURE_OPENAI_DEPLOYMENT_NAME"
 AZURE_OPENAI_API_VERSION_ENV_VAR = "AZURE_OPENAI_API_VERSION"
 
+# Model routing (Section 13.2): a cheaper deployment for the common case —
+# a single candidate that passed cleanly — and a stronger one reserved for
+# the harder case, a decision with several rejected candidates to explain.
+# Both are optional; an unset routing deployment simply means routing
+# always uses the primary deployment above.
+AZURE_OPENAI_DEPLOYMENT_SIMPLE_ENV_VAR = "AZURE_OPENAI_DEPLOYMENT_SIMPLE"
+AZURE_OPENAI_DEPLOYMENT_COMPLEX_ENV_VAR = "AZURE_OPENAI_DEPLOYMENT_COMPLEX"
+
+# Fallback provider (Section 11/13.2): a second Azure OpenAI deployment —
+# a different resource, region, or SKU — tried only when the primary
+# raises. Endpoint/key default to the primary's own when unset, so a
+# deployment only needs to set a different deployment *name* to enable
+# this on the same resource (e.g. a second, higher-quota deployment).
+AZURE_OPENAI_FALLBACK_ENDPOINT_ENV_VAR = "AZURE_OPENAI_FALLBACK_ENDPOINT"
+AZURE_OPENAI_FALLBACK_API_KEY_ENV_VAR = "AZURE_OPENAI_FALLBACK_API_KEY"
+AZURE_OPENAI_FALLBACK_DEPLOYMENT_ENV_VAR = "AZURE_OPENAI_FALLBACK_DEPLOYMENT"
+
+# Pricing (Section 8.5.2/13.2) — USD per 1,000 tokens. Never defaulted to a
+# real-looking number: an unset price means cost is reported as
+# unavailable, never fabricated. Set these from the Azure OpenAI resource's
+# actual rate card for the deployed model/region.
+AZURE_OPENAI_PRICE_INPUT_PER_1K_ENV_VAR = "AZURE_OPENAI_PRICE_INPUT_PER_1K"
+AZURE_OPENAI_PRICE_OUTPUT_PER_1K_ENV_VAR = "AZURE_OPENAI_PRICE_OUTPUT_PER_1K"
+AZURE_OPENAI_PRICE_INPUT_PER_1K_SIMPLE_ENV_VAR = "AZURE_OPENAI_PRICE_INPUT_PER_1K_SIMPLE"
+AZURE_OPENAI_PRICE_OUTPUT_PER_1K_SIMPLE_ENV_VAR = "AZURE_OPENAI_PRICE_OUTPUT_PER_1K_SIMPLE"
+AZURE_OPENAI_PRICE_INPUT_PER_1K_COMPLEX_ENV_VAR = "AZURE_OPENAI_PRICE_INPUT_PER_1K_COMPLEX"
+AZURE_OPENAI_PRICE_OUTPUT_PER_1K_COMPLEX_ENV_VAR = "AZURE_OPENAI_PRICE_OUTPUT_PER_1K_COMPLEX"
+
+# Section 13.2's per-run token ceiling. Generous enough that a normal-sized
+# run never brushes it, low enough that a pathological run (thousands of
+# keys, a retry storm) cannot run away unbounded.
+LLM_MAX_TOKENS_PER_RUN_ENV_VAR = "LLM_MAX_TOKENS_PER_RUN"
+
 # Azure OpenAI requires an explicit API version; this is the fallback used
 # only when the environment variable above is not set.
 _DEFAULT_API_VERSION = "2024-10-21"
+
+# The active prompt version (Section 13.1 — "prompt versioning as a
+# first-class artifact"). Bumping this is how a prompt-wording change is
+# rolled forward, and pointing it back at an older value is how one is
+# rolled back — both are a config change, not a code change. See
+# `s11_llm/prompt_library.py` for how a version resolves to prompt files.
+LLM_PROMPT_VERSION_ENV_VAR = "LLM_PROMPT_VERSION"
+_DEFAULT_PROMPT_VERSION = "v2"
 
 
 @dataclass(frozen=True)
@@ -52,7 +101,7 @@ class LLMConfig:
     api_version: str = _DEFAULT_API_VERSION
 
     temperature: float = 0.2
-    max_tokens: int = 700
+    max_tokens: int = 500
     timeout_seconds: float = 30.0
     max_retries: int = 1
 
@@ -63,10 +112,71 @@ class LLMConfig:
     max_important_features: int = 5
     max_rejected_models_in_prompt: int = 5
 
+    # --- LLMOps (Section 13) ------------------------------------------
+
+    prompt_version: str = _DEFAULT_PROMPT_VERSION
+
+    # Bounded retry count for a structured response that fails schema
+    # validation (Section 13.1) — the failure is fed back into the retry
+    # so the model sees exactly what was wrong, not just "try again".
+    max_validation_retries: int = 2
+
+    # Section 13.2's per-run ceiling. None (the default) means unbounded —
+    # explicit opt-in, since an accidental low default would silently
+    # truncate insights on a deployment that never asked for a budget.
+    max_tokens_per_run: int | None = None
+
+    # Model routing (Section 13.2). Both optional; a group's decision
+    # routes to the simple deployment when it has zero rejected candidates
+    # and to the complex one otherwise, falling back to `deployment_name`
+    # for whichever tier has no deployment configured.
+    deployment_name_simple: str | None = None
+    deployment_name_complex: str | None = None
+
+    # Fallback provider (Section 11/13.2). Endpoint/key fall back to the
+    # primary's own when unset — only the deployment name is required to
+    # enable this.
+    fallback_endpoint: str | None = None
+    fallback_api_key: str | None = None
+    fallback_deployment_name: str | None = None
+
+    # Pricing (Section 8.5.2/13.2), USD per 1,000 tokens. `None` means
+    # "not configured" and must render as "cost unavailable", never $0 or a
+    # guessed figure.
+    price_input_per_1k: float | None = None
+    price_output_per_1k: float | None = None
+    price_input_per_1k_simple: float | None = None
+    price_output_per_1k_simple: float | None = None
+    price_input_per_1k_complex: float | None = None
+    price_output_per_1k_complex: float | None = None
+
     # Whether enough credentials are present to attempt a call (all-or-nothing)
     @property
     def is_configured(self) -> bool:
         return bool(self.endpoint and self.api_key and self.deployment_name)
+
+    # Whether a distinct fallback deployment is usable
+    @property
+    def has_fallback(self) -> bool:
+        return bool(self.fallback_deployment_name and (self.fallback_endpoint or self.endpoint) and (self.fallback_api_key or self.api_key))
+
+    # Pricing for one routing tier, or the primary rate if the tier has none
+    # configured. Returns (input_rate, output_rate); either element is None
+    # when that side is not configured — never a fabricated number.
+    def pricing_for(self, tier: str) -> tuple[float | None, float | None]:
+        if tier == "simple" and self.price_input_per_1k_simple is not None:
+            return self.price_input_per_1k_simple, self.price_output_per_1k_simple
+        if tier == "complex" and self.price_input_per_1k_complex is not None:
+            return self.price_input_per_1k_complex, self.price_output_per_1k_complex
+        return self.price_input_per_1k, self.price_output_per_1k
+
+    # Deployment name for one routing tier, falling back to the primary
+    def deployment_for(self, tier: str) -> str | None:
+        if tier == "simple" and self.deployment_name_simple:
+            return self.deployment_name_simple
+        if tier == "complex" and self.deployment_name_complex:
+            return self.deployment_name_complex
+        return self.deployment_name
 
     # Standard configuration: credentials from the environment
     @classmethod
@@ -86,6 +196,19 @@ class LLMConfig:
             api_key=_env(AZURE_OPENAI_API_KEY_ENV_VAR),
             deployment_name=_env(AZURE_OPENAI_DEPLOYMENT_NAME_ENV_VAR),
             api_version=_env(AZURE_OPENAI_API_VERSION_ENV_VAR, _DEFAULT_API_VERSION),
+            prompt_version=_env(LLM_PROMPT_VERSION_ENV_VAR, _DEFAULT_PROMPT_VERSION),
+            max_tokens_per_run=_env_int(LLM_MAX_TOKENS_PER_RUN_ENV_VAR),
+            deployment_name_simple=_env(AZURE_OPENAI_DEPLOYMENT_SIMPLE_ENV_VAR),
+            deployment_name_complex=_env(AZURE_OPENAI_DEPLOYMENT_COMPLEX_ENV_VAR),
+            fallback_endpoint=_env(AZURE_OPENAI_FALLBACK_ENDPOINT_ENV_VAR),
+            fallback_api_key=_env(AZURE_OPENAI_FALLBACK_API_KEY_ENV_VAR),
+            fallback_deployment_name=_env(AZURE_OPENAI_FALLBACK_DEPLOYMENT_ENV_VAR),
+            price_input_per_1k=_env_float(AZURE_OPENAI_PRICE_INPUT_PER_1K_ENV_VAR),
+            price_output_per_1k=_env_float(AZURE_OPENAI_PRICE_OUTPUT_PER_1K_ENV_VAR),
+            price_input_per_1k_simple=_env_float(AZURE_OPENAI_PRICE_INPUT_PER_1K_SIMPLE_ENV_VAR),
+            price_output_per_1k_simple=_env_float(AZURE_OPENAI_PRICE_OUTPUT_PER_1K_SIMPLE_ENV_VAR),
+            price_input_per_1k_complex=_env_float(AZURE_OPENAI_PRICE_INPUT_PER_1K_COMPLEX_ENV_VAR),
+            price_output_per_1k_complex=_env_float(AZURE_OPENAI_PRICE_OUTPUT_PER_1K_COMPLEX_ENV_VAR),
         )
 
     # Build from a flat mapping, ignoring unknown keys
@@ -107,3 +230,25 @@ def _env(name: str, default: str | None = None) -> str | None:
     # `is_configured` would still be False, but with a misleading value.
     value = os.environ.get(name)
     return value.strip() if value and value.strip() else default
+
+
+# Read an environment variable as a float, or None if unset/unparsable
+def _env_float(name: str) -> float | None:
+    raw = _env(name)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+# Read an environment variable as an int, or None if unset/unparsable
+def _env_int(name: str) -> int | None:
+    raw = _env(name)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None

@@ -74,6 +74,15 @@ class MLflowConfig:
     # this cap.
     max_hyperparameter_params: int = 200
 
+    # Per-key figures (forecast, model comparison, drift overlay) are drawn per
+    # forecasting group, so their cost grows with the dataset: 10 groups is 30
+    # figures, 500 groups would be 1,500. They are browsing aids in the MLflow
+    # UI — nothing in the platform reads them, which reads only
+    # `run/summary.json` — so a sample conveys the same thing as the full set
+    # at a fraction of the time. Run-level summary charts are unaffected: there
+    # are three of them regardless of dataset size.
+    max_plot_groups: int = 10
+
     # Return the standard configuration: credentials from the environment
     @classmethod
     def default(cls) -> "MLflowConfig":

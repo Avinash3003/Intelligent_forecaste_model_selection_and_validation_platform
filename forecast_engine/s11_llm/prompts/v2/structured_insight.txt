@@ -1,0 +1,26 @@
+Below is the complete decision record for ONE forecast group from one pipeline run.
+
+$context
+
+Respond with ONLY a JSON object matching exactly this shape (no other keys, no nesting beyond what is shown):
+
+{
+  "selected_model": "<the final production model's name, exactly as given>",
+  "rejection_reasons": ["<one short phrase per rejected candidate, at most $max_rejections entries>"],
+  "confidence": <the confidence percentage given in the context, as a number 0-100, or null if none was given>,
+  "caveats": ["<at most 2 short phrases: short history, high missingness, fallback used, thin evidence — only ones that actually apply>"],
+  "concise_summary": "<2 to 4 short sentences, 60 words maximum total>"
+}
+
+Rules for "concise_summary":
+- Sentence 1 MUST open by naming the model in "selected_model" above (never a different, rejected candidate) — start with what won, not with what lost. "XGBoost was selected, with a backtest WMAPE of 8.2%." When the winner is the fallback model, say so immediately: "<fallback model> was used as the fallback baseline because <the one reason every candidate failed>." Never lead a sentence with a rejected candidate's name.
+- Sentence 2 (if there is a genuinely useful reason): the ONE thing that mattered most in this decision — what it beat, why a rejection happened, or why the fallback ran.
+- Do not restate metrics that already appear as their own dashboard values (rank, drift statistic, threshold) unless that value IS the reason.
+- Do not phrase a composite ranking score as an absolute quality claim — it is relative to this group's own surviving candidates only.
+- Do not describe the pipeline stages or the selection process itself.
+- Do not write an introduction, a heading, or a closing summary.
+- Write for a business reader who has five seconds.
+
+Every number you write in "concise_summary" or "confidence" MUST match a number present in the context above exactly (or a plain restatement of it, e.g. "off by about 8% on average" for a WMAPE of 8.2%) — never a rounding, an estimate, or a number not present in the context.
+
+Respond with the JSON object only.

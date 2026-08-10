@@ -16,7 +16,6 @@ module only assembles what exists into one place per model.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from app.orchestration.exceptions import RunNotReadyError
@@ -32,6 +31,7 @@ from app.schemas.results import (
     ForecastPoint,
     ForwardValidationRule,
     GroupOption,
+    LLMTraceSummary,
     MLflowRunInfo,
     ModelDecision,
     RankingBreakdown,
@@ -91,6 +91,7 @@ class ResultService:
             shap_drivers=self._shap_drivers(result, selected, winner),
             underlying_metrics=self._underlying_metrics(result, selected, winner, drift),
             mlflow_run=self._mlflow_run(result),
+            llm_trace=self._llm_trace(result),
         )
 
     # ------------------------------------------------------------------
@@ -140,6 +141,21 @@ class ResultService:
         overall = self._winning_backtest_metrics(result, group_id, model_name)
         drift_result = drift.get("result") or {}
 
+        # Forecast stability compares the forward forecast against this
+        # group's own observed history (Section 6.10). Both are passed
+        # verbatim; `compute_confidence` decides whether they are long
+        # enough to score and renormalizes if not.
+        group = next((g for g in result.forecast_groups if g.get("group_id") == group_id), {})
+        history_values = [
+            observation.get("value")
+            for observation in (group.get("recent_history") or [])
+            if isinstance(observation.get("value"), (int, float))
+        ]
+        forecast_values = [
+            value for value in ((winner.get("forecast") or {}).get("values") or [])
+            if isinstance(value, (int, float))
+        ]
+
         # A fallback never runs drift validation (Section 6.9) — its
         # statistic/threshold are passed as None rather than whatever the
         # last-tried ranked candidate happened to leave in `drift`, which
@@ -149,6 +165,8 @@ class ResultService:
             drift_statistic=None if fallback_used else drift.get("statistic"),
             drift_threshold=None if fallback_used else drift.get("threshold_value"),
             is_fallback=fallback_used,
+            forecast_values=forecast_values,
+            history_values=history_values,
         )
         # `drift_result` is still read for the underlying-metrics panel's
         # verbatim "Passed"/"Not Passed" label — unrelated to confidence.
@@ -162,6 +180,11 @@ class ResultService:
                     round(confidence.backtest_accuracy, 4) if confidence.backtest_accuracy is not None else None
                 ),
                 drift_margin=round(confidence.drift_margin, 4) if confidence.drift_margin is not None else None,
+                forecast_stability=(
+                    round(confidence.forecast_stability, 4)
+                    if confidence.forecast_stability is not None
+                    else None
+                ),
                 formula=confidence.formula,
                 explanation=confidence.explanation,
             ),
@@ -430,61 +453,72 @@ class ResultService:
         fallback_used: bool = False,
         group_id: str | None = None,
     ) -> ExplainabilityNarrative:
-        insights = result.business_insights or {}
-        available = bool(insights.get("available"))
+        """Build the dashboard's narrative directly from this group's own
+        structured insight (`business_insights["groups"][group_id]`).
 
-        # The engine writes one narrative covering every forecast group, but
-        # this dashboard shows exactly one. Rendering the whole thing meant a
-        # reader scrolled past nine other groups' decisions to find theirs, so
-        # the winner summary is narrowed to the selected group first. The
-        # business explanation is genuinely run-level and is kept whole.
-        winner_summary = _group_section(insights.get("winner_model_summary"), group_id)
-        paragraphs = [text for text in (winner_summary, insights.get("business_explanation")) if text]
+        The engine now generates one JSON payload per group (Section 6.1
+        Task 10, "Final model x key") rather than one free-text narrative
+        covering every group — so there is no longer a whole-run blob to
+        slice apart for a single group. This method is a direct field
+        mapping, not a parser: nothing here infers structure from prose.
+        """
+        insights = result.business_insights or {}
+        groups = insights.get("groups") or {}
+        entry = groups.get(group_id) if group_id else None
+        payload = (entry or {}).get("insight") if entry else None
+
+        if not payload:
+            return ExplainabilityNarrative(
+                key_model_headline="No business summary was generated for this run.",
+                paragraphs=[],
+                available=False,
+                status=(entry or {}).get("error") or insights.get("status"),
+                insight=DashboardInsight(),
+            )
+
+        selected_model = payload.get("selected_model") or "—"
+        summary = str(payload.get("concise_summary") or "")
+        rejection_reasons = list(payload.get("rejection_reasons") or [])
+        caveats = list(payload.get("caveats") or [])
+
+        paragraphs = [summary] if summary else []
+        if rejection_reasons:
+            paragraphs.append("Rejected candidates: " + "; ".join(rejection_reasons))
+
+        headline = f"{selected_model} — fallback used" if fallback_used else f"{selected_model} selected"
 
         return ExplainabilityNarrative(
-            key_model_headline=insights.get("forecast_summary") or "No business summary was generated for this run.",
+            key_model_headline=headline,
             paragraphs=paragraphs,
-            available=available,
-            status=insights.get("status"),
-            insight=self._dashboard_insight(insights, paragraphs, fallback_used, winner_summary),
+            available=True,
+            status=entry.get("validation_status") if entry else None,
+            insight=self._dashboard_insight(summary, rejection_reasons, caveats, fallback_used),
         )
 
     def _dashboard_insight(
         self,
-        insights: dict[str, Any],
-        paragraphs: list[str],
-        fallback_used: bool = False,
-        winner_summary: str = "",
+        summary: str,
+        rejection_reasons: list[str],
+        caveats: list[str],
+        fallback_used: bool,
     ) -> DashboardInsight:
-        """Compress the narrative into the three short fields the dashboard shows.
+        """The three short fields the dashboard card shows.
 
-        This is a guardrail, not a formatter: the caps are enforced here so an
-        unusually long (or unusually structured) model response can never push a
-        multi-hundred-word paragraph onto the dashboard. The engine's prompt asks
-        for brevity, but a prompt is a request — this is the enforcement.
+        The engine's schema (`s11_llm/schema.py`) already caps
+        `concise_summary` at 70 words before this ever runs — this is the
+        belt to that suspenders, so a future schema change or a template
+        fallback path can never push an unbounded string onto the
+        dashboard even if the upstream cap is ever loosened.
         """
-        if not insights.get("available"):
+        if not summary:
             return DashboardInsight()
 
-        source = (winner_summary or "").strip()
-        if not source and paragraphs:
-            source = paragraphs[0].strip()
-        if not source:
-            return DashboardInsight()
-
-        sentences = _split_sentences(source)
-        # Sentences that are pure field echoes ("Selected model: ARIMA") are
-        # dropped: the dashboard already shows those as their own tiles, and
-        # repeating them here is exactly the duplication this card exists to
-        # remove.
-        prose = [s for s in sentences if not re.match(r"^(selected model|model)\s*:", s, re.I)] or sentences
-        summary, summary_cut = _cap_words(" ".join(prose[:2]), 60)
-
-        caveat, caveat_cut = _cap_words(_pick_caveat(sentences), 25)
-        key_reason, reason_cut = _cap_words(_derive_key_reason(source, fallback_used), 15)
+        capped_summary, summary_cut = _cap_words(summary, 60)
+        caveat, caveat_cut = _cap_words(caveats[0], 25) if caveats else ("", False)
+        key_reason, reason_cut = _cap_words(_derive_key_reason(rejection_reasons, fallback_used), 15)
 
         return DashboardInsight(
-            summary=summary or None,
+            summary=capped_summary or None,
             key_reason=key_reason or None,
             caveat=caveat or None,
             truncated=summary_cut or caveat_cut or reason_cut,
@@ -550,6 +584,23 @@ class ResultService:
             models_registered=info.get("models_registered"),
         )
 
+    def _llm_trace(self, result: PipelineExecutionResult) -> LLMTraceSummary:
+        insights = result.business_insights or {}
+        trace = insights.get("trace_summary") or {}
+        return LLMTraceSummary(
+            call_count=trace.get("call_count") or 0,
+            prompt_tokens=trace.get("prompt_tokens") or 0,
+            completion_tokens=trace.get("completion_tokens") or 0,
+            total_tokens=trace.get("total_tokens") or 0,
+            average_latency_ms=trace.get("average_latency_ms"),
+            estimated_cost_usd=trace.get("estimated_cost_usd"),
+            retry_count=trace.get("retry_count") or 0,
+            groundedness_rate=trace.get("groundedness_rate"),
+            prompt_version=insights.get("prompt_version"),
+            token_budget=insights.get("token_budget"),
+            token_budget_exhausted=bool(insights.get("token_budget_exhausted")),
+        )
+
     # ------------------------------------------------------------------
     # Formatting
     # ------------------------------------------------------------------
@@ -566,131 +617,31 @@ class ResultService:
         return f"{float(value):.2f}%" if isinstance(value, (int, float)) else "—"
 
 
+
 # --- dashboard insight helpers -------------------------------------------------
-# Kept module-level and pure so the length caps are trivially testable and are
-# applied identically no matter which narrative section they are fed.
-
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-# The engine's narrative is markdown-ish: group headers, bullets, bold runs.
-# Those read as noise once the text is placed in a dashboard card, so they are
-# stripped before the text is ever measured or capped.
-_LIST_MARKER = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
-_GROUP_HEADER = re.compile(r"^\s*[\w\s|]{0,40}?\d+\s*[:|]\s*")
-_MD_EMPHASIS = re.compile(r"[*_`#]+")
-# A sentence that merely reports the absence of a problem is not a caveat.
-_NEGATED = re.compile(r"\b(no|not|none|without|never)\b", re.IGNORECASE)
-
-
-def _clean(text: str) -> str:
-    """Flatten one narrative line into plain prose."""
-    line = _MD_EMPHASIS.sub("", text or "")
-    line = _GROUP_HEADER.sub("", line)
-    line = _LIST_MARKER.sub("", line)
-    return line.strip(" -\u2013\u2014\t")
-
-
-def _split_sentences(text: str) -> list[str]:
-    """Sentences, with markdown structure flattened away first.
-
-    Bulleted lines rarely end in a full stop, so each line is treated as its own
-    sentence before the usual punctuation split — otherwise an entire bullet
-    list collapses into one run-on "sentence".
-    """
-    sentences: list[str] = []
-    for raw_line in (text or "").splitlines():
-        line = _clean(raw_line)
-        if not line:
-            continue
-        for part in _SENTENCE_END.split(line):
-            part = part.strip()
-            # A fragment with no letters (a stray bullet, a lone full stop
-            # left behind by marker stripping) is punctuation, not a sentence.
-            if re.search(r"[A-Za-z]", part):
-                sentences.append(part if part.endswith((".", "!", "?")) else part + ".")
-    return sentences
+# The engine now hands back structured JSON per group (schema-validated and
+# grounding-checked before this service ever sees it — see
+# forecast_engine/s11_llm/schema.py and grounding.py), so there is no
+# narrative text left to parse here. What remains is a length guardrail
+# (belt-and-suspenders against the engine's own 70-word cap) and a small,
+# purely mechanical "why" label — no string-sniffing of prose.
 
 
 def _cap_words(text: str, limit: int) -> tuple[str, bool]:
-    """Return the text capped at `limit` words, and whether it was cut."""
-    words = _clean(text).split()
+    """Return `text` capped at `limit` words, and whether it was cut."""
+    words = (text or "").split()
     if len(words) <= limit:
         return " ".join(words), False
-    return " ".join(words[:limit]).rstrip(",;:") + "\u2026", True
+    return " ".join(words[:limit]).rstrip(",;:") + "…", True
 
 
-def _pick_caveat(sentences: list[str]) -> str:
-    """The first sentence that genuinely warns about something.
-
-    Negated forms ("No fallback model was used") match the same keywords as a
-    real caveat but mean the opposite, so they are excluded rather than shown
-    as a warning the run does not actually carry.
+def _derive_key_reason(rejection_reasons: list[str], fallback_used: bool) -> str:
+    """A short label for why the winner won — derived from structured
+    fields, never from matching words in prose.
     """
-    for sentence in sentences:
-        lowered = sentence.lower()
-        if not any(w in lowered for w in ("however", "caveat", "caution", "limited", "risk", "unstable", "short history")):
-            continue
-        if _NEGATED.search(lowered):
-            continue
-        return sentence
-    return ""
-
-
-def _derive_key_reason(text: str, fallback_used: bool) -> str:
-    """A short label for why the winner won.
-
-    `fallback_used` comes from the selection report rather than from string
-    matching: the narrative mentions the word "fallback" even when saying one
-    was *not* needed, which previously mislabelled clean runs.
-    """
-    lowered = (text or "").lower()
     if fallback_used:
         return "Fallback model used"
-    if "drift" in lowered and "passed" in lowered:
-        return "Passed drift validation"
-    if "wmape" in lowered or "accuracy" in lowered:
-        return "Best backtest accuracy"
+    if rejection_reasons:
+        count = len(rejection_reasons)
+        return f"Outranked {count} rejected candidate{'s' if count != 1 else ''}"
     return "Highest ranked candidate"
-
-
-def _group_section(narrative: str | None, group_id: str | None) -> str:
-    """Return only the block of `narrative` written about `group_id`.
-
-    The engine labels each group's section with the group id followed by a
-    colon ("1 | 1:"), which is a join of the key values — meaningful to the
-    pipeline, meaningless as a heading on a dashboard that already names the
-    selected key. The matching block is returned with that label stripped; if
-    no label is found the narrative is returned unchanged, so a single-series
-    run (which has no per-group headings) still shows its text.
-    """
-    text = (narrative or "").strip()
-    if not text or not group_id:
-        return text
-
-    # Sections start at a line that is exactly the group id plus a colon.
-    pattern = re.compile(r"^\s*(.+?)\s*:\s*$", re.MULTILINE)
-    matches = list(pattern.finditer(text))
-    labelled = [m for m in matches if _looks_like_group_label(m.group(1))]
-    if not labelled:
-        return text
-
-    for index, match in enumerate(labelled):
-        if match.group(1).strip() != group_id.strip():
-            continue
-        start = match.end()
-        end = labelled[index + 1].start() if index + 1 < len(labelled) else len(text)
-        return text[start:end].strip()
-
-    # The narrative exists but says nothing about this group — better to show
-    # nothing than another group's decision under this group's heading.
-    return ""
-
-
-def _looks_like_group_label(candidate: str) -> bool:
-    """Distinguish a section heading from a bullet that happens to end in a colon.
-
-    Group ids are short and may contain spaces and separators ("1 | 1",
-    "store=1 · item=1"), so length and word count identify them; a leading
-    dash marks a list item, which is content rather than a heading.
-    """
-    text = (candidate or "").strip()
-    return bool(text) and len(text) <= 80 and len(text.split()) <= 8 and not text.startswith(("-", "*", "\u2022"))

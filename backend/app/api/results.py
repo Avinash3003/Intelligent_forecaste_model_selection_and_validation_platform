@@ -7,6 +7,8 @@ dashboard — there is no dummy payload behind this route.
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.auth.dependencies import require
+from app.auth.models import Permission, Principal
 from app.orchestration.exceptions import RunNotReadyError, UnknownRunError
 from app.schemas.debug import DebugSummary
 from app.schemas.dataset_preview import DatasetPreview
@@ -27,13 +29,14 @@ debug_service = DebugService()
 def get_results(
     run_id: str,
     group_id: str | None = Query(None, description="Business key to display; defaults to the first group."),
+    principal: Principal = Depends(require(Permission.RESULTS_READ)),
 ) -> ResultsResponse:
     try:
         return result_service.get_results(run_id, group_id)
     except UnknownRunError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="That run could not be found.") from exc
     except RunNotReadyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail="This run has not finished yet.") from exc
 
 
 @router.get(
@@ -41,25 +44,36 @@ def get_results(
     response_model=DebugSummary,
     summary="Developer debugging mode — structured execution summary for a run",
 )
-def get_debug_summary(run_id: str) -> DebugSummary:
+def get_debug_summary(
+    run_id: str,
+    principal: Principal = Depends(require(Permission.MODEL_INSPECT)),
+) -> DebugSummary:
     # Deliberately does not require COMPLETED — a run that is still
     # executing or that failed is exactly what a developer most wants to
     # inspect; only an unknown run_id is an error here.
     try:
         return debug_service.get_debug_summary(run_id)
     except UnknownRunError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="That run could not be found.") from exc
 
 
 @router.get("/{run_id}/dataset-preview", response_model=DatasetPreview)
 def get_dataset_preview(
     run_id: str,
+    page: int = Query(1, ge=1, description="1-indexed page number."),
+    page_size: int = Query(50, ge=1, le=200, description="Rows per page (max 200)."),
     service: DatasetPreviewService = Depends(get_dataset_preview_service),
+    principal: Principal = Depends(require(Permission.DATASET_READ)),
 ) -> DatasetPreview:
-    """The head of the file this run was built from.
+    """One page of the curated dataset this run trained on.
 
-    Never raises for a missing file: an unreadable dataset makes the preview
-    unavailable, not the whole Results page, so this returns `available=False`
-    with the reason instead of an error status.
+    Page 1 is rows 1-`page_size`, page 2 is the next `page_size`, and so on —
+    plain offset paging rather than a byte-range cursor, since the curated
+    file (post-preprocessing, one row per key per period) is small enough to
+    parse once and slice per page.
+
+    Never raises for a missing file: no curated dataset for this run makes
+    the preview unavailable, not the whole Results page, so this returns
+    `available=False` with the reason instead of an error status.
     """
-    return service.get_preview(run_id)
+    return service.get_preview(run_id, page=page, page_size=page_size)

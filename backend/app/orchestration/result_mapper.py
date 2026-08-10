@@ -44,6 +44,11 @@ def map_summary_to_result(
             "group_count": summary.get("group_count"),
             "series_count": summary.get("series_count"),
             "selected_models": summary.get("selected_models"),
+            # Written by Stage 5 (Persist Curated Dataset) — absent if curated
+            # storage was disabled for the run, which the dataset preview
+            # treats as "nothing to show" rather than falling back to the
+            # much larger raw upload.
+            "curated_dataset_uri": summary.get("curated_dataset_uri"),
         },
         forecast_results=summary.get("evaluation_report") or {},
         metrics={

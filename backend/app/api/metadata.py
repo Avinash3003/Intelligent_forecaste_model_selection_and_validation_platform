@@ -7,8 +7,10 @@ already-loaded DataFrame, which keeps them independently testable and easy
 to swap out (e.g. UploadService -> Azure Blob Storage) later.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth.dependencies import require
+from app.auth.models import Permission, Principal
 from app.schemas.metadata import MetadataRequest, MetadataValidationResponse
 from app.services.dataset_loader import DatasetLoader
 from app.services.metadata_interpreter import MetadataInterpreter
@@ -25,7 +27,10 @@ validation_engine = ValidationEngine()
 
 
 @router.post("/validate", response_model=MetadataValidationResponse, summary="Interpret and validate metadata mapping")
-def validate_metadata(request: MetadataRequest) -> MetadataValidationResponse:
+def validate_metadata(
+    request: MetadataRequest,
+    principal: Principal = Depends(require(Permission.FORECAST_CONFIGURE)),
+) -> MetadataValidationResponse:
     """Validate a user's Date/Target/Key/Feature column selections against
     the dataset they previously uploaded.
 

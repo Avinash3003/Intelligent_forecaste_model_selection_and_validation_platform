@@ -1,8 +1,16 @@
-"""Business Insight result model — the output contract of Section 6.12.
+"""Business Insight result model — the output contract of Section 6.12,
+restructured for Section 13's LLMOps requirements.
 
-Every field is narrative text produced by the LLM, kept strictly separate
-from every deterministic report earlier in the pipeline: nothing here is
-ever read back into a forecasting decision.
+Structured JSON per forecast group is the primary contract now (Section
+13.1) — `GroupInsight` wraps one group's validated `InsightPayload` plus
+everything about *how* it was produced (provider, prompt version, retry
+count, grounding/validation status). `BusinessInsightReport` is the
+run-level envelope: one `GroupInsight` per group, plus the run's aggregate
+LLM trace summary (Section 13.4/8.5.3) so a caller never has to walk every
+call individually just to answer "how many tokens did this run use".
+
+Nothing here is ever read back into a forecasting decision — same
+invariant the old free-text report carried, just over structured data now.
 """
 
 from __future__ import annotations
@@ -11,40 +19,79 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from forecast_engine.s11_llm.schema import InsightPayload
+
+
+@dataclass
+class GroupInsight:
+    """One forecast group's structured explanation, plus its provenance."""
+
+    group_id: str
+    payload: InsightPayload | None
+    provider: str  # azure_openai | azure_openai_fallback | template | none
+    prompt_version: str
+    validation_status: str  # passed | failed
+    grounding_status: str  # grounded | ungrounded | skipped
+    retry_count: int = 0
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "insight": self.payload.to_dict() if self.payload else None,
+            "provider": self.provider,
+            "prompt_version": self.prompt_version,
+            "validation_status": self.validation_status,
+            "grounding_status": self.grounding_status,
+            "retry_count": self.retry_count,
+            "error": self.error,
+        }
+
 
 @dataclass
 class BusinessInsightReport:
-    """Structured LLM output — Section 6.12's OUTPUT list, one field each."""
+    """Structured LLM output — one `GroupInsight` per forecast group."""
 
-    technical_explanation: str | None = None
-    business_explanation: str | None = None
-    forecast_summary: str | None = None
-    winner_model_summary: str | None = None
-    important_features: str | None = None
-    forecast_risks: str | None = None
-    drift_summary: str | None = None
+    groups: dict[str, GroupInsight] = field(default_factory=dict)
 
     available: bool = False
     status: str = "not_generated"
     provider: str | None = None
     model_name: str | None = None
+    prompt_version: str | None = None
     section_errors: dict[str, str] = field(default_factory=dict)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # The run's aggregate LLM trace summary (from `LLMTraceStore.summary()`)
+    # — calls, tokens, latency, cost, groundedness, retries, budget usage.
+    # Carried here (rather than only on a separate trace store the caller
+    # has to remember to also serialize) so it travels with the run summary
+    # for free, and reaches MLflow/the backend through the same path every
+    # other report field already does.
+    trace_summary: dict[str, Any] = field(default_factory=dict)
+
+    # Section 13.2's per-run token budget: what was configured, what was
+    # actually spent, and whether the budget was exhausted before every
+    # group got an insight (in which case the remaining groups fell back
+    # to the template path — see `insight_engine.py`).
+    token_budget: int | None = None
+    token_budget_exhausted: bool = False
 
     # Serialize the insight report to a plain dict
     def to_dict(self) -> dict[str, Any]:
         return {
-            "technical_explanation": self.technical_explanation,
-            "business_explanation": self.business_explanation,
-            "forecast_summary": self.forecast_summary,
-            "winner_model_summary": self.winner_model_summary,
-            "important_features": self.important_features,
-            "forecast_risks": self.forecast_risks,
-            "drift_summary": self.drift_summary,
+            "groups": {group_id: insight.to_dict() for group_id, insight in self.groups.items()},
             "available": self.available,
             "status": self.status,
             "provider": self.provider,
             "model_name": self.model_name,
+            "prompt_version": self.prompt_version,
             "section_errors": self.section_errors,
             "generated_at": self.generated_at.isoformat(timespec="seconds"),
+            "trace_summary": self.trace_summary,
+            "token_budget": self.token_budget,
+            "token_budget_exhausted": self.token_budget_exhausted,
         }
+
+    def get(self, group_id: str) -> GroupInsight | None:
+        return self.groups.get(group_id)

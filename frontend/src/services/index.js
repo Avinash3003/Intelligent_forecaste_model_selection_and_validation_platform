@@ -10,5 +10,7 @@ export {
   JOB_STATUSES,
   TERMINAL_STATUSES,
 } from './deploymentService'
+export { estimateRun } from './estimationService'
+export { fetchCurrentUser } from './authService'
 export { fetchResults, fetchDebugSummary, fetchDatasetPreview } from './resultsService'
 export { fetchMLflowRun } from './mlflowService'

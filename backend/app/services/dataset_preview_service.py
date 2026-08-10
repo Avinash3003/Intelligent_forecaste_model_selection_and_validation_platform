@@ -1,146 +1,108 @@
 """Dataset preview for the Results page.
 
-Shows the user the file they actually uploaded, alongside the decision made
-from it. The blob is read from ADLS with a container-scoped read-only SAS
-where one is configured, and from the local upload directory otherwise — so
-the same endpoint serves both the local-execution and Azure deployments
-without the frontend knowing which is in play.
+Shows the *curated* dataset — the cleaned, deduplicated, monthly-aggregated
+data every model actually trained on — rather than the raw upload. This is a
+deliberate choice, not just a convenience:
 
-Only the first slice of the file is ever fetched. A preview is for confirming
-"is this the right data", not for browsing a 17MB CSV in a browser tab.
+  * It is what a "does this look right" check should be judging. The raw
+    upload can carry duplicates, bad rows and a finer grain than the platform
+    forecasts at; the curated file is post-preprocessing, so it is the same
+    data the decision on this page was actually made from.
+  * It is far smaller. A daily upload across many keys aggregates down to one
+    row per key per month, so pagination cost stays low without needing the
+    raw file's byte-range machinery.
+
+Curated storage is local-disk only today (Section 6.2/6.14) — there is no
+cloud backend yet — so this reads a plain file path, resolved from the run's
+own summary, and never touches Azure.
 """
 
 from __future__ import annotations
 
 import csv
-import io
+from collections import OrderedDict
 from pathlib import Path
 
-from app.config.settings import Settings, get_settings
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.schemas.dataset_preview import DatasetPreview
 
-# Enough rows to recognise the file and spot an obvious mapping mistake.
-PREVIEW_ROWS = 50
-# Bytes pulled from the blob — sized to the 50 rows actually rendered rather
-# than to a round number. 50 rows of a typical wide CSV is well under 32KB,
-# and over a cross-region link the transfer is what the user waits on.
-PREVIEW_BYTES = 32_000
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+# Parsed curated files are small (see module docstring) but re-parsing on
+# every page click is still wasted work, so the last few runs a user looked
+# at stay cached. Bounded so browsing many runs in one session cannot grow
+# this without limit.
+_CACHE_CAPACITY = 5
 
 
 class DatasetPreviewService:
-    """Reads the head of a run's source dataset."""
+    """Reads a run's curated dataset, one page of rows at a time."""
 
-    def __init__(
-        self,
-        settings: Settings | None = None,
-        executor: PipelineExecutor | None = None,
-    ) -> None:
-        self._settings = settings or get_settings()
+    def __init__(self, executor: PipelineExecutor | None = None) -> None:
         self._executor = executor or get_pipeline_executor()
-        # Built once and reused: constructing a BlobServiceClient per request
-        # re-does the TLS handshake, which dominated the call (~5.5s measured
-        # against ~0.3s once the client is kept).
-        self._blob_service = None
+        self._cache: "OrderedDict[str, tuple[list[str], list[list[str]]]]" = OrderedDict()
 
-    def get_preview(self, run_id: str) -> DatasetPreview:
-        name = self._dataset_name(run_id)
-        if not name:
-            return DatasetPreview(available=False, status="This run has no recorded dataset name.")
+    def get_preview(self, run_id: str, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> DatasetPreview:
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
 
-        raw, source = self._read(name)
-        if raw is None:
+        parsed = self._load(run_id)
+        if parsed is None:
             return DatasetPreview(
                 available=False,
-                dataset_name=name,
-                status=f"'{name}' could not be read from {source}.",
+                status="No curated dataset was recorded for this run — curated storage may be disabled.",
             )
-        return self._parse(name, raw, source)
+        columns, all_rows = parsed
+
+        total_rows = len(all_rows)
+        total_pages = max(1, -(-total_rows // page_size))  # ceiling division
+        start = (page - 1) * page_size
+        page_rows = all_rows[start : start + page_size]
+
+        return DatasetPreview(
+            available=True,
+            columns=columns,
+            rows=page_rows,
+            page=page,
+            page_size=page_size,
+            total_rows=total_rows,
+            total_pages=total_pages,
+        )
 
     # ------------------------------------------------------------------
-    # Locating the file
+    # Loading (cached per run)
     # ------------------------------------------------------------------
 
-    def _dataset_name(self, run_id: str) -> str | None:
+    def _load(self, run_id: str) -> tuple[list[str], list[list[str]]] | None:
+        if run_id in self._cache:
+            self._cache.move_to_end(run_id)
+            return self._cache[run_id]
+
+        path = self._curated_path(run_id)
+        if path is None or not path.is_file():
+            return None
+
+        with path.open("r", newline="", encoding="utf-8", errors="replace") as handle:
+            reader = csv.reader(handle)
+            try:
+                columns = next(reader)
+            except StopIteration:
+                return [], []
+            rows = list(reader)
+
+        self._cache[run_id] = (columns, rows)
+        if len(self._cache) > _CACHE_CAPACITY:
+            self._cache.popitem(last=False)
+        return columns, rows
+
+    def _curated_path(self, run_id: str) -> Path | None:
         try:
             result = self._executor.get_result(run_id)
         except Exception:  # noqa: BLE001 - an unreadable run simply has no preview
             return None
-        # dataset_path is what the engine recorded for the run; only its
-        # basename is needed, since the blob is addressed by name inside the
-        # uploads container.
-        path = (result.run_metadata or {}).get("dataset_path") or ""
-        return Path(path).name if path else None
-
-    def _read(self, name: str) -> tuple[bytes | None, str]:
-        """Try ADLS first, then the local upload directory."""
-        blob, source = self._read_blob(name)
-        if blob is not None:
-            return blob, source
-
-        local = Path(self._settings.upload_dir) / name
-        if local.is_file():
-            with local.open("rb") as handle:
-                return handle.read(PREVIEW_BYTES), "local upload directory"
-        return None, source
-
-    def _read_blob(self, name: str) -> tuple[bytes | None, str]:
-        account = self._settings.azure_storage_account
-        sas = self._settings.azure_storage_sas_token
-        connection = self._settings.azure_storage_connection_string
-        if not (account and sas) and not connection:
-            return None, "Azure storage (not configured)"
-
-        try:
-            if self._blob_service is None:
-                from azure.storage.blob import BlobServiceClient
-
-                self._blob_service = (
-                    BlobServiceClient(
-                        account_url=f"https://{account}.blob.core.windows.net",
-                        credential=sas,
-                    )
-                    if account and sas
-                    else BlobServiceClient.from_connection_string(connection)
-                )
-
-            blob = self._blob_service.get_blob_client(self._settings.azure_uploads_container, name)
-            # A ranged download, so file size never determines request cost.
-            return blob.download_blob(offset=0, length=PREVIEW_BYTES).readall(), "Azure Blob Storage"
-        except Exception:  # noqa: BLE001 - fall through to the local copy
-            return None, "Azure Blob Storage"
-
-    # ------------------------------------------------------------------
-    # Parsing
-    # ------------------------------------------------------------------
-
-    def _parse(self, name: str, raw: bytes, source: str) -> DatasetPreview:
-        text = raw.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-
-        # The final line of a ranged read is almost certainly cut mid-row;
-        # dropping it avoids rendering a half-parsed record as though it were
-        # real data.
-        if len(lines) > 1:
-            lines = lines[:-1]
-
-        reader = csv.reader(io.StringIO("\n".join(lines)))
-        rows = list(reader)
-        if not rows:
-            return DatasetPreview(
-                available=False, dataset_name=name, status="The file appears to be empty."
-            )
-
-        header, body = rows[0], rows[1 : PREVIEW_ROWS + 1]
-        return DatasetPreview(
-            available=True,
-            dataset_name=name,
-            source=source,
-            columns=header,
-            rows=body,
-            preview_row_count=len(body),
-            truncated=len(raw) >= PREVIEW_BYTES,
-        )
+        uri = (result.run_metadata or {}).get("curated_dataset_uri")
+        return Path(uri) if uri else None
 
 
 _service: DatasetPreviewService | None = None

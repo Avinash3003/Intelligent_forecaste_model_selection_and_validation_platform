@@ -21,7 +21,7 @@ export default function WizardFooter({
       {isLastStep ? (
         <Button onClick={onNext} disabled={loading}>
           {loading ? <Loader2 size={16} className="animate-spin" /> : <Rocket size={16} />}
-          {loading ? 'Deploying…' : 'Deploy & Run'}
+          {loading ? 'Starting…' : 'Run Forecast'}
         </Button>
       ) : (
         <Button className="flex-row-reverse" onClick={onNext} disabled={loading || nextDisabled}>

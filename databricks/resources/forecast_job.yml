@@ -15,9 +15,21 @@ resources:
         as a single task on a Databricks Container Services cluster.
 
       # -----------------------------------------------------------------
-      # Job parameters. Names mirror the existing forecast_engine CLI flags
-      # (forecast_engine/run_pipeline.py) — nothing invented here.
-      # Override per run: databricks bundle run ... --params dataset=...,horizon=12
+      # Job parameters — exactly four, all of which the caller always sets.
+      #
+      # A python_wheel_task's argument list is FIXED at deploy time: every
+      # declared flag is passed on every run, whether or not it has a value.
+      # That makes per-run flags actively dangerous here — `--horizon ""`
+      # crashes argparse, and `--models ""` trains a model named "". So all
+      # per-run values (columns, models, fallback, horizon, run id, dataset
+      # name) travel inside the `config` JSON file instead, which the engine
+      # reads via --config. It is also the only way to express multi-valued
+      # key/feature columns, which one flat job parameter cannot represent.
+      #
+      # The backend's DatabricksRunner writes that file to the UC volume and
+      # sets all four parameters on every submission. For a manual run:
+      #   databricks bundle run forecast_pipeline \
+      #     --params dataset=/Volumes/.../data.csv,config=/Volumes/.../config.json,...
       # -----------------------------------------------------------------
       parameters:
         - name: dataset
@@ -29,60 +41,26 @@ resources:
           default: ""
 
         - name: config
-          # --config. JSON forecast configuration, the exact payload the backend's
-          # Metadata Interpreter already emits. This is the recommended entry path:
-          # it carries key_columns/feature_columns as JSON arrays, which a single
-          # flat job parameter cannot express (see report for detail).
-          # Empty string = not used; the explicit column flags below apply instead.
+          # --config. The complete run configuration as JSON — the payload the
+          # backend's Metadata Interpreter emits, plus this run's models,
+          # fallback_model, horizon, run_id and dataset_name.
           default: ""
-
-        - name: date_column
-          # --date-column. Dataset-specific, so it carries no default for the
-          # same reason as `dataset` above.
-          default: ""
-
-        - name: target_column
-          # --target-column. Dataset-specific; no default.
-          default: ""
-
-        - name: key_columns
-          # --key-columns. Space-separated values are passed as ONE argparse token,
-          # so this reliably carries a single key column only. Use `config` above
-          # for composite business keys.
-          default: ""
-
-        - name: feature_columns
-          default: "" # --feature-columns, same single-value caveat as key_columns
-
-        - name: aggregation_method
-          default: sum # --aggregation-method: sum | mean | last
-
-        - name: horizon
-          default: "12" # --horizon, 6-60
-
-        - name: models
-          # --models. Same single-value caveat; empty = train every registered model.
-          default: ""
-
-        - name: fallback_model
-          default: "" # --fallback-model; empty = configured baseline (seasonal_naive)
-
-        - name: run_id
-          default: "" # --run-id; empty = engine generates fe-run-<uuid>
-
-        - name: dataset_name
-          default: "" # --dataset-name, recorded with the MLflow run
 
         - name: summary_out
-          # --summary-out. Partitioned by Databricks run id: a fixed filename
-          # meant every run overwrote the previous run's summary, so only the
-          # most recent one was ever readable. `{{job.run_id}}` is substituted
-          # by Databricks at launch.
+          # --summary-out. Partitioned by run so one run never overwrites
+          # another's output. The backend passes its own run id; the default
+          # uses the Databricks run id for manual invocations.
           #
           # Written inside forecast_files because that is currently the only UC
           # volume defined; a dedicated volume over the `artifacts` container
           # would be the eventual home.
           default: ${var.volumes_root}/runs/{{job.run_id}}/summary.json
+
+        - name: live_status_out
+          # --live-status-out. The engine rewrites this after every stage
+          # transition, and the backend polls it so a cloud run shows the same
+          # live stage trail a local run does instead of a bare "Running".
+          default: ${var.volumes_root}/runs/{{job.run_id}}/live_status.json
 
       tasks:
         - task_key: run_forecast_pipeline
@@ -96,16 +74,12 @@ resources:
             parameters:
               - --dataset
               - "{{job.parameters.dataset}}"
-              - --date-column
-              - "{{job.parameters.date_column}}"
-              - --target-column
-              - "{{job.parameters.target_column}}"
-              - --aggregation-method
-              - "{{job.parameters.aggregation_method}}"
-              - --horizon
-              - "{{job.parameters.horizon}}"
+              - --config
+              - "{{job.parameters.config}}"
               - --summary-out
               - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
 
           libraries:
             # Built and uploaded by this bundle — never uploaded by hand.

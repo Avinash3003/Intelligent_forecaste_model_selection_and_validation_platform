@@ -6,8 +6,10 @@ reusing UploadService and DatasetLoader rather than duplicating file
 resolution/parsing logic.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth.dependencies import require
+from app.auth.models import Permission, Principal
 from app.schemas.profile import ProfileRequest, ProfileResponse
 from app.services.dataset_loader import DatasetLoader
 from app.services.profile_service import ProfileService
@@ -22,7 +24,10 @@ profile_service = ProfileService()
 
 
 @router.post("", response_model=ProfileResponse, summary="Profile an uploaded dataset")
-def profile_dataset(request: ProfileRequest) -> ProfileResponse:
+def profile_dataset(
+    request: ProfileRequest,
+    principal: Principal = Depends(require(Permission.DATASET_READ)),
+) -> ProfileResponse:
     """Generate a basic schema/profile summary for a previously uploaded
     dataset. Called automatically by the frontend right after upload."""
     try:

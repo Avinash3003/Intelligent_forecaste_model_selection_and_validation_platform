@@ -16,6 +16,14 @@ true about a model on their own, independent of who else was in the race:
   * Backtest accuracy — 100% minus this model's own WMAPE from Section
     6.4's rolling backtest. An absolute error measure; a WMAPE of 8% means
     the same thing whether one model was evaluated or five.
+  * Forecast stability — how closely the forward forecast's variation
+    matches the group's own history. Section 6.10 names this as a
+    component, and it is the only one that can catch the failure backtest
+    accuracy is blind to: a model that scores well replaying history and
+    then emits a near-flat forward line. A flat forecast against a
+    strongly seasonal history is not a good forecast, however well the
+    model backtested.
+
   * Drift margin — how far below its dynamically estimated threshold
     (Section 6.8) the winning forecast's drift statistic landed. Passing
     by a hair and passing by a wide margin are both "Passed", but they are
@@ -24,23 +32,41 @@ true about a model on their own, independent of who else was in the race:
 
 A fallback model never undergoes drift validation (Section 6.9 — the
 fallback path exists specifically because no candidate reached or survived
-it), so its confidence is backtest accuracy alone, weights renormalized —
-never a fabricated 0% (the old behaviour, since `composite_ranking_score`
-is `None` on the fallback path) and never 100%.
+it), so its drift weight is renormalized away rather than counted as zero.
+Its stability is still measured, which matters: the fallback path is
+exactly where a flat forecast is most likely to ship, and without this
+component such a run reported a reassuring high confidence drawn purely
+from a backtest the forward forecast bore no resemblance to.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Backtest accuracy is weighted higher: it is a direct, well-established
-# accuracy measure, while drift margin is a validation gate's slack, a
-# useful but secondary signal.
-BACKTEST_WEIGHT = 0.7
-DRIFT_WEIGHT = 0.3
+# Backtest accuracy stays the largest single component: it is a direct,
+# well-established accuracy measure. Stability outweighs drift margin
+# because it is a property of the forecast actually being shipped, where
+# drift margin is a gate's slack.
+#
+# Any component that cannot be computed has its weight renormalized across
+# the rest, never counted as zero — a missing measurement is not evidence
+# of a bad forecast.
+BACKTEST_WEIGHT = 0.5
+STABILITY_WEIGHT = 0.3
+DRIFT_WEIGHT = 0.2
 
-FORMULA_BOTH = f"{BACKTEST_WEIGHT:.0%} × backtest accuracy + {DRIFT_WEIGHT:.0%} × drift margin"
-FORMULA_BACKTEST_ONLY = "100% backtest accuracy (drift margin not applicable — fallback path)"
+_LABELS = {
+    "backtest": "backtest accuracy",
+    "stability": "forecast stability",
+    "drift": "drift margin",
+}
+_WEIGHTS = {"backtest": BACKTEST_WEIGHT, "stability": STABILITY_WEIGHT, "drift": DRIFT_WEIGHT}
+
+# How far a forecast's variation may sit from its history's before
+# stability is scored at zero. The measure is symmetric in ratio space, so
+# a forecast with 4% of history's variation and one with 25x it score
+# alike — both are equally wrong about how much this series moves.
+MAX_VARIATION_RATIO = 4.0
 
 
 @dataclass(frozen=True)
@@ -54,6 +80,7 @@ class ConfidenceResult:
     drift_margin: float | None
     formula: str
     explanation: str
+    forecast_stability: float | None = None
 
 
 def compute_confidence(
@@ -62,6 +89,8 @@ def compute_confidence(
     drift_statistic: float | None,
     drift_threshold: float | None,
     is_fallback: bool,
+    forecast_values: list[float] | None = None,
+    history_values: list[float] | None = None,
 ) -> ConfidenceResult:
     """Compute an absolute confidence score from this model's own evidence.
 
@@ -74,18 +103,32 @@ def compute_confidence(
         drift_threshold: The dynamically estimated threshold it was
             compared against.
         is_fallback: Whether this is the fallback path — used only to
-            select the right formula/explanation text when both drift
-            values are absent (as they always are for a fallback), so the
-            "why" reads as "not applicable" rather than "missing data".
+            select the right wording when drift values are absent (as they
+            always are for a fallback), so the "why" reads as "not
+            applicable" rather than "missing data".
+        forecast_values: The forward forecast actually being shipped.
+        history_values: The same group's observed history, which the
+            forecast's variation is judged against.
 
     Returns:
         A ConfidenceResult. `confidence` is None — never a fabricated
-        number — when even backtest accuracy is unavailable.
+        number — when no component at all could be computed.
     """
-    backtest_accuracy = _backtest_accuracy(wmape)
-    drift_margin = _drift_margin(drift_statistic, drift_threshold)
+    scores: dict[str, float] = {}
 
-    if backtest_accuracy is None and drift_margin is None:
+    backtest_accuracy = _backtest_accuracy(wmape)
+    if backtest_accuracy is not None:
+        scores["backtest"] = backtest_accuracy
+
+    stability = _forecast_stability(forecast_values, history_values)
+    if stability is not None:
+        scores["stability"] = stability
+
+    drift_margin = _drift_margin(drift_statistic, drift_threshold)
+    if drift_margin is not None:
+        scores["drift"] = drift_margin
+
+    if not scores:
         explanation = (
             "The fallback baseline is excluded from the normal candidate registry by design "
             "(Section 6.9) — it is trained on demand only when every ranked candidate fails, and is "
@@ -97,43 +140,116 @@ def compute_confidence(
             confidence=None,
             backtest_accuracy=None,
             drift_margin=None,
+            forecast_stability=None,
             formula="Not available",
             explanation=explanation,
         )
 
-    if drift_margin is None:
-        # Fallback path, or a winner whose drift record is otherwise
-        # missing: weight is not silently dropped, it is renormalized onto
-        # the one component that exists.
-        confidence = backtest_accuracy
-        formula = FORMULA_BACKTEST_ONLY if is_fallback else "100% backtest accuracy (drift data unavailable)"
-        explanation = (
-            f"Based only on backtest accuracy ({backtest_accuracy:.0%}) — this is the fallback "
-            "model, which does not go through drift validation."
-            if is_fallback
-            else f"Based only on backtest accuracy ({backtest_accuracy:.0%}) — no drift record was found for this run."
-        )
-        return ConfidenceResult(confidence, backtest_accuracy, None, formula, explanation)
+    # Renormalized across whichever components exist, so an absent
+    # measurement dilutes nothing and is never scored as zero.
+    total_weight = sum(_WEIGHTS[name] for name in scores)
+    confidence = sum(_WEIGHTS[name] * value for name, value in scores.items()) / total_weight
 
-    if backtest_accuracy is None:
-        # No plausible path today (a model reaching drift validation was
-        # necessarily backtested first), kept only so this can never divide
-        # by a smaller weight total than it reports.
-        return ConfidenceResult(
-            confidence=drift_margin,
-            backtest_accuracy=None,
-            drift_margin=drift_margin,
-            formula="100% drift margin (backtest data unavailable)",
-            explanation=f"Based only on drift margin ({drift_margin:.0%}) — no backtest metrics were recorded.",
-        )
-
-    confidence = BACKTEST_WEIGHT * backtest_accuracy + DRIFT_WEIGHT * drift_margin
-    explanation = (
-        f"{backtest_accuracy:.0%} backtest accuracy (from this model's own WMAPE of {wmape:.2f}%) "
-        f"and a {drift_margin:.0%} drift margin (statistic {drift_statistic:.4g} against a threshold "
-        f"of {drift_threshold:.4g}) combine to {confidence:.0%}."
+    formula = " + ".join(
+        f"{_WEIGHTS[name] / total_weight:.0%} x {_LABELS[name]}" for name in _WEIGHTS if name in scores
     )
-    return ConfidenceResult(confidence, backtest_accuracy, drift_margin, FORMULA_BOTH, explanation)
+    if "drift" not in scores:
+        formula += " (drift margin not applicable - fallback path)" if is_fallback else " (drift data unavailable)"
+
+    return ConfidenceResult(
+        confidence=confidence,
+        backtest_accuracy=backtest_accuracy,
+        drift_margin=drift_margin,
+        forecast_stability=stability,
+        formula=formula,
+        explanation=_explain(scores, confidence, wmape, drift_statistic, drift_threshold, is_fallback),
+    )
+
+
+def _explain(
+    scores: dict[str, float],
+    confidence: float,
+    wmape: float | None,
+    drift_statistic: float | None,
+    drift_threshold: float | None,
+    is_fallback: bool,
+) -> str:
+    """One sentence naming every component that contributed, with its
+    underlying evidence — so a low score always says which part was weak."""
+    parts: list[str] = []
+    if "backtest" in scores:
+        parts.append(f"{scores['backtest']:.0%} backtest accuracy (WMAPE {wmape:.2f}%)")
+    if "stability" in scores:
+        parts.append(
+            f"{scores['stability']:.0%} forecast stability (how closely the forward forecast's "
+            "variation matches this series' own history)"
+        )
+    if "drift" in scores:
+        parts.append(
+            f"a {scores['drift']:.0%} drift margin (statistic {drift_statistic:.4g} against a "
+            f"threshold of {drift_threshold:.4g})"
+        )
+
+    joined = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + f" and {parts[-1]}"
+    sentence = f"{joined} combine to {confidence:.0%}."
+    if is_fallback:
+        sentence += (
+            " This is the fallback baseline, which does not go through drift validation, so that "
+            "component is excluded rather than counted against it."
+        )
+    return sentence
+
+
+def _forecast_stability(
+    forecast_values: list[float] | None, history_values: list[float] | None
+) -> float | None:
+    """How closely the forecast's variation matches the history's.
+
+    Scored on the ratio of the two standard deviations, symmetrically in
+    ratio space: a forecast moving far *less* than its history (the flat
+    forecast that Section 6.5.2 lists as an underfitting signal) and one
+    moving far *more* (Section 6.5.1's excessive volatility) are both
+    wrong about how much this series moves, and are penalised alike.
+
+    Returns None — never a default — when either side is too short to have
+    a meaningful spread, so an unmeasurable component is renormalized away
+    instead of fabricating a score.
+    """
+    if not forecast_values or not history_values:
+        return None
+    if len(forecast_values) < 2 or len(history_values) < 2:
+        return None
+
+    history_spread = _stdev(history_values)
+    forecast_spread = _stdev(forecast_values)
+    if history_spread is None or forecast_spread is None:
+        return None
+
+    # A genuinely flat history (a constant series) makes the ratio
+    # meaningless rather than infinite; a flat forecast is the correct
+    # answer there, so stability is simply not scored.
+    if history_spread <= 0:
+        return None
+
+    ratio = forecast_spread / history_spread
+    if ratio <= 0:
+        return 0.0
+
+    # Symmetric: ratio and 1/ratio score identically. 1.0 at a perfect
+    # match, decaying to 0 at MAX_VARIATION_RATIO in either direction.
+    closeness = min(ratio, 1.0 / ratio)
+    floor = 1.0 / MAX_VARIATION_RATIO
+    if closeness <= floor:
+        return 0.0
+    return max(0.0, min(1.0, (closeness - floor) / (1.0 - floor)))
+
+
+def _stdev(values: list[float]) -> float | None:
+    numeric = [float(v) for v in values if isinstance(v, (int, float))]
+    if len(numeric) < 2:
+        return None
+    mean = sum(numeric) / len(numeric)
+    return (sum((v - mean) ** 2 for v in numeric) / len(numeric)) ** 0.5
 
 
 def _backtest_accuracy(wmape: float | None) -> float | None:

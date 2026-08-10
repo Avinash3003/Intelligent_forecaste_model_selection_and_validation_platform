@@ -1,4 +1,4 @@
-"""Schema for the uploaded-dataset preview shown on the Results page."""
+"""Schema for the curated-dataset preview shown on the Results page."""
 
 from __future__ import annotations
 
@@ -7,13 +7,11 @@ from pydantic import BaseModel
 
 class DatasetPreview(BaseModel):
     available: bool = False
-    dataset_name: str | None = None
-    # Where the bytes came from — surfaced so a user can tell an Azure-backed
-    # run from a locally-staged one without checking configuration.
-    source: str | None = None
     columns: list[str] = []
     rows: list[list[str]] = []
-    preview_row_count: int = 0
-    # True when the file is larger than the previewed slice.
-    truncated: bool = False
+    # 1-indexed, matching how the frontend labels pages.
+    page: int = 1
+    page_size: int = 50
+    total_rows: int = 0
+    total_pages: int = 1
     status: str | None = None

@@ -5,25 +5,20 @@
 // names, supported upload formats, and the forecast-horizon scale. No run,
 // metric, cost or status data lives here: all of that comes from the API.
 
-export const currentUser = {
-  name: 'Avinash Reddy',
-  email: 'avinashreddy5142@gmail.com',
-  role: 'Platform Admin',
-  initials: 'AR',
-  avatarColor: 'bg-brand-600',
-}
-
 export const projectInfo = {
   name: 'Forecast IQ',
   tagline: 'Intelligent Forecast Model Selection & Validation Platform',
 }
 
+// `permission` names what a user must hold for the link to appear. The
+// Sidebar filters on it, the router guards the same route, and the API
+// enforces it again — the nav is a convenience, never the control.
 export const sidebarNav = [
   { label: 'Dashboard', path: '/', icon: 'LayoutDashboard' },
-  { label: 'Forecast Pipeline', path: '/forecast-pipeline', icon: 'GitBranch' },
-  { label: 'Deployments', path: '/deployments', icon: 'Rocket' },
-  { label: 'Results', path: '/results', icon: 'LineChart' },
-  { label: 'MLflow Experiments', path: '/mlflow-experiments', icon: 'FlaskConical' },
+  { label: 'Forecast Pipeline', path: '/forecast-pipeline', icon: 'GitBranch', permission: 'forecast:run' },
+  { label: 'Deployments', path: '/deployments', icon: 'Rocket', permission: 'run:read' },
+  { label: 'Results', path: '/results', icon: 'LineChart', permission: 'results:read' },
+  { label: 'MLflow Experiments', path: '/mlflow-experiments', icon: 'FlaskConical', permission: 'model:inspect' },
   { label: 'Settings', path: '/settings', icon: 'Settings' },
 ]
 
@@ -32,11 +27,11 @@ export const sidebarNav = [
 // ---------------------------------------------------------------------------
 
 export const forecastPipelineSteps = [
-  { id: 1, key: 'upload', label: 'Dataset Upload' },
-  { id: 2, key: 'profiling', label: 'Dataset Profiling' },
-  { id: 3, key: 'mapping', label: 'Metadata Mapping' },
-  { id: 4, key: 'configuration', label: 'Forecast Configuration' },
-  { id: 5, key: 'review', label: 'Review & Deploy' },
+  { id: 1, key: 'upload', label: 'Upload' },
+  { id: 2, key: 'profiling', label: 'Profile' },
+  { id: 3, key: 'mapping', label: 'Map Columns' },
+  { id: 4, key: 'configuration', label: 'Configure' },
+  { id: 5, key: 'review', label: 'Estimate & Run' },
 ]
 
 export const supportedFileFormats = [
@@ -57,9 +52,15 @@ export const aggregationMethodOptions = [
 
 export const defaultAggregationMethod = 'sum'
 
-// Fallback pre-selected when the wizard opens. Must be one of the ids in
-// `forecastModels` — the fallback always participates in evaluation too.
-export const defaultFallbackModel = 'lightgbm'
+// The baseline used when every candidate fails validation (Section 6.9).
+//
+// Deliberately NOT one of the candidates: the fallback exists precisely
+// because every candidate was judged unreliable, so it must be a simple,
+// robust model — not another learner that can flatline when extrapolating.
+// `seasonal_naive` replays the last observed season, so it always carries
+// the history's own seasonality through the horizon.
+export const defaultFallbackModel = 'seasonal_naive'
+
 
 export const forecastModels = [
   {
@@ -92,6 +93,22 @@ export const forecastModels = [
 // Forecast horizon is chosen on a continuous month scale (6 months–5 years)
 // rather than from fixed options, so a user can pick any exact horizon. Year
 // marks are supplied as tick labels purely to orient the scale.
+// Selectable fallbacks. The seasonal baseline is listed first and is the
+// recommended choice; the candidate models remain available for a
+// deployment that deliberately wants one, but they are not the default.
+export const fallbackModelOptions = [
+  {
+    id: 'seasonal_naive',
+    name: 'Seasonal naive',
+    description: 'Repeats the last observed season — robust, always carries seasonality. Recommended.',
+  },
+  ...forecastModels.map((model) => ({
+    id: model.id,
+    name: model.name,
+    description: model.description,
+  })),
+]
+
 export const forecastHorizonRange = { min: 6, max: 60, step: 1 }
 
 export const forecastHorizonTicks = [

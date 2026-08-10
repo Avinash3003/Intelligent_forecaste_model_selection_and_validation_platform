@@ -226,11 +226,47 @@ class EvaluationResult:
 
 @dataclass
 class EvaluationReport:
-    """Aggregate outcome of the evaluation phase."""
+    """Aggregate outcome of the evaluation phase.
+
+    The three `*_seconds` fields break this stage's total down by what it
+    actually spent time on. They exist because "Evaluate Models" and "Train
+    Models" look like one comparable stage each in the run summary, but
+    Evaluation does several model fits per (group, model) pair where
+    Training does one — without this breakdown that difference is invisible
+    to anyone reading stage durations after a run.
+    """
 
     results: list[EvaluationResult] = field(default_factory=list)
     groups_evaluated: int = 0
     duration_seconds: float = 0.0
+
+    # Wall-clock time spent inside each of the three sub-phases every
+    # (group, model) pair goes through, summed across all pairs.
+    backtest_seconds: float = 0.0
+    forecast_generation_seconds: float = 0.0
+    validation_seconds: float = 0.0
+
+    # Total model fits performed across every backtest fold plus every
+    # forward-forecast generation. Rolling/expanding backtesting requires a
+    # fresh fit per fold (Section 6.4 — reusing a fold's fit would leak
+    # future data into its own score), so this is genuinely proportional to
+    # `backtest_windows_evaluated`, not a bug by itself; it is what makes
+    # Evaluation's cost explicit rather than implicit in a single duration.
+    model_fit_count: int = 0
+
+    # Backtest folds actually evaluated, summed across every pair — the
+    # single largest driver of `backtest_seconds`.
+    backtest_windows_evaluated: int = 0
+
+    # Forward forecasts produced by reusing the model Training already
+    # fit on this exact series, instead of fitting an identical model a
+    # second time. Section 6.4's backtest folds are never reused (each
+    # trains on a different, smaller window — reusing them would be
+    # invalid), but the final full-series forecast fit is otherwise a
+    # verbatim duplicate of Training's own fit: same series, same tuned
+    # parameters. See `ForwardForecastGenerator`.
+    forecasts_reused: int = 0
+    forecasts_refit: int = 0
 
     # Count of results with SURVIVED status
     @property
@@ -273,5 +309,14 @@ class EvaluationReport:
             "failed": self.failed_count,
             "skipped": self.skipped_count,
             "duration_seconds": round(self.duration_seconds, 3),
+            "timing_breakdown": {
+                "backtest_seconds": round(self.backtest_seconds, 3),
+                "forecast_generation_seconds": round(self.forecast_generation_seconds, 3),
+                "validation_seconds": round(self.validation_seconds, 3),
+                "model_fit_count": self.model_fit_count,
+                "backtest_windows_evaluated": self.backtest_windows_evaluated,
+                "forecasts_reused": self.forecasts_reused,
+                "forecasts_refit": self.forecasts_refit,
+            },
             "results": [result.to_dict() for result in self.results],
         }

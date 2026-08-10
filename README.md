@@ -55,15 +55,52 @@ forecast_engine/     # The pipeline. Pure Python, no web/Spark dependency.
   config/            #   Frozen dataclass configs — every threshold and weight
   core/              #   PipelineContext, run state, live status writer
   s01…s12/           #   One package per stage, in execution order
-backend/             # FastAPI: upload, profiling, job submission, results, MLflow view
-frontend/            # React (Vite) SPA: wizard, deployments, results, MLflow experiments
+backend/             # FastAPI
+  app/api/           #   Routes — HTTP only, no forecasting logic
+  app/auth/          #   Entra ID token validation + the RBAC table
+  app/services/      #   Profiling, validation, estimation, results
+  app/orchestration/ #   Pipeline Executor and its Local / Databricks runners
+frontend/            # React (Vite) SPA
+  src/auth/          #   MSAL sign-in, permission guards
+  src/pages/         #   Wizard, deployments, results, MLflow experiments
 databricks/          # Databricks Asset Bundle — job and cluster definitions
+tests/               # backend/ runs on the backend venv, engine/ on the engine venv
+docs/                # PHASE_A_AZURE_SETUP.md — the manual Azure steps
 Dockerfile           # Dependencies-only image for Databricks Container Services
 pyproject.toml       # Builds forecast_engine into a wheel for DAB
 ```
 
 The Docker image holds **dependencies only**; the wheel holds **code only**. DAB joins them at run
 time, so a code change never requires an image rebuild.
+
+---
+
+## The user flow
+
+```
+sign in (Entra ID) → upload → profile → map columns → configure
+                   → estimate → run → track status → results → insights
+```
+
+The browser never talks to Databricks or to storage. It calls the API, the API stages the dataset
+into the Unity Catalog volume and submits the existing `forecastiq-forecast-pipeline` job, and the
+API reads status and results back. No Databricks token, storage key or Azure OpenAI key is ever
+sent to the browser.
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| `Admin` | everything, plus platform configuration |
+| `DataScientist` | upload, configure, estimate, run, cancel, view results and MLflow internals |
+| `Analyst` | view datasets, run history and results — cannot upload, run, cancel or inspect models |
+
+Roles come from Entra ID **app roles** (or, as a fallback, a group→role map). The mapping from role
+to permission lives in one table, `backend/app/auth/rbac.py`. The UI hides what a user cannot do;
+the API enforces it independently, so a hidden control that is forced into view still returns 403.
+
+A signed-in user with **no** role assigned is authenticated but authorized for nothing — deliberate,
+so an unassigned tenant member does not inherit read access to results.
 
 ---
 
@@ -86,6 +123,18 @@ backend/.venv/bin/python -m uvicorn app.main:app --port 8000   # from backend/
 cd frontend && npm install && npm run dev  # http://localhost:5173
 ```
 
+`AUTH_ENABLED` defaults to **false**, so this runs with no Azure tenant: the API issues a local
+development identity whose role is `DEV_IDENTITY_ROLE` (set it to `Analyst` to exercise RBAC). The
+API **refuses to start** with authentication disabled unless `APP_ENV` is development/local/test, so
+this cannot ship as an unauthenticated deployment.
+
+### Tests
+
+```bash
+backend/.venv/bin/python -m pytest tests/backend -q          # auth, RBAC, estimation, runner
+forecast_engine/.venv/bin/python -m pytest tests/engine -q   # engine CLI contract
+```
+
 Or drive the engine directly, with no web layer:
 
 ```bash
@@ -105,9 +154,18 @@ the names.
 
 | File | Holds | Committed |
 |---|---|---|
-| `backend/.env` | Azure OpenAI, storage SAS, MLflow, execution mode | no |
+| `backend/.env` | Entra ID app ids, Databricks service principal, Azure OpenAI, MLflow, execution mode | no |
+| `frontend/.env` | the API base URL, and nothing else | no |
 | `databricks/.env` | CLI profile name, ACR image | no |
 | Databricks secret scope `forecastiq` | ACR pull creds, Azure OpenAI (for jobs) | n/a |
+
+The frontend holds **no** Azure configuration: it fetches its Entra client id, tenant and scope
+from the API's `/auth/config` at runtime, so one built bundle deploys to any environment. The API
+itself holds no Entra credential either — it validates tokens with the tenant's public signing
+keys.
+
+Azure-side setup that must be done by hand (app registrations, role assignments, the Databricks
+service principal) is in **`docs/PHASE_A_AZURE_SETUP.md`**.
 
 Databricks job YAML contains only `{{secrets/...}}` **references**, never values — which is why it
 is safe to commit.
@@ -118,8 +176,14 @@ insights as unavailable. It is wired so a missing secret can never block a clust
 ### Execution mode
 
 `EXECUTION_MODE=local` (default) runs the engine as a subprocess on the API host.
-`EXECUTION_MODE=databricks` is scaffolded but **not yet implemented** — `DatabricksRunner` raises
-`DatabricksNotImplementedError`. Databricks runs are launched with `databricks bundle run` for now.
+
+`EXECUTION_MODE=databricks` submits the bundle-deployed job. The runner stages the dataset and a
+JSON run configuration into one per-run directory in the existing Unity Catalog volume, calls the
+Jobs API, polls run state, reads the engine's live stage trail back from the volume so the UI shows
+real progress, and reads `summary.json` back on completion. Both backends return the identical
+result envelope, so nothing above the executor knows which one ran.
+
+Retargeting is this one setting changing — no code change.
 
 ---
 
@@ -136,13 +200,17 @@ databricks bundle deploy  -t dev           # builds and uploads the wheel
 
 databricks bundle run forecast_pipeline -t dev --params \
   dataset=/Volumes/<catalog>/<schema>/<volume>/your.csv,\
-date_column=date,target_column=sales,horizon=12
+config=/Volumes/<catalog>/<schema>/<volume>/runs/manual/forecast_configuration.json
 ```
 
-`dataset`, `date_column` and `target_column` intentionally have **no defaults** — a default would
-let a forgotten `--params` silently forecast the wrong file and report success. For composite
-business keys use `config=<path to config.json>`, since one job parameter cannot carry a
-multi-value flag.
+The job takes exactly four parameters — `dataset`, `config`, `summary_out`, `live_status_out` — and
+every per-run value (columns, models, fallback, horizon, run id) travels inside the `config` JSON.
+That is not a style choice: a `python_wheel_task`'s argument list is fixed at deploy time, so an
+unset parameter would reach argparse as `--horizon ""` (a crash) or `--models ""` (a model named
+""). A config file also carries multi-value key columns, which one flat parameter cannot.
+
+`dataset` and `config` intentionally have **no defaults** — a default would let a forgotten
+`--params` silently forecast the wrong file and report success. Normally the API writes both.
 
 Requires a workspace with **Databricks Container Services enabled** and classic (non-serverless)
 compute.

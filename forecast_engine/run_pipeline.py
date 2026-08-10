@@ -58,7 +58,7 @@ from forecast_engine.s07_explainability.explainability_pipeline import Explainab
 from forecast_engine.s10_selection.production_pipeline import ProductionSelectionPipeline
 from forecast_engine.s11_llm.insight_engine import LLMInsightEngine
 from forecast_engine.s12_tracking.tracking_pipeline import MLflowTrackingPipeline
-from forecast_engine.utils.exceptions import DataQualityError, ForecastEngineError
+from forecast_engine.utils.exceptions import ConfigurationError, DataQualityError, ForecastEngineError
 
 # Platform-wide bound on the forward forecast horizon (Section 3: minimum
 # 12-month horizon, extended by the platform down to 6 and up to 60).
@@ -456,7 +456,13 @@ class ForecastEnginePipeline:
             context.complete_stage(
                 record,
                 f"{report.survived_count:,} survived, {report.eliminated_count:,} eliminated, "
-                f"{report.failed_count:,} failed across {report.groups_evaluated:,} group(s).",
+                f"{report.failed_count:,} failed across {report.groups_evaluated:,} group(s). "
+                f"{report.model_fit_count:,} model fit(s) "
+                f"({report.backtest_windows_evaluated:,} backtest fold(s) "
+                f"+ {report.forecasts_refit:,} forward-forecast refit(s), "
+                f"{report.forecasts_reused:,} forward forecast(s) reused training's own fit) — "
+                f"backtest {report.backtest_seconds:.1f}s, forecast {report.forecast_generation_seconds:.1f}s, "
+                f"validation {report.validation_seconds:.1f}s.",
             )
         except ForecastEngineError as exc:
             context.fail_stage(record, exc)
@@ -527,9 +533,18 @@ class ForecastEnginePipeline:
             report = self._insight_engine.generate(pipeline_result)
             context.insight_report = report
 
-            context.complete_stage(
-                record, f"Business insights {'generated' if report.available else 'skipped'}: {report.status}."
+            trace = report.trace_summary or {}
+            detail = (
+                f"Business insights {'generated' if report.available else 'skipped'}: {report.status}. "
+                f"{trace.get('call_count', 0):,} LLM call(s), {trace.get('total_tokens', 0):,} token(s), "
+                f"{trace.get('retry_count', 0):,} retr(y/ies)"
             )
+            if trace.get("groundedness_rate") is not None:
+                detail += f", groundedness {trace['groundedness_rate']:.0%}"
+            if trace.get("estimated_cost_usd") is not None:
+                detail += f", est. cost ${trace['estimated_cost_usd']:.4f}"
+            detail += "."
+            context.complete_stage(record, detail)
         except ForecastEngineError as exc:
             context.fail_stage(record, exc)
             raise
@@ -545,12 +560,22 @@ class ForecastEnginePipeline:
         record = context.begin_stage("Track to MLflow")
         pipeline_result = PipelineResultBuilder().build(context)
 
-        # This stage is completed *before* the summary is taken, so the
-        # consolidated artifact records a finished 14-stage trail rather
-        # than one still showing itself as running.
-        context.complete_stage(record, "MLflow tracking in progress.")
-        result = self._tracking_pipeline.track(pipeline_result, summary=context.summary())
+        # The stage stays *open* across the tracking call, so anything
+        # polling the live-status file sees "Track to MLflow — Running"
+        # instead of a finished 14-stage trail while artifact logging is
+        # still going. That logging is not instant (plots, per-group model
+        # registration), and previously the UI showed a run at 100% with no
+        # current stage for the whole of it, which reads as a hang.
+        #
+        # The consolidated artifact must still record a *finished* trail
+        # though — it is written during this very call, so the live object
+        # would embed itself as running. `_summary_with_stage_completed`
+        # resolves that: live status reports the truth, the artifact records
+        # the outcome.
+        summary = _summary_with_stage_completed(context.summary(), record.name)
+        result = self._tracking_pipeline.track(pipeline_result, summary=summary)
         context.tracking_result = result
+        context.complete_stage(record, "MLflow tracking complete.")
 
         # A tracking failure is recorded on context.tracking_result and
         # never raised: the forecasting run this stage is recording is
@@ -560,6 +585,20 @@ class ForecastEnginePipeline:
             f"MLflow tracking {result.status}"
             + (f" (run {result.run_id}, {result.models_registered} model(s) registered)." if result.logged else ".")
         )
+
+
+def _summary_with_stage_completed(summary: dict[str, Any], stage_name: str) -> dict[str, Any]:
+    """Return `summary` with `stage_name` shown as Completed.
+
+    Only the copy handed to MLflow is altered; the live context is left alone
+    so the stage can finish honestly after tracking returns.
+    """
+    stages = []
+    for stage in summary.get("stages") or []:
+        if stage.get("name") == stage_name and stage.get("status") != StageStatus.COMPLETED.value:
+            stage = {**stage, "status": StageStatus.COMPLETED.value, "detail": "MLflow tracking complete."}
+        stages.append(stage)
+    return {**summary, "stages": stages}
 
 
 # Name of the stage a run died in, read from its own recorded trail
@@ -573,14 +612,54 @@ def _failed_stage(context: PipelineContext) -> str | None:
     return context.stages[-1].name if context.stages else None
 
 
+# Read a run's JSON configuration file, or {} when none was given
+def load_config_payload(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.config:
+        return {}
+    payload = json.loads(Path(args.config).read_text())
+    return payload if isinstance(payload, dict) else {}
+
+
+# Apply the run-level keys a config file may carry, without overriding flags
+def apply_config_run_options(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    """Let `--config` supply `run_id`, `dataset_name`, `models`,
+    `fallback_model` and `horizon` in addition to the column mapping.
+
+    This exists for cloud execution. A Databricks `python_wheel_task`'s
+    argument list is fixed in the asset bundle, so per-run values would
+    have to arrive as job parameters that are always passed — including
+    when empty, which argparse cannot survive (`--horizon ""` raises,
+    `--models ""` yields a model named ""). It is also the only way to
+    express multi-valued key/feature columns, which a single flat job
+    parameter cannot represent.
+
+    An explicit CLI flag always wins: the file supplies a value only where
+    the command line did not, so local invocations behave exactly as before.
+    """
+    if args.run_id is None and payload.get("run_id"):
+        args.run_id = str(payload["run_id"])
+    if args.dataset_name is None and payload.get("dataset_name"):
+        args.dataset_name = str(payload["dataset_name"])
+    if not args.models and payload.get("models"):
+        args.models = [str(model) for model in payload["models"]]
+    if args.fallback_model is None and payload.get("fallback_model"):
+        args.fallback_model = str(payload["fallback_model"])
+    if args.horizon is None and payload.get("horizon") is not None:
+        horizon = int(payload["horizon"])
+        if not (MIN_FORECAST_HORIZON <= horizon <= MAX_FORECAST_HORIZON):
+            raise ConfigurationError(
+                f"horizon must be between {MIN_FORECAST_HORIZON} and {MAX_FORECAST_HORIZON} (got {horizon})."
+            )
+        args.horizon = horizon
+
+
 # Build a ForecastConfiguration from CLI args or config file
 def build_configuration_from_args(args: argparse.Namespace) -> ForecastConfiguration:
     # Supports both entry paths the platform needs: a JSON file (the exact
     # payload the backend's Metadata Interpreter emits) or explicit flags
     # for local runs.
     if args.config:
-        payload: dict[str, Any] = json.loads(Path(args.config).read_text())
-        return ForecastConfiguration.from_dict(payload)
+        return ForecastConfiguration.from_dict(load_config_payload(args))
 
     configuration = ForecastConfiguration(
         date_column=args.date_column,
@@ -662,6 +741,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         configuration = build_configuration_from_args(args)
+        # Run-level options may also travel inside --config; see
+        # apply_config_run_options for why cloud execution needs that.
+        apply_config_run_options(args, load_config_payload(args))
 
         evaluation_config = EvaluationConfig.default()
         if args.horizon is not None:

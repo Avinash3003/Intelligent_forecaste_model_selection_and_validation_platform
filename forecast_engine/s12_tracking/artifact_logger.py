@@ -94,7 +94,7 @@ def _log_forecast_plots(client: MLflowClient, result: PipelineResult, config: ML
     matplotlib.use("Agg")  # headless: no display server is available or required
     import matplotlib.pyplot as plt
 
-    for output in result.forecast_outputs:
+    for output in _limit_groups(result.forecast_outputs, config):
         forecast = output.get("forecast")
         if not forecast or not forecast.get("values"):
             continue
@@ -203,6 +203,16 @@ def _pyplot():
     return plt
 
 
+def _limit_groups(items: list, config: MLflowConfig) -> list:
+    """Cap a per-group figure set at `config.max_plot_groups`.
+
+    Returns the items unchanged when the cap is zero or negative, which is how
+    a deployment asks for the complete set.
+    """
+    cap = getattr(config, "max_plot_groups", 0)
+    return items if cap <= 0 else items[:cap]
+
+
 def _slug(group_id: object) -> str:
     return str(group_id).replace(" | ", "_").replace(" ", "_").replace("/", "-")
 
@@ -257,7 +267,7 @@ def _log_model_comparison_plots(client: MLflowClient, result: PipelineResult, co
         for w in result.final_winner_models
     }
     plt = _pyplot()
-    for group, entries in by_group.items():
+    for group, entries in _limit_groups(list(by_group.items()), config):
         entries.sort(key=lambda e: e[1])
         figure, axis = plt.subplots(figsize=(7, 3.2))
         # The selected model is highlighted so the chart answers "which one
@@ -282,7 +292,7 @@ def _log_drift_plots(client: MLflowClient, result: PipelineResult, config: MLflo
         return
 
     plt = _pyplot()
-    for winner in result.final_winner_models:
+    for winner in _limit_groups(result.final_winner_models, config):
         group = str(winner.get("forecast_group"))
         forecast = (winner.get("forecast") or {}).get("values") or []
         history = [h.get("value") if isinstance(h, dict) else h for h in histories.get(group, [])]

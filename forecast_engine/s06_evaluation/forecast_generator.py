@@ -1,10 +1,19 @@
 """Twelve-month forward forecast generation (Section 6.4 → 6.5).
 
-After backtesting, every model is refitted on the group's *complete*
-history and asked for the full configured horizon. Refitting is deliberate:
-backtesting fits models on partial windows, and a forecast that will be
-validated and potentially promoted must come from a model that has seen all
-available evidence.
+The forward forecast must come from a model that has seen the group's
+*complete* history — backtesting only ever fits on partial windows, and a
+forecast that will be validated and potentially promoted needs every
+available observation, not a fold's subset.
+
+That model already exists by the time this runs: Model Training (Section
+6.3.3) already fit this exact (group, model) pair on this exact series with
+these exact tuned parameters. Fitting a second, identical model here would
+be a verbatim duplicate — same inputs, same deterministic outcome, pure
+wasted compute — so this reuses the trained wrapper's own `.predict()`
+whenever the caller supplies one (`TrainedModel.fitted_model`). It falls
+back to fitting fresh only when no fitted wrapper is available, which
+keeps this class correct on its own rather than silently depending on the
+caller always providing one.
 
 The future timeline is extended at the median spacing observed in the
 series, so the generator stays grain-agnostic — it produces monthly dates
@@ -34,20 +43,37 @@ class ForwardForecastGenerator:
     def __init__(self, registry: ModelRegistry, horizon: int = 12) -> None:
         self._registry = registry
         self._horizon = horizon
+        # Set by the most recent `generate()` call, read by
+        # `EvaluationPipeline` for its fit-count telemetry. Not thread-safe
+        # by itself — fine today since evaluation runs one pair at a time
+        # through a shared generator; a future parallel evaluator would need
+        # `generate()` to return this instead of stashing it here.
+        self.last_call_reused_fit: bool = False
 
     # Produce the forward forecast for one group/model pair
     def generate(self, trained: TrainedModel, series: ForecastSeries) -> ForwardForecast:
-        spec = self._registry.config.find(trained.model_name)
-        if spec is None:
-            raise ForecastGenerationError(
-                f"Model '{trained.model_name}' is no longer registered and cannot forecast."
-            )
+        self.last_call_reused_fit = False
 
         try:
-            model = self._registry.create(spec, trained.params)
-            model.initialize()
-            model.train(series)
-            output = model.predict(self._horizon)
+            if trained.fitted_model is not None:
+                self.last_call_reused_fit = True
+                output = trained.fitted_model.predict(self._horizon)
+            else:
+                # No fitted wrapper was supplied (a caller outside the
+                # normal pipeline, or a future code path) — fit fresh so
+                # this class is correct standing alone, not only when
+                # ModelTrainer happens to have populated `fitted_model`.
+                spec = self._registry.config.find(trained.model_name)
+                if spec is None:
+                    raise ForecastGenerationError(
+                        f"Model '{trained.model_name}' is no longer registered and cannot forecast."
+                    )
+                model = self._registry.create(spec, trained.params)
+                model.initialize()
+                model.train(series)
+                output = model.predict(self._horizon)
+        except ForecastGenerationError:
+            raise
         except Exception as exc:  # noqa: BLE001 - surfaced as a domain error
             raise ForecastGenerationError(
                 f"'{trained.model_name}' failed to produce a forward forecast: "

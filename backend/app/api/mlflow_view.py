@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth.dependencies import require
+from app.auth.models import Permission, Principal
 from app.orchestration.exceptions import RunNotReadyError, UnknownRunError
 from app.schemas.mlflow_view import MLflowRunDetail
 from app.services.mlflow_view_service import MLflowViewService, get_mlflow_view_service
@@ -11,7 +13,9 @@ router = APIRouter(tags=["mlflow"])
 
 @router.get("/mlflow/runs/{run_id}", response_model=MLflowRunDetail)
 def get_mlflow_run(
-    run_id: str, service: MLflowViewService = Depends(get_mlflow_view_service)
+    run_id: str,
+    service: MLflowViewService = Depends(get_mlflow_view_service),
+    principal: Principal = Depends(require(Permission.MODEL_INSPECT)),
 ) -> MLflowRunDetail:
     try:
         return service.get_run(run_id)

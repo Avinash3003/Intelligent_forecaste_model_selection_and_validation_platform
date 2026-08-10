@@ -6,12 +6,18 @@ dashboard-shaped `/deploy` + `/results/{run_id}` contract those routes
 still serve — this is the "communicates only with the Pipeline Executor"
 surface Section 6.14 asks for, kept as an additive API so the existing
 frontend contract is undisturbed.
+
+Every route here is a thin translation between HTTP and the Executor. No
+forecasting logic lives in this layer, and no route talks to Databricks,
+storage or MLflow directly — the selected Runner owns all of that.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth.dependencies import require
+from app.auth.models import Permission, Principal
 from app.config.settings import get_settings
 from app.orchestration.exceptions import ExecutionError, RunNotReadyError, UnknownRunError
 from app.orchestration.executor import get_pipeline_executor
@@ -20,15 +26,20 @@ from app.schemas.deployment import DeploymentRequest
 from app.schemas.execution import ExecutionCancelResponse, ExecutionStatusResponse, ExecutionSubmitResponse
 from app.services.deployment_service import build_execution_request
 from app.services.upload_service import UploadService
+from app.utils.errors import safe_detail
+from app.utils.exceptions import FileResolutionError
 
 router = APIRouter(prefix="/execution", tags=["Execution"])
 upload_service = UploadService()
 
 
 @router.post("/submit", response_model=ExecutionSubmitResponse, summary="Submit a run through the Pipeline Executor")
-def submit_execution(request: DeploymentRequest) -> ExecutionSubmitResponse:
+def submit_execution(
+    request: DeploymentRequest,
+    principal: Principal = Depends(require(Permission.FORECAST_RUN)),
+) -> ExecutionSubmitResponse:
     if not request.file_id:
-        raise HTTPException(status_code=400, detail="file_id is required to submit a pipeline execution.")
+        raise HTTPException(status_code=400, detail="Please upload a dataset before submitting a run.")
 
     try:
         dataset_path, original_filename = upload_service.resolve(request.file_id)
@@ -37,8 +48,16 @@ def submit_execution(request: DeploymentRequest) -> ExecutionSubmitResponse:
         executor = get_pipeline_executor()
         run_id = executor.execute(execution_request)
         status = executor.get_status(run_id)
+    except FileResolutionError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="That dataset is no longer available. Please upload it again.",
+        ) from exc
     except ExecutionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=safe_detail(exc, fallback="The forecast could not be started. Please try again."),
+        ) from exc
 
     return ExecutionSubmitResponse(
         run_id=run_id,
@@ -48,11 +67,23 @@ def submit_execution(request: DeploymentRequest) -> ExecutionSubmitResponse:
 
 
 @router.get("/{run_id}/status", response_model=ExecutionStatusResponse, summary="Poll a run's execution status")
-def get_execution_status(run_id: str) -> ExecutionStatusResponse:
+def get_execution_status(
+    run_id: str,
+    principal: Principal = Depends(require(Permission.RUN_READ)),
+) -> ExecutionStatusResponse:
+    """The status the frontend polls while a run executes.
+
+    This is what makes opening the Databricks workspace unnecessary: it
+    reports QUEUED/RUNNING/SUCCESS/FAILED in the platform's own vocabulary
+    for both execution backends, and `/deployments/{run_id}` carries the
+    per-stage trail behind it.
+    """
     try:
         status = get_pipeline_executor().get_status(run_id)
     except UnknownRunError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="That run could not be found.") from exc
+    except ExecutionError as exc:
+        raise HTTPException(status_code=502, detail=safe_detail(exc)) from exc
 
     return ExecutionStatusResponse(run_id=run_id, job_status=status)
 
@@ -62,20 +93,33 @@ def get_execution_status(run_id: str) -> ExecutionStatusResponse:
     response_model=PipelineExecutionResult,
     summary="Retrieve the standardized PipelineExecutionResult for a completed run",
 )
-def get_execution_result(run_id: str) -> PipelineExecutionResult:
+def get_execution_result(
+    run_id: str,
+    principal: Principal = Depends(require(Permission.RESULTS_READ)),
+) -> PipelineExecutionResult:
     try:
         return get_pipeline_executor().get_result(run_id)
     except UnknownRunError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="That run could not be found.") from exc
     except RunNotReadyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail="This run has not finished yet.") from exc
+    except ExecutionError as exc:
+        raise HTTPException(status_code=502, detail=safe_detail(exc)) from exc
 
 
 @router.post("/{run_id}/cancel", response_model=ExecutionCancelResponse, summary="Cancel a pending or running job")
-def cancel_execution(run_id: str) -> ExecutionCancelResponse:
+def cancel_execution(
+    run_id: str,
+    principal: Principal = Depends(require(Permission.RUN_CANCEL)),
+) -> ExecutionCancelResponse:
     try:
         cancelled = get_pipeline_executor().cancel(run_id)
     except UnknownRunError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="That run could not be found.") from exc
+    except ExecutionError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=safe_detail(exc, fallback="The run could not be cancelled. Please try again."),
+        ) from exc
 
     return ExecutionCancelResponse(run_id=run_id, cancelled=cancelled)

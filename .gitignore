@@ -63,3 +63,7 @@ docs/
 *.pdf
 *.doc
 *.docx
+
+# Pytest scratch (tests/conftest.py points UPLOAD_DIR here)
+.pytest-uploads/
+.pytest_cache/

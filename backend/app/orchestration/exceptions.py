@@ -33,10 +33,9 @@ class RunnerConfigurationError(ExecutionError):
 
 
 class DatabricksNotImplementedError(ExecutionError):
-    """Raised by every placeholder integration point in `DatabricksRunner`.
+    """Retained for compatibility; nothing raises this any more.
 
-    Section 6.14 explicitly scopes this phase to architecture only — no
-    real Azure Storage or Databricks Jobs API call is made. Each stub
-    raises this with a message naming exactly what a later phase must
-    implement.
+    `DatabricksRunner` was a set of placeholders when this existed. It now
+    performs real Azure Storage staging and Jobs API calls, and reports
+    every failure as a plain `ExecutionError` carrying a user-safe message.
     """

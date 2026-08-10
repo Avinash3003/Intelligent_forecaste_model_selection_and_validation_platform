@@ -9,7 +9,7 @@ import StepMetadataMapping from './components/StepMetadataMapping'
 import StepForecastConfiguration from './components/StepForecastConfiguration'
 import StepReviewDeploy from './components/StepReviewDeploy'
 import WizardFooter from './components/WizardFooter'
-import { uploadDataset, profileDataset, validateMetadata, deployRun } from '../../services'
+import { uploadDataset, profileDataset, validateMetadata, deployRun, estimateRun } from '../../services'
 import {
   forecastPipelineSteps,
   forecastModels,
@@ -110,7 +110,10 @@ export default function ForecastPipeline() {
   // Step 4 — Forecast Configuration (client-side only in this phase)
   const [config, setConfig] = useState(initialConfig)
 
-  // Step 5 — Review & Deploy
+  // Step 5 — Estimate & Run
+  const [estimate, setEstimate] = useState(null)
+  const [estimateLoading, setEstimateLoading] = useState(false)
+  const [estimateError, setEstimateError] = useState(null)
   const [deploying, setDeploying] = useState(false)
   const [deployError, setDeployError] = useState(null)
   const [deployed, setDeployed] = useState(false)
@@ -243,6 +246,30 @@ export default function ForecastPipeline() {
     }
   }
 
+  // Duration/cost for the exact configuration about to be submitted.
+  // A failure here never blocks the run — the estimate is advisory, and
+  // refusing to forecast because we could not predict its cost would be
+  // the wrong trade.
+  const loadEstimate = async () => {
+    if (!fileId) return
+    setEstimateLoading(true)
+    setEstimateError(null)
+    try {
+      const response = await estimateRun({
+        fileId,
+        mapping,
+        selectedModels: config.selectedModels,
+        horizon: config.horizon,
+        aggregationMethod: aggregationRequired ? aggregationMethod : null,
+      })
+      setEstimate(response)
+    } catch (err) {
+      setEstimateError(err.message)
+    } finally {
+      setEstimateLoading(false)
+    }
+  }
+
   const handleNext = async () => {
     if (isBusy) return
 
@@ -277,15 +304,19 @@ export default function ForecastPipeline() {
       }
       if (!config.fallbackModel) {
         configErrors.fallbackModel = 'Select a default fallback model to continue.'
-      } else if (!config.selectedModels.includes(config.fallbackModel)) {
-        // Defence in depth: the UI already keeps these in sync, but a
-        // fallback outside the evaluated set must never reach the backend.
-        configErrors.fallbackModel = 'The fallback model must also be one of the selected models.'
       }
+      // No "fallback must be one of the selected models" rule: the fallback
+      // is a baseline reached only after every candidate has failed
+      // (Section 6.9), so constraining it to the candidate set would exclude
+      // the simple, robust baselines that path exists for.
 
       setErrors(configErrors)
       if (Object.keys(configErrors).length > 0) return
 
+      // The estimate is fetched on entry to step 5 rather than on a button
+      // press: it is the reason that step exists, so making the user ask
+      // for it would be an extra click before the only new information.
+      loadEstimate()
       advanceTo(5)
       return
     }
@@ -334,7 +365,7 @@ export default function ForecastPipeline() {
           Forecast Pipeline
         </h1>
         <p className="text-sm text-slate-400 mt-1">
-          Upload data, configure metadata, select models and deploy a validated forecasting run.
+          Upload, map columns, choose models, review the estimate, run.
         </p>
       </div>
 
@@ -398,6 +429,9 @@ export default function ForecastPipeline() {
               deployed={deployed}
               deployError={deployError}
               runId={runId}
+              estimate={estimate}
+              estimateLoading={estimateLoading}
+              estimateError={estimateError}
             />
           )}
         </motion.div>

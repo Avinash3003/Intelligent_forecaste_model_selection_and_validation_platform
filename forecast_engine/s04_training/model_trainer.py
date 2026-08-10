@@ -168,6 +168,7 @@ class ModelTrainer:
 
             record.status = TrainingStatus.TRAINED
             record.model = model.model
+            record.fitted_model = model
             record.params = model.params
             record.metadata = {
                 **training_metadata,
