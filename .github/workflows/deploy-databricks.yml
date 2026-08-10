@@ -63,7 +63,7 @@ jobs:
       - name: Build forecast_engine wheel
         run: python -m pip wheel . --no-deps --wheel-dir dist
 
-      - uses: databricks/setup-cli@v0.9.0
+      - uses: databricks/setup-cli@v1.11.0
 
       # Stage 3: validate the production target.
       - name: databricks bundle validate -t prod

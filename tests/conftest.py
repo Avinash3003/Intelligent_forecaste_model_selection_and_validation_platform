@@ -20,5 +20,13 @@ for path in (ROOT, ROOT / "backend"):
 # Pytest runs from the repository root, so it is pinned here — otherwise
 # merely importing `app.main` fails on a path that does not exist.
 os.environ.setdefault("FORECAST_ENGINE_ROOT", str(ROOT / "forecast_engine"))
+# Importing `app.main` constructs the Pipeline Executor, and LocalRunner
+# refuses to build when the engine's own interpreter is missing. That
+# interpreter is a developer's local venv, which no CI runner has — so
+# collection failed there while passing on a developer machine. No test
+# launches the engine subprocess, so pointing this at the interpreter
+# already running the suite satisfies the check without changing what is
+# exercised.
+os.environ.setdefault("FORECAST_ENGINE_PYTHON", sys.executable)
 # Never write staged uploads into the working tree during a test run.
 os.environ.setdefault("UPLOAD_DIR", str(ROOT / ".pytest-uploads"))
