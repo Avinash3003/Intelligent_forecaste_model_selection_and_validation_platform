@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class MLflowRunSummary(BaseModel):
@@ -37,6 +37,45 @@ class PerKeyOutcome(BaseModel):
     accuracy: float | None = None
 
 
+class TuningInfo(BaseModel):
+    """Whether a search actually ran for this (key, model), and its
+    outcome — from `HyperparameterTuner`, never fabricated when absent."""
+
+    tuned: bool = False
+    reason: str | None = None
+    strategy: str | None = None
+    cv_splits: int | None = None
+    best_score_mae: float | None = None
+    candidates_evaluated: int | None = None
+
+
+class HyperparameterRecord(BaseModel):
+    """One (key, model) pair's final hyperparameters, tied to the same
+    evaluation outcome shown in `Child runs by key` — every value here is
+    read from the training/evaluation/ranking reports already produced by
+    the pipeline, never invented for display.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    group_id: str
+    model_name: str
+    is_winner: bool = False
+    is_fallback: bool = False
+    status: str  # Winner | Rejected | Fallback | Eliminated | Failed | Skipped
+    wmape: float | None = None
+    rmse: float | None = None
+    mae: float | None = None
+    rank: int | None = None
+    hyperparameters: dict[str, object] = {}
+    tuning: TuningInfo | None = None
+    # True only for a fallback winner, whose model is fitted at selection
+    # time (Section 6.9) and never passes through the tuned training path
+    # at all — so it has no hyperparameter record to show, and reporting
+    # one would be fabricated.
+    hyperparameters_unavailable_reason: str | None = None
+
+
 class MLflowRunDetail(BaseModel):
     run_id: str
     mlflow_run_id: str | None = None
@@ -47,3 +86,4 @@ class MLflowRunDetail(BaseModel):
     summary: MLflowRunSummary
     parameters: list[ParameterEntry] = []
     per_key: list[PerKeyOutcome] = []
+    hyperparameters: list[HyperparameterRecord] = []

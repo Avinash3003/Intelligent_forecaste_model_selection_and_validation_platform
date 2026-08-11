@@ -5,6 +5,7 @@ import SectionContainer from '../../components/layout/SectionContainer'
 import EmptyState from '../../components/ui/EmptyState'
 import Loader from '../../components/ui/Loader'
 import Select from '../../components/ui/Select'
+import Badge from '../../components/ui/Badge'
 import { fetchDeployments, fetchMLflowRun } from '../../services'
 import { formatRunLabel } from '../../utils/formatDateTime'
 import { fallbackModelOptions, forecastModels } from '../../data/appConfig'
@@ -123,6 +124,166 @@ function ModelSelectionSummary({ perKey }) {
           tone="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/30"
         />
       )}
+    </div>
+  )
+}
+
+// Status badges reuse Badge's existing statusMap tones (Passed/Failed/
+// Warning/neutral) rather than a parallel color system — see LLMOps'
+// LLMCallCard for the same convention.
+const HYPERPARAM_STATUS_TONE = {
+  Winner: 'Passed',
+  Rejected: 'neutral',
+  Fallback: 'Warning',
+  Eliminated: 'neutral',
+  Failed: 'Failed',
+  Skipped: 'neutral',
+  Unavailable: 'neutral',
+}
+
+function formatMetric(value, digits = 2, suffix = '') {
+  return value == null ? '—' : `${value.toFixed(digits)}${suffix}`
+}
+
+// One (key, model) pair's final hyperparameters, tied to the exact score
+// they produced — Requirement 6: "these hyperparameters produced this
+// model's performance for this specific key" is the header + table
+// together, never a bare parameter dump with no result attached.
+function HyperparameterDetail({ record }) {
+  const paramEntries = Object.entries(record.hyperparameters || {})
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-sm font-semibold text-slate-800 dark:text-slate-100">
+              {record.group_id}
+            </span>
+            <span className="text-sm text-slate-400">·</span>
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+              {modelDisplayName(record.model_name)}
+            </span>
+          </div>
+          <div className="mt-1">
+            <Badge status={HYPERPARAM_STATUS_TONE[record.status] || 'neutral'}>{record.status}</Badge>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-right text-xs sm:grid-cols-4">
+          <div>
+            <div className="text-slate-400">WMAPE</div>
+            <div className="tabular-nums font-medium text-slate-700 dark:text-slate-200">
+              {formatMetric(record.wmape, 2, '%')}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-400">RMSE</div>
+            <div className="tabular-nums font-medium text-slate-700 dark:text-slate-200">
+              {formatMetric(record.rmse)}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-400">MAE</div>
+            <div className="tabular-nums font-medium text-slate-700 dark:text-slate-200">
+              {formatMetric(record.mae)}
+            </div>
+          </div>
+          <div>
+            <div className="text-slate-400">Rank</div>
+            <div className="tabular-nums font-medium text-slate-700 dark:text-slate-200">
+              {record.rank ?? '—'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {record.hyperparameters_unavailable_reason ? (
+        <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400 dark:bg-slate-800/60">
+          {record.hyperparameters_unavailable_reason}
+        </p>
+      ) : paramEntries.length === 0 ? (
+        <p className="text-xs text-slate-400">
+          No hyperparameter record for this attempt — it did not reach a trained state.
+        </p>
+      ) : (
+        <div className="overflow-hidden rounded-lg border border-slate-100 dark:border-slate-800">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-slate-100 bg-slate-50/60 dark:border-slate-800 dark:bg-slate-800/40">
+                <th className="px-3 py-2 font-semibold text-slate-500">Parameter</th>
+                <th className="px-3 py-2 font-semibold text-slate-500">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {paramEntries.map(([name, value]) => (
+                <tr key={name} className="border-b border-slate-50 last:border-0 dark:border-slate-800/60">
+                  <td className="px-3 py-1.5 font-mono text-slate-600 dark:text-slate-300">{name}</td>
+                  <td className="px-3 py-1.5 tabular-nums text-slate-700 dark:text-slate-200">{String(value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {record.tuning && (
+        <p className="mt-3 text-[11px] text-slate-400">
+          {record.tuning.tuned ? (
+            <>
+              Tuned via {record.tuning.strategy} search — {record.tuning.candidates_evaluated} candidate(s) over{' '}
+              {record.tuning.cv_splits} CV split(s), best CV MAE {formatMetric(record.tuning.best_score_mae, 3)}.
+            </>
+          ) : (
+            <>Not tuned — {record.tuning.reason}</>
+          )}
+        </p>
+      )}
+    </div>
+  )
+}
+
+// Requirement 5: browse every (key, model) combination without rendering
+// them all at once — two dependent dropdowns select exactly one record.
+function HyperparametersSection({ records }) {
+  const keys = useMemo(() => [...new Set(records.map((r) => r.group_id))].sort(), [records])
+  const [selectedKey, setSelectedKey] = useState(keys[0] || '')
+
+  useEffect(() => {
+    if (keys.length && !keys.includes(selectedKey)) setSelectedKey(keys[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys])
+
+  const modelsForKey = useMemo(
+    () => records.filter((r) => r.group_id === selectedKey),
+    [records, selectedKey]
+  )
+  const [selectedModel, setSelectedModel] = useState('')
+
+  useEffect(() => {
+    if (modelsForKey.length && !modelsForKey.some((r) => r.model_name === selectedModel)) {
+      setSelectedModel(modelsForKey[0].model_name)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelsForKey])
+
+  if (records.length === 0) {
+    return <p className="text-xs text-slate-400">No hyperparameter records for this run yet.</p>
+  }
+
+  const modelOptions = modelsForKey.map((r) => ({
+    value: r.model_name,
+    label: modelDisplayName(r.model_name),
+    sublabel: r.status,
+  }))
+  const record = modelsForKey.find((r) => r.model_name === selectedModel)
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:max-w-lg">
+        <Select value={selectedKey} onChange={setSelectedKey} options={keys} placeholder="Key" />
+        <Select value={selectedModel} onChange={setSelectedModel} options={modelOptions} placeholder="Model" />
+      </div>
+      {record && <HyperparameterDetail record={record} />}
     </div>
   )
 }
@@ -374,6 +535,15 @@ export default function MLflowExperiments() {
                 </table>
               </div>
             </div>
+          </div>
+
+          {/* Requirement 5/6: hyperparameters, tied to the exact metrics/
+              status/rank they produced — its own section so a run with
+              hundreds of keys never renders more than one parameter table
+              at a time. */}
+          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">Hyperparameters</h3>
+            <HyperparametersSection records={detail.hyperparameters} />
           </div>
         </div>
       )}
