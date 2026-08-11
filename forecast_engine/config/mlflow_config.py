@@ -60,9 +60,10 @@ class MLflowConfig:
     artifact_location: str = _DEFAULT_LOCAL_ARTIFACT_LOCATION
 
     # Prefix for registered model names — one registered model per
-    # forecasting group is named "{prefix}-{sanitized_group_id}", which
-    # reads naturally as a Unity Catalog three-level name's final segment
-    # once a catalog/schema prefix is added ahead of it later.
+    # dataset is named "{prefix}-{sanitized_dataset_name}" (see
+    # s12_tracking/model_registrar.py's `_dataset_slug`), which reads
+    # naturally as a Unity Catalog three-level name's final segment once
+    # a catalog/schema prefix is added ahead of it later.
     registered_model_name_prefix: str = "forecast_engine"
 
     log_artifacts: bool = True

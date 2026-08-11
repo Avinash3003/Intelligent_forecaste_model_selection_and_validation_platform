@@ -1,9 +1,19 @@
 """Model Registry (Section 6.13, "Model Registry").
 
-Registers exactly one model per forecasting group: whichever one Final
-Production Model Selection (Section 6.9) actually chose, ranked winner or
-configured fallback alike. Nothing else — a ranked-but-rejected candidate
-is never registered.
+Registers exactly one model version per forecasting group: whichever one
+Final Production Model Selection (Section 6.9) actually chose, ranked
+winner or configured fallback alike. Nothing else — a ranked-but-rejected
+candidate is never registered.
+
+All of a dataset's keys — across every run of it — share one registered
+model, versioned rather than multiplied: a per-key registered model name
+would mean a 500-key dataset creates 500 permanent registry entries on its
+first run alone, and two unrelated datasets that happen to share a key
+name (e.g. both have "1 | 1") would silently share one model's version
+history. Each version is tagged with its `forecast_group` and `run_id`
+(see `_register_one`), so "which version is the current model for key X"
+is still a direct lookup, just via tags instead of via the registered
+model's own name.
 
 The registered model is a `mlflow.pyfunc.PythonModel` wrapping that group's
 already-computed forward forecast, rather than the raw fitted estimator.
@@ -23,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 import pandas as pd
@@ -149,12 +160,32 @@ def register_winner_models(
             for winner in pipeline_result.final_winner_models
         ]
 
-    return [_register_one(client, winner, run_id, config) for winner in pipeline_result.final_winner_models]
+    dataset_slug = _dataset_slug(pipeline_result, run_id)
+    return [
+        _register_one(client, winner, run_id, config, dataset_slug) for winner in pipeline_result.final_winner_models
+    ]
+
+
+# A stable identity for the dataset this run trained on, used as the
+# registered model's name. One registered model per dataset (versioned by
+# every run/key it produces) rather than one per forecast key — a
+# per-key name means a 500-key run creates 500 permanent registered
+# models that only ever accumulate, and two unrelated datasets that
+# happen to share a key name (e.g. both have "1 | 1") would silently
+# share one model's version history. Falls back to this registration
+# call's own run id (the parameter every other field here is keyed by,
+# not necessarily `pipeline_result.run_id`) when no dataset path was
+# recorded — should not happen in practice, but a registration must
+# never crash for lack of a name.
+def _dataset_slug(pipeline_result: PipelineResult, run_id: str) -> str:
+    dataset_path = pipeline_result.dataset_metadata.get("dataset_path")
+    name = PurePosixPath(dataset_path).stem if dataset_path else run_id
+    return sanitize_model_name(name)
 
 
 # Register a single group's winning model, returning its outcome
 def _register_one(
-    client: MLflowClient, winner: dict[str, Any], run_id: str, config: MLflowConfig
+    client: MLflowClient, winner: dict[str, Any], run_id: str, config: MLflowConfig, dataset_slug: str
 ) -> ModelRegistrationResult:
     group_id = winner["forecast_group"]
     model_name = winner.get("final_production_model")
@@ -173,7 +204,7 @@ def _register_one(
         )
 
     group_slug = sanitize_model_name(group_id)
-    registered_model_name = f"{config.registered_model_name_prefix}-{group_slug}"
+    registered_model_name = f"{config.registered_model_name_prefix}-{dataset_slug}"
     wrapper = _FrozenForecastModel(forecast_group=group_id, model_name=model_name, forecast=forecast)
 
     try:
@@ -203,6 +234,10 @@ def _register_one(
         "forecast_group": group_id,
         "model_name": model_name,
         "fallback_used": str(bool(winner.get("fallback_flag", False))),
+        # Now that one registered model spans every key in a dataset (and
+        # every run of it), the run id is what tells versions from the
+        # same key but different runs apart.
+        "run_id": run_id,
     }
     tag_error: str | None = None
     if version is None:

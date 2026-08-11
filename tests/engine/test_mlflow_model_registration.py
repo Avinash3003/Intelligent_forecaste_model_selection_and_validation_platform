@@ -62,10 +62,12 @@ def _winner(group="1 | 1", model="prophet", fallback=False):
     }
 
 
-def _result(winners):
-    result = PipelineResult.__new__(PipelineResult)
-    object.__setattr__(result, "final_winner_models", winners)
-    return result
+def _result(winners, dataset_path="store_item.csv"):
+    return PipelineResult(
+        run_id="run-1",
+        dataset_metadata={"dataset_path": dataset_path} if dataset_path else {},
+        final_winner_models=winners,
+    )
 
 
 def _register(client, winners, config=None):
@@ -167,6 +169,7 @@ def test_metadata_tags_are_still_applied():
     assert tags["forecast_group"] == "1 | 4"
     assert tags["model_name"] == "lightgbm"
     assert tags["fallback_used"] == "False"
+    assert tags["run_id"] == "run-1"
     assert results[0].metadata_tags == tags
 
 
@@ -204,12 +207,37 @@ def test_the_registered_model_is_the_final_selected_winner():
         assert registered[wrapper.forecast_group] == wrapper.model_name
 
 
-def test_one_registered_model_per_group_with_distinct_names():
+def test_every_key_in_one_dataset_shares_one_registered_model():
+    """A per-key name would mean a 500-key dataset creates 500 permanent
+    registry entries on its first run alone — every key registers as a
+    new version of one model instead."""
     client = _FakeClient()
-    _register(client, [_winner("1 | 1"), _winner("1 | 2")])
+    _register(client, [_winner("1 | 1"), _winner("1 | 2"), _winner("1 | 3")])
 
-    names = [call["registered_model_name"] for call in client.log_calls]
-    assert len(set(names)) == 2
+    names = {call["registered_model_name"] for call in client.log_calls}
+    assert len(names) == 1
+
+
+def test_different_datasets_get_different_registered_models():
+    """Two unrelated datasets must never share a registered model just
+    because they happen to have a same-named key."""
+    client = _FakeClient()
+    register_winner_models(
+        client, _result([_winner("1 | 1")], dataset_path="store_a.csv"), MLflowConfig(), "run-1"
+    )
+    register_winner_models(
+        client, _result([_winner("1 | 1")], dataset_path="store_b.csv"), MLflowConfig(), "run-2"
+    )
+
+    names = {call["registered_model_name"] for call in client.log_calls}
+    assert len(names) == 2
+
+
+def test_a_dataset_with_no_recorded_path_falls_back_to_the_run_id():
+    client = _FakeClient()
+    register_winner_models(client, _result([_winner("1 | 1")], dataset_path=None), MLflowConfig(), "run-xyz")
+
+    assert "run-xyz" in client.log_calls[0]["registered_model_name"]
 
 
 def test_a_group_with_no_selected_model_is_not_registered():
