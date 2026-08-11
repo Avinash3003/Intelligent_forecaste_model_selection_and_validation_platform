@@ -51,6 +51,8 @@ from forecast_engine.s01_preprocessing.series_builder import SeriesBuilder
 from forecast_engine.s02_quality.quality_assessor import DataQualityAssessor
 from forecast_engine.s03_storage.curated_writer import CuratedDatasetWriter
 from forecast_engine.s03_storage.model_writer import WinningModelWriter
+from forecast_engine.s03_storage.forecast_export_writer import ForecastExportWriter
+from forecast_engine.s03_storage.artifacts_mirror_writer import ArtifactsMirrorWriter
 from forecast_engine.s04_training.curated_validator import CuratedDatasetValidator
 from forecast_engine.s04_training.model_trainer import ModelTrainer
 from forecast_engine.s05_models.model_registry import ModelRegistry
@@ -84,6 +86,8 @@ class ForecastEnginePipeline:
         preprocessor: DataPreprocessor | None = None,
         curated_writer: CuratedDatasetWriter | None = None,
         model_writer: WinningModelWriter | None = None,
+        forecast_export_writer: ForecastExportWriter | None = None,
+        artifacts_mirror_writer: ArtifactsMirrorWriter | None = None,
         group_generator: GroupGenerator | None = None,
         series_builder: SeriesBuilder | None = None,
         model_config: ModelConfig | None = None,
@@ -114,6 +118,8 @@ class ForecastEnginePipeline:
         )
         self._curated_writer = curated_writer or CuratedDatasetWriter(self._config.curated_storage)
         self._model_writer = model_writer or WinningModelWriter(self._config.model_storage)
+        self._forecast_export_writer = forecast_export_writer or ForecastExportWriter(self._config.forecast_export)
+        self._artifacts_mirror_writer = artifacts_mirror_writer or ArtifactsMirrorWriter(self._config.artifacts_mirror)
         self._group_generator = group_generator or GroupGenerator(self._config.grouping)
         self._series_builder = series_builder or SeriesBuilder(self._config.grouping)
         self._curated_validator = curated_validator or CuratedDatasetValidator(self._config.quality)
@@ -236,7 +242,9 @@ class ForecastEnginePipeline:
             self._generate_explainability(context)
             self._select_production_models(context)
             self._persist_winning_models(context)
+            self._export_forecasts(context)
             self._generate_business_insights(context)
+            self._mirror_artifacts(context)
             self._track_to_mlflow(context)
         except Exception as exc:
             # The stage trail already records which stage failed; passing it
@@ -549,6 +557,20 @@ class ForecastEnginePipeline:
             context.fail_stage(record, exc)
             raise
 
+    # Export the run's forecast output as one downloadable CSV
+    def _export_forecasts(self, context: PipelineContext) -> None:
+        record = context.begin_stage("Export Forecasts")
+        selection = context.production_selection_report
+        winners = list(selection.results) if selection else []
+
+        result = self._forecast_export_writer.write(winners, context.run_id)
+        context.forecast_export_result = result
+
+        if result["persisted"]:
+            context.complete_stage(record, f"{result['rows']:,} forecast row(s) exported across {len(winners):,} group(s).")
+        else:
+            context.complete_stage(record, result["error"] or "Nothing to export.")
+
     # Stage 13 — LLM business insights (Section 6.12)
     def _generate_business_insights(self, context: PipelineContext) -> None:
         record = context.begin_stage("Generate Business Insights")
@@ -580,6 +602,19 @@ class ForecastEnginePipeline:
         except ForecastEngineError as exc:
             context.fail_stage(record, exc)
             raise
+
+    # Mirror business insights and the LLM trace outside MLflow
+    def _mirror_artifacts(self, context: PipelineContext) -> None:
+        record = context.begin_stage("Mirror Artifacts")
+        result = self._artifacts_mirror_writer.write(
+            context.insight_report.to_dict() if context.insight_report else {},
+            context.llm_trace,
+            context.run_id,
+        )
+        context.artifacts_mirror_result = result
+
+        persisted = [p for p in result.get("persisted", []) if p["persisted"]]
+        context.complete_stage(record, f"{len(persisted):,} artifact file(s) mirrored.")
 
     # Stage 14 — MLflow experiment tracking & model registry (Section 6.13)
     def _track_to_mlflow(self, context: PipelineContext) -> None:

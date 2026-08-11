@@ -200,6 +200,36 @@ class ModelStorageConfig:
 
 
 @dataclass(frozen=True)
+class ForecastExportConfig:
+    """Where the run's exported forecast values are written.
+
+    A business-facing export — the actual forecast values every group
+    produced (dates, point forecast, bounds) — separate from the curated
+    dataset (the *input* the models trained on) and from the winning
+    `.pkl` (the *model*, not its output). Same shape as the other storage
+    configs: only the location lives here.
+    """
+
+    enabled: bool = True
+    root_dir: str = "forecasts"
+
+
+@dataclass(frozen=True)
+class ArtifactsMirrorConfig:
+    """Where a copy of this run's business insights and LLM trace is
+    written outside MLflow.
+
+    MLflow remains the primary, authoritative record (Section 6.13) —
+    this is a duplicate for direct blob access, not a replacement. Only
+    already-serialized JSON already produced for the run summary is
+    copied here; nothing is recomputed or re-rendered.
+    """
+
+    enabled: bool = True
+    root_dir: str = "artifacts"
+
+
+@dataclass(frozen=True)
 class GroupingConfig:
     """Controls how business keys become forecasting groups."""
 
@@ -253,6 +283,8 @@ class PipelineConfig:
     quality: QualityConfig = field(default_factory=QualityConfig)
     curated_storage: CuratedStorageConfig = field(default_factory=CuratedStorageConfig)
     model_storage: ModelStorageConfig = field(default_factory=ModelStorageConfig)
+    forecast_export: ForecastExportConfig = field(default_factory=ForecastExportConfig)
+    artifacts_mirror: ArtifactsMirrorConfig = field(default_factory=ArtifactsMirrorConfig)
     grouping: GroupingConfig = field(default_factory=GroupingConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     forecast_defaults: ForecastDefaults = field(default_factory=ForecastDefaults)
@@ -272,6 +304,8 @@ class PipelineConfig:
             quality=_build_block(QualityConfig, payload.get("quality")),
             curated_storage=_build_block(CuratedStorageConfig, payload.get("curated_storage")),
             model_storage=_build_block(ModelStorageConfig, payload.get("model_storage")),
+            forecast_export=_build_block(ForecastExportConfig, payload.get("forecast_export")),
+            artifacts_mirror=_build_block(ArtifactsMirrorConfig, payload.get("artifacts_mirror")),
             grouping=_build_block(GroupingConfig, payload.get("grouping")),
             execution=_build_block(ExecutionConfig, payload.get("execution")),
             forecast_defaults=_build_block(ForecastDefaults, payload.get("forecast_defaults")),

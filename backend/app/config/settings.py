@@ -158,6 +158,18 @@ class Settings(BaseSettings):
     # from datasets; again an existing container, no new account.
     databricks_models_volumes_root: str = "/Volumes/forecastiq/forecasting/models_files"
 
+    # Unity Catalog external volume over the ADLS `forecasts` container,
+    # where the engine writes the run's exported forecast CSV — the
+    # business-facing output, separate from curated input and the
+    # winning model. Existing container, no new account.
+    databricks_forecasts_volumes_root: str = "/Volumes/forecastiq/forecasting/forecasts_files"
+
+    # Unity Catalog external volume over the ADLS `artifacts` container,
+    # where the engine writes a blob-accessible copy of business insights
+    # and the LLM trace, alongside MLflow's own copy. Existing container,
+    # no new account.
+    databricks_artifacts_volumes_root: str = "/Volumes/forecastiq/forecasting/artifacts_files"
+
     azure_storage_connection_string: str | None = None
     # Dataset preview reads the uploaded file back from ADLS. A container-
     # scoped read-only SAS is preferred over the connection string: it cannot

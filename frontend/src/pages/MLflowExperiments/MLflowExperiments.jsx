@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { FlaskConical, AlertCircle } from 'lucide-react'
 import PageContainer from '../../components/common/PageContainer'
 import SectionContainer from '../../components/layout/SectionContainer'
@@ -7,6 +7,125 @@ import Loader from '../../components/ui/Loader'
 import Select from '../../components/ui/Select'
 import { fetchDeployments, fetchMLflowRun } from '../../services'
 import { formatRunLabel } from '../../utils/formatDateTime'
+import { fallbackModelOptions, forecastModels } from '../../data/appConfig'
+import { cn } from '../../utils/cn'
+
+// Display names the platform already defines (appConfig.js) rather than a
+// second hardcoded label set — `xgboost` -> "XGBoost", `seasonal_naive` ->
+// "Seasonal naive", and so on.
+const MODEL_DISPLAY_NAMES = Object.fromEntries(
+  [...forecastModels, ...fallbackModelOptions].map((m) => [m.id, m.name])
+)
+
+function modelDisplayName(id) {
+  return MODEL_DISPLAY_NAMES[id] || id
+}
+
+// A fixed, small categorical palette for model chips — cycled by model
+// name so the same model always gets the same color within a run, and
+// never confused with the amber "fallback" treatment (Section 4: fallback
+// must be visually distinguishable from a normal selection, not just
+// another color in the same rotation).
+const MODEL_CHIP_TONES = [
+  'bg-brand-50 text-brand-700 border-brand-200 dark:bg-brand-500/10 dark:text-brand-300 dark:border-brand-500/30',
+  'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:border-sky-500/30',
+  'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-500/10 dark:text-violet-300 dark:border-violet-500/30',
+  'bg-teal-50 text-teal-700 border-teal-200 dark:bg-teal-500/10 dark:text-teal-300 dark:border-teal-500/30',
+  'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:border-rose-500/30',
+]
+
+function modelChipTone(modelName) {
+  let hash = 0
+  for (let i = 0; i < modelName.length; i++) hash = (hash * 31 + modelName.charCodeAt(i)) % MODEL_CHIP_TONES.length
+  return MODEL_CHIP_TONES[hash]
+}
+
+// One model's (or the fallback bucket's) badge plus every key it won,
+// wrapped rather than truncated — Requirement 2 is explicit that every
+// key must be visible, so this never hides keys behind a "+N more".
+function ModelKeyGroup({ label, count, keys, tone, isFallback }) {
+  return (
+    <div className="rounded-lg border border-slate-100 p-3 dark:border-slate-800">
+      <div className="mb-2 flex items-center gap-2">
+        <span
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold',
+            tone
+          )}
+        >
+          {isFallback && <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />}
+          {label}
+        </span>
+        <span className="text-[11px] text-slate-400">
+          {count} key{count === 1 ? '' : 's'}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {keys.map((key) => (
+          <span
+            key={key}
+            className="rounded-md bg-slate-50 px-1.5 py-0.5 font-mono text-[11px] text-slate-600 dark:bg-slate-800/60 dark:text-slate-300"
+          >
+            {key}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// Requirement 2: which model won for which key, derived entirely from
+// `per_key` (already fetched for the "Child runs by key" table below) —
+// no separate request, no duplicated or hardcoded key/model data.
+// Fallback keys are grouped in their own bucket rather than under
+// whichever model actually produced the fallback forecast, so "won on
+// merit" and "fell back to" never look the same at a glance.
+function ModelSelectionSummary({ perKey }) {
+  const { modelGroups, fallbackKeys } = useMemo(() => {
+    const groups = new Map()
+    const fallback = []
+    for (const outcome of perKey) {
+      if (outcome.fallback_used) {
+        fallback.push(outcome.group_id)
+      } else if (outcome.model) {
+        const list = groups.get(outcome.model) || []
+        list.push(outcome.group_id)
+        groups.set(outcome.model, list)
+      }
+    }
+    return {
+      modelGroups: [...groups.entries()].sort((a, b) => b[1].length - a[1].length),
+      fallbackKeys: fallback,
+    }
+  }, [perKey])
+
+  if (modelGroups.length === 0 && fallbackKeys.length === 0) {
+    return <p className="text-xs text-slate-400">No production model was selected for any key yet.</p>
+  }
+
+  return (
+    <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+      {modelGroups.map(([model, keys]) => (
+        <ModelKeyGroup
+          key={model}
+          label={modelDisplayName(model)}
+          count={keys.length}
+          keys={keys}
+          tone={modelChipTone(model)}
+        />
+      ))}
+      {fallbackKeys.length > 0 && (
+        <ModelKeyGroup
+          label="Fallback"
+          count={fallbackKeys.length}
+          keys={fallbackKeys}
+          isFallback
+          tone="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/30"
+        />
+      )}
+    </div>
+  )
+}
 
 /**
  * MLflow Experiments — the run-level audit view.
@@ -176,6 +295,11 @@ export default function MLflowExperiments() {
           <div className="grid gap-4 lg:grid-cols-3">
             <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
               <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
+                Model Selection Summary
+              </h3>
+              <ModelSelectionSummary perKey={detail.per_key} />
+
+              <h3 className="mb-3 mt-5 border-t border-slate-100 pt-4 text-sm font-semibold text-slate-800 dark:border-slate-800 dark:text-slate-100">
                 Parameters logged
               </h3>
               <dl className="space-y-1.5">
@@ -205,8 +329,18 @@ export default function MLflowExperiments() {
                       <th className="px-4 py-2 font-medium">Model</th>
                       <th className="px-4 py-2 font-medium">Accuracy</th>
                       <th className="px-4 py-2 font-medium">Drift test</th>
-                      <th className="px-4 py-2 text-right font-medium">Statistic</th>
-                      <th className="px-4 py-2 text-right font-medium">Threshold</th>
+                      <th
+                        className="px-4 py-2 text-right font-medium"
+                        title="The calculated drift statistic for this key — compared against the threshold to its right to determine the drift result."
+                      >
+                        Drift Statistic
+                      </th>
+                      <th
+                        className="px-4 py-2 text-right font-medium"
+                        title="The threshold the drift statistic is compared against. Statistic ≤ threshold passes."
+                      >
+                        Threshold
+                      </th>
                     </tr>
                   </thead>
                   <tbody>

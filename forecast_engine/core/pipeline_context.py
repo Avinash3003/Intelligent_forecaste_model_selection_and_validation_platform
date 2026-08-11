@@ -131,6 +131,12 @@ class PipelineContext:
     # fitted model was persisted, and where. Written by the Persist
     # Winning Models stage.
     model_storage_results: list[dict[str, Any]] = field(default_factory=list)
+    # The run's exported forecast CSV — where it was written, or why not.
+    # Written by the Export Forecasts stage.
+    forecast_export_result: dict[str, Any] = field(default_factory=dict)
+    # Business insights / LLM trace mirrored outside MLflow. Written by
+    # the Mirror Artifacts stage.
+    artifacts_mirror_result: dict[str, Any] = field(default_factory=dict)
 
     # Model Training output: one record per (group, model) pair, holding the
     # fitted estimator and its training metadata. This is the next phase's
@@ -285,6 +291,8 @@ class PipelineContext:
             ),
             "curated_dataset_uri": self.curated_dataset_uri,
             "model_storage_results": self.model_storage_results,
+            "forecast_export_result": self.forecast_export_result,
+            "artifacts_mirror_result": self.artifacts_mirror_result,
             "selected_models": self.selected_models,
             "fallback_model": self.fallback_model,
             "training_report": self.training_report.to_dict() if self.training_report else None,

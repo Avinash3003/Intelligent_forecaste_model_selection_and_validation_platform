@@ -426,7 +426,29 @@ class DatabricksRunner(PipelineRunner):
         # Same reasoning for the winning models the run persists: a
         # relative root would put them on disposable driver storage.
         payload["model_storage"] = {"root_dir": self._models_root()}
+        # Same reasoning again for the exported forecast CSV and the
+        # artifacts mirror — both outlive the run only if they land on a
+        # UC Volume, not the driver's disposable working directory.
+        payload["forecast_export"] = {"root_dir": self._forecasts_root()}
+        payload["artifacts_mirror"] = {"root_dir": self._artifacts_root()}
         return payload
+
+    def _forecasts_root(self) -> str:
+        """The forecasts volume's run directory — *without* the run id.
+
+        Like the curated writer, the forecast export writer appends the
+        run id itself into the file name it constructs.
+        """
+        return f"{self._settings.databricks_forecasts_volumes_root.rstrip('/')}/runs"
+
+    def _artifacts_root(self) -> str:
+        """The artifacts volume's run directory — *without* the run id.
+
+        Like the models writer, the artifacts mirror writer appends the
+        run id itself, which is also what keeps one run's mirrored
+        artifacts from overwriting another's.
+        """
+        return f"{self._settings.databricks_artifacts_volumes_root.rstrip('/')}/runs"
 
     def _curated_root(self, run_id: str) -> str:
         """The curated volume's run directory — *without* the run id.

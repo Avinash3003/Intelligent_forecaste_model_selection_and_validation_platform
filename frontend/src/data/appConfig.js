@@ -18,9 +18,12 @@ export const sidebarNav = [
   { label: 'Forecast Pipeline', path: '/forecast-pipeline', icon: 'GitBranch', permission: 'forecast:run' },
   { label: 'Deployments', path: '/deployments', icon: 'Rocket', permission: 'run:read' },
   { label: 'Results', path: '/results', icon: 'LineChart', permission: 'results:read' },
-  { label: 'MLflow Experiments', path: '/mlflow-experiments', icon: 'FlaskConical', permission: 'model:inspect' },
-  { label: 'LLMOps Observability', path: '/llmops-observability', icon: 'Bot', permission: 'model:inspect' },
-  { label: 'Settings', path: '/settings', icon: 'Settings' },
+  { label: 'Experiments', path: '/mlflow-experiments', icon: 'FlaskConical', permission: 'model:inspect' },
+  { label: 'Observability', path: '/llmops-observability', icon: 'Bot', permission: 'model:inspect' },
+  // Settings is not implemented yet — hidden from navigation, not deleted.
+  // The route and Settings.jsx component are untouched in AppRoutes.jsx;
+  // uncomment this entry once the page is ready.
+  // { label: 'Settings', path: '/settings', icon: 'Settings' },
 ]
 
 // ---------------------------------------------------------------------------

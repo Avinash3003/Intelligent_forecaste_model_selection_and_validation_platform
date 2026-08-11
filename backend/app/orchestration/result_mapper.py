@@ -53,6 +53,12 @@ def map_summary_to_result(
             # Written by Persist Winning Models — where each group's winning
             # fitted model was durably stored, and whether it was.
             "model_storage": _model_storage(summary.get("model_storage_results") or []),
+            # Written by Export Forecasts — the run's downloadable forecast
+            # CSV, or why it was not produced.
+            "forecast_export": summary.get("forecast_export_result") or {},
+            # Written by Mirror Artifacts — the blob-accessible copy of
+            # business insights / the LLM trace, alongside MLflow's own.
+            "artifacts_mirror": summary.get("artifacts_mirror_result") or {},
         },
         forecast_results=summary.get("evaluation_report") or {},
         metrics={
