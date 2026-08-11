@@ -158,6 +158,28 @@ class DatabricksRunner(PipelineRunner):
     # Workspace client
     # ------------------------------------------------------------------
 
+    # Explicit, conservative SDK timeouts (Section 6.14 performance review).
+    #
+    # `_refresh()` calls `jobs.get_run()` on every status poll — from the
+    # frontend's 3-second cadence, that is one call every few seconds for
+    # as long as a run is active. The SDK's own defaults are tuned for a
+    # one-off CLI invocation, not that cadence: `retry_timeout_seconds`
+    # defaults to 300 (5 minutes), so one flaky call can hold a worker
+    # thread retrying for far longer than the next poll is even five
+    # minutes away — the poll loop was already going to try again in 3
+    # seconds regardless. Trimming the retry budget to 30s does not make
+    # retries more aggressive (backoff/attempt policy is unchanged, only
+    # the ceiling is lower) — it just fails a stuck call fast enough that
+    # "stuck" resolves on the *next* poll instead of on a five-minute wall
+    # clock. `http_timeout_seconds` is left at the SDK's own default (60s)
+    # explicitly rather than implicitly: `files.download()` of a large
+    # run's `summary.json` is the one call on this client that can
+    # legitimately take a while, and 60s per attempt is enough headroom for
+    # that without this reasoning silently drifting if the SDK's default
+    # ever changes.
+    _WORKSPACE_HTTP_TIMEOUT_SECONDS = 60.0
+    _WORKSPACE_RETRY_TIMEOUT_SECONDS = 30
+
     @property
     def _workspace(self) -> Any:
         """The Databricks SDK client, built on first use.
@@ -178,6 +200,7 @@ class DatabricksRunner(PipelineRunner):
 
         try:
             from databricks.sdk import WorkspaceClient
+            from databricks.sdk.config import Config
         except ImportError as exc:  # pragma: no cover - dependency is declared
             raise ExecutionError(
                 "Databricks execution is unavailable because the Databricks SDK is not installed."
@@ -191,14 +214,26 @@ class DatabricksRunner(PipelineRunner):
             if client_id and client_secret:
                 # OAuth machine-to-machine with an Entra service principal:
                 # workspace-scoped, rotatable, and not tied to any person.
-                self._client = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+                config = Config(
+                    host=host,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    http_timeout_seconds=self._WORKSPACE_HTTP_TIMEOUT_SECONDS,
+                    retry_timeout_seconds=self._WORKSPACE_RETRY_TIMEOUT_SECONDS,
+                )
             elif token:
-                self._client = WorkspaceClient(host=host, token=token)
+                config = Config(
+                    host=host,
+                    token=token,
+                    http_timeout_seconds=self._WORKSPACE_HTTP_TIMEOUT_SECONDS,
+                    retry_timeout_seconds=self._WORKSPACE_RETRY_TIMEOUT_SECONDS,
+                )
             else:
                 raise ExecutionError(
                     "Databricks execution is selected but no workspace credential is configured. "
                     "An administrator needs to supply a service principal."
                 )
+            self._client = WorkspaceClient(config=config)
         except ExecutionError:
             raise
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types

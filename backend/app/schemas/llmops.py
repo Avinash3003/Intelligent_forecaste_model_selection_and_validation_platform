@@ -106,3 +106,42 @@ class LLMOpsResponse(BaseModel):
     available: bool = False
     summary: LLMOpsSummary = Field(default_factory=LLMOpsSummary)
     calls: list[LLMOpsCall] = Field(default_factory=list)
+
+
+class PromptVersionUsage(BaseModel):
+    """LLM usage/performance/quality aggregated across every completed run
+    that used one prompt version — Section 13.1's "prompt version as a
+    first-class artifact" extended to reporting, not just to which files
+    load. Every number here is a sum or a rate over that version's real
+    calls; nothing is estimated or backfilled for a run with no data.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    prompt_version: str
+    runs_included: int = 0
+
+    # Usage: what was actually spent.
+    call_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    cost_available: bool = False
+
+    # Performance: how fast it answered.
+    average_latency_ms: float | None = None
+
+    # Quality: how good the answers were, and how often the system had to
+    # compensate — computed from each group's *final* outcome (after any
+    # retries), not from every intermediate attempt.
+    groundedness_rate: float | None = None
+    validation_pass_rate: float | None = None
+    retry_rate: float | None = None
+    fallback_rate: float | None = None
+
+
+class PromptUsageResponse(BaseModel):
+    """Every prompt version seen across completed runs, most active first."""
+
+    versions: list[PromptVersionUsage] = Field(default_factory=list)

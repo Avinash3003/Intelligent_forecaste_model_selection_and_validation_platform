@@ -132,6 +132,11 @@ export default function Results() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [notFound, setNotFound] = useState(false)
+  // A client-side abort because the response took too long — not the same
+  // as a real failure. A large run's first, cold-cache load can genuinely
+  // take a while (see `LARGE_RESULT_TIMEOUT_MS`), so this gets its own
+  // friendlier message and a retry instead of "Could not load results".
+  const [timedOut, setTimedOut] = useState(false)
 
   // Live status for the selected run. Stops on its own once terminal.
   const { status, notFound: statusNotFound, error: statusError } = useRunStatusPolling(run)
@@ -165,6 +170,7 @@ export default function Results() {
       setLoading(true)
       setError(null)
       setNotFound(false)
+      setTimedOut(false)
       try {
         const response = await fetchResults(targetRun, targetGroup || undefined)
         if (signal?.aborted) return
@@ -180,7 +186,10 @@ export default function Results() {
         if (err.status === 404) setNotFound(true)
         // 409 means "still running" — the poller is already handling that,
         // so it is not surfaced as an error.
-        else if (err.status !== 409) setError(err.message)
+        else if (err.status !== 409) {
+          if (err.isTimeout) setTimedOut(true)
+          else setError(err.message)
+        }
       } finally {
         if (!signal?.aborted) setLoading(false)
       }
@@ -313,6 +322,31 @@ export default function Results() {
             <div>
               <p className="font-medium">Could not check run status</p>
               <p className="mt-0.5">{statusError}</p>
+            </div>
+          </div>
+        </SectionContainer>
+      )
+    }
+
+    // A large run's first, cold-cache load can genuinely take longer than
+    // usual — this is not a failure, so it gets its own message and a
+    // manual retry rather than the red "Could not load results" box below.
+    if (timedOut) {
+      return (
+        <SectionContainer>
+          <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            <div>
+              <p className="font-medium">This run is taking longer than usual to load</p>
+              <p className="mt-0.5">
+                Large runs with many forecast keys can take a little longer the first time their results are
+                opened. This is expected — try again in a moment.
+              </p>
+              <div className="mt-3">
+                <Button variant="secondary" onClick={() => loadResults(run, groupId)}>
+                  Try again
+                </Button>
+              </div>
             </div>
           </div>
         </SectionContainer>

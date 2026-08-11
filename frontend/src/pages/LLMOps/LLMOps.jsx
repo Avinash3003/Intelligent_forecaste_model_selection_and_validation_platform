@@ -9,9 +9,10 @@ import SearchBox from '../../components/ui/SearchBox'
 import Pagination from '../../components/common/Pagination'
 import Card from '../../components/ui/Card'
 import LLMCallCard from './components/LLMCallCard'
-import { fetchDeployments, fetchLlmObservability } from '../../services'
+import { fetchDeployments, fetchLlmObservability, fetchPromptUsage } from '../../services'
 import { formatRunLabel } from '../../utils/formatDateTime'
 import { formatCost, formatGroundedness, formatLatency, formatTokens } from '../../utils/formatLlmMetrics'
+import { cn } from '../../utils/cn'
 
 const PAGE_SIZE = 20
 
@@ -50,6 +51,114 @@ function SummaryTile({ label, value, sub }) {
   )
 }
 
+function MetricRow({ label, value }) {
+  return (
+    <div className="flex items-center justify-between border-b border-slate-100 py-2 text-sm last:border-0 dark:border-slate-800">
+      <span className="text-slate-400">{label}</span>
+      <span className="font-medium tabular-nums text-slate-700 dark:text-slate-200">{value}</span>
+    </div>
+  )
+}
+
+// A version's numbers, split into the three families the spec calls out:
+// usage (what was spent), performance (how fast), quality (how good, and
+// how often the system had to compensate via retry/fallback).
+function PromptVersionDetail({ v }) {
+  return (
+    <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+      <div>
+        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Usage</h4>
+        <MetricRow label="Calls" value={v.call_count.toLocaleString('en-US')} />
+        <MetricRow label="Input Tokens" value={formatTokens(v.input_tokens)} />
+        <MetricRow label="Output Tokens" value={formatTokens(v.output_tokens)} />
+        <MetricRow label="Total Tokens" value={formatTokens(v.total_tokens)} />
+        <MetricRow label="Estimated Cost" value={formatCost(v.estimated_cost_usd, v.cost_available)} />
+      </div>
+      <div>
+        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Performance</h4>
+        <MetricRow label="Avg Latency" value={formatLatency(v.average_latency_ms)} />
+        <MetricRow label="Runs Included" value={v.runs_included.toLocaleString('en-US')} />
+      </div>
+      <div>
+        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Quality</h4>
+        <MetricRow label="Groundedness" value={formatGroundedness(v.groundedness_rate)} />
+        <MetricRow label="Validation Pass" value={formatGroundedness(v.validation_pass_rate)} />
+        <MetricRow label="Retry Rate" value={formatGroundedness(v.retry_rate)} />
+        <MetricRow label="Fallback Rate" value={formatGroundedness(v.fallback_rate)} />
+      </div>
+    </div>
+  )
+}
+
+// Usage/performance/quality aggregated across every completed run, grouped
+// by the prompt version each run actually used (Section 13's per-run trace,
+// summed server-side — no second tracking system, see
+// `LLMOpsService.get_prompt_usage`). Deliberately its own fetch and its own
+// state: this reports across all runs, while the rest of the page reports
+// on the one run selected below, and the two must never be conflated.
+function PromptUsageSection({ usage, loading, error, selected, onSelect }) {
+  if (loading) return <Loader label="Loading prompt usage…" />
+
+  if (error) {
+    return (
+      <div className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-sm text-rose-600 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
+        <AlertCircle size={16} className="mt-0.5 shrink-0" />
+        <span>{error}</span>
+      </div>
+    )
+  }
+
+  if (!usage || !usage.versions.length) {
+    return (
+      <EmptyState
+        icon={Bot}
+        title="No prompt usage yet"
+        description="Once a run completes with LLM activity, its calls will be aggregated here by prompt version."
+      />
+    )
+  }
+
+  const activeVersion = usage.versions.find((v) => v.prompt_version === selected) || usage.versions[0]
+
+  return (
+    <div className="space-y-4">
+      {/* A pure selector, not a second copy of the numbers — every figure
+          it might otherwise repeat (calls, tokens, latency, cost...)
+          already lives in the detail card below, once. Only shown at all
+          once there is something to switch between. */}
+      {usage.versions.length > 1 && (
+        <div className="flex flex-wrap gap-2">
+          {usage.versions.map((v) => (
+            <button
+              key={v.prompt_version}
+              type="button"
+              onClick={() => onSelect(v.prompt_version)}
+              className={cn(
+                'rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors',
+                v.prompt_version === activeVersion.prompt_version
+                  ? 'border-brand-300 bg-brand-50 text-brand-700 dark:border-brand-700 dark:bg-brand-900/30 dark:text-brand-300'
+                  : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50'
+              )}
+            >
+              {v.prompt_version}
+              <span className="ml-1.5 text-xs opacity-70">
+                {v.call_count.toLocaleString('en-US')} call{v.call_count === 1 ? '' : 's'}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
+          Prompt: {activeVersion.prompt_version}
+        </h3>
+        <PromptVersionDetail v={activeVersion} />
+      </div>
+    </div>
+  )
+}
+
 /**
  * LLMOps Observability — the LLM activity behind one run's business
  * insights: what was called, with what tokens/latency/cost, whether it
@@ -76,6 +185,21 @@ export default function LLMOps() {
   const [statusFilter, setStatusFilter] = useState(ALL)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+
+  const [promptUsage, setPromptUsage] = useState(null)
+  const [promptUsageLoading, setPromptUsageLoading] = useState(true)
+  const [promptUsageError, setPromptUsageError] = useState(null)
+  const [selectedPromptVersion, setSelectedPromptVersion] = useState(null)
+
+  useEffect(() => {
+    fetchPromptUsage()
+      .then((res) => {
+        setPromptUsage(res)
+        if (res.versions.length) setSelectedPromptVersion(res.versions[0].prompt_version)
+      })
+      .catch((e) => setPromptUsageError(e.message || String(e)))
+      .finally(() => setPromptUsageLoading(false))
+  }, [])
 
   useEffect(() => {
     fetchDeployments()
@@ -161,6 +285,21 @@ export default function LLMOps() {
           The LLM activity behind this run's business insights — every call, its tokens, latency, cost,
           grounding and schema validation outcome.
         </p>
+      </div>
+
+      <div className="mb-6">
+        <SectionContainer
+          title="Prompt Usage & Performance"
+          subtitle="Usage, performance and quality aggregated across every completed run, grouped by prompt version"
+        >
+          <PromptUsageSection
+            usage={promptUsage}
+            loading={promptUsageLoading}
+            error={promptUsageError}
+            selected={selectedPromptVersion}
+            onSelect={setSelectedPromptVersion}
+          />
+        </SectionContainer>
       </div>
 
       {runsLoading && <Loader label="Loading runs…" />}

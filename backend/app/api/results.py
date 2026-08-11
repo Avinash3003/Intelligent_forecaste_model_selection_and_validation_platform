@@ -12,7 +12,7 @@ from app.auth.models import Permission, Principal
 from app.orchestration.exceptions import RunNotReadyError, UnknownRunError
 from app.schemas.debug import DebugSummary
 from app.schemas.dataset_preview import DatasetPreview
-from app.schemas.llmops import LLMOpsResponse
+from app.schemas.llmops import LLMOpsResponse, PromptUsageResponse
 from app.services.dataset_preview_service import (
     DatasetPreviewService,
     get_dataset_preview_service,
@@ -25,6 +25,20 @@ from app.services.result_service import ResultService
 router = APIRouter(prefix="/results", tags=["Results"])
 result_service = ResultService()
 debug_service = DebugService()
+
+
+@router.get(
+    "/llmops/prompt-usage",
+    response_model=PromptUsageResponse,
+    summary="LLMOps observability — usage/performance/quality aggregated by prompt version",
+)
+def get_prompt_usage(
+    service: LLMOpsService = Depends(get_llmops_service),
+    principal: Principal = Depends(require(Permission.MODEL_INSPECT)),
+) -> PromptUsageResponse:
+    # Declared before "/{run_id}" so this exact path can never be
+    # shadowed by the run_id path param, regardless of route ordering.
+    return service.get_prompt_usage()
 
 
 @router.get("/{run_id}", response_model=ResultsResponse, summary="Get the Forecast Insights Dashboard for a run")

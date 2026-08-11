@@ -4,10 +4,17 @@ import { API_BASE_URL, REQUEST_TIMEOUT_MS } from './apiConfig'
 // calling code only ever has to handle one error type and can always show
 // `error.message` directly to the user — never a raw exception.
 export class ApiError extends Error {
-  constructor(message, { status } = {}) {
+  constructor(message, { status, isTimeout = false } = {}) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    // A client-side abort because the response took too long — distinct
+    // from every other failure mode. A large-but-legitimate payload that
+    // is still loading is not the same situation as a 404/500/network
+    // failure, and callers that show a message need to tell them apart
+    // (see Results.jsx, whose Results page can genuinely take longer than
+    // the default timeout on a large run's first, cold-cache load).
+    this.isTimeout = isTimeout
   }
 }
 
@@ -53,9 +60,9 @@ async function authHeaders() {
   }
 }
 
-async function request(path, { method = 'GET', body, isFormData = false } = {}) {
+async function request(path, { method = 'GET', body, isFormData = false, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   // FormData must set its own multipart boundary, so Content-Type is
   // omitted for uploads — but the Authorization header applies to both.
@@ -75,7 +82,7 @@ async function request(path, { method = 'GET', body, isFormData = false } = {}) 
   } catch (error) {
     clearTimeout(timeoutId)
     if (error.name === 'AbortError') {
-      throw new ApiError('The request took too long to respond. Please try again.')
+      throw new ApiError('The request took too long to respond. Please try again.', { isTimeout: true })
     }
     throw new ApiError('Unable to reach the server. Please check your connection and try again.')
   }
@@ -91,7 +98,7 @@ async function request(path, { method = 'GET', body, isFormData = false } = {}) 
 }
 
 export const apiClient = {
-  get: (path) => request(path, { method: 'GET' }),
-  post: (path, body) => request(path, { method: 'POST', body }),
+  get: (path, { timeoutMs } = {}) => request(path, { method: 'GET', timeoutMs }),
+  post: (path, body, { timeoutMs } = {}) => request(path, { method: 'POST', body, timeoutMs }),
   postForm: (path, formData) => request(path, { method: 'POST', body: formData, isFormData: true }),
 }
