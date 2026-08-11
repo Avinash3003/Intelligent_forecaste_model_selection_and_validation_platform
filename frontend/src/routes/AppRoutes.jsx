@@ -6,6 +6,7 @@ import Deployments from '../pages/Deployments/Deployments'
 import PipelineDetails from '../pages/Deployments/PipelineDetails'
 import Results from '../pages/Results/Results'
 import MLflowExperiments from '../pages/MLflowExperiments/MLflowExperiments'
+import LLMOps from '../pages/LLMOps/LLMOps'
 import Settings from '../pages/Settings/Settings'
 import RequirePermission from '../auth/RequirePermission'
 import { PERMISSIONS } from '../auth/permissions'
@@ -55,6 +56,14 @@ export default function AppRoutes() {
           element={
             <RequirePermission permission={PERMISSIONS.MODEL_INSPECT}>
               <MLflowExperiments />
+            </RequirePermission>
+          }
+        />
+        <Route
+          path="/llmops-observability"
+          element={
+            <RequirePermission permission={PERMISSIONS.MODEL_INSPECT}>
+              <LLMOps />
             </RequirePermission>
           }
         />

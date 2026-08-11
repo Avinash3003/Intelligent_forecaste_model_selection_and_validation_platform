@@ -67,6 +67,9 @@ def map_summary_to_result(
         # The generated narrative itself, not just its status — the Results
         # dashboard renders it directly.
         business_insights=summary.get("insight_report") or {},
+        # Written by Generate Business Insights — one record per LLM call
+        # attempt, consumed by the LLMOps observability view.
+        llm_trace=summary.get("llm_trace") or {},
         # Per-group history (bounded tail) backing the actual-vs-forecast chart.
         forecast_groups=summary.get("forecast_groups") or [],
         execution_summary={

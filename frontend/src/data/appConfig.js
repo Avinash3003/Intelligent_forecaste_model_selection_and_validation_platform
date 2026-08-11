@@ -19,6 +19,7 @@ export const sidebarNav = [
   { label: 'Deployments', path: '/deployments', icon: 'Rocket', permission: 'run:read' },
   { label: 'Results', path: '/results', icon: 'LineChart', permission: 'results:read' },
   { label: 'MLflow Experiments', path: '/mlflow-experiments', icon: 'FlaskConical', permission: 'model:inspect' },
+  { label: 'LLMOps Observability', path: '/llmops-observability', icon: 'Bot', permission: 'model:inspect' },
   { label: 'Settings', path: '/settings', icon: 'Settings' },
 ]
 

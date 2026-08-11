@@ -12,12 +12,14 @@ from app.auth.models import Permission, Principal
 from app.orchestration.exceptions import RunNotReadyError, UnknownRunError
 from app.schemas.debug import DebugSummary
 from app.schemas.dataset_preview import DatasetPreview
+from app.schemas.llmops import LLMOpsResponse
 from app.services.dataset_preview_service import (
     DatasetPreviewService,
     get_dataset_preview_service,
 )
 from app.schemas.results import ResultsResponse
 from app.services.debug_service import DebugService
+from app.services.llmops_service import LLMOpsService, get_llmops_service
 from app.services.result_service import ResultService
 
 router = APIRouter(prefix="/results", tags=["Results"])
@@ -53,6 +55,25 @@ def get_debug_summary(
     # inspect; only an unknown run_id is an error here.
     try:
         return debug_service.get_debug_summary(run_id)
+    except UnknownRunError as exc:
+        raise HTTPException(status_code=404, detail="That run could not be found.") from exc
+
+
+@router.get(
+    "/{run_id}/llmops",
+    response_model=LLMOpsResponse,
+    summary="LLMOps observability — per-call LLM trace for a run",
+)
+def get_llmops(
+    run_id: str,
+    service: LLMOpsService = Depends(get_llmops_service),
+    principal: Principal = Depends(require(Permission.MODEL_INSPECT)),
+) -> LLMOpsResponse:
+    # Same rationale as /debug: a developer inspecting LLM activity on a
+    # still-running or failed run is the normal case, not an error, so this
+    # does not require COMPLETED. Only an unknown run_id is a 404.
+    try:
+        return service.get_llmops(run_id)
     except UnknownRunError as exc:
         raise HTTPException(status_code=404, detail="That run could not be found.") from exc
 

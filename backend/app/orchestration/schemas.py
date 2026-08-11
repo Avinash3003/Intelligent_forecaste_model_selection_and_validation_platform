@@ -121,6 +121,11 @@ class PipelineExecutionResult(BaseModel):
     # LLM narrative and per-group history, both consumed directly by the
     # Results dashboard.
     business_insights: dict[str, Any] = Field(default_factory=dict)
+    # The detailed per-call LLM trace (Section 13.4) — one record per
+    # attempt. `business_insights["trace_summary"]` carries only the
+    # aggregate; this is the debuggable detail behind it, consumed by the
+    # LLMOps observability view rather than the main Results dashboard.
+    llm_trace: dict[str, Any] = Field(default_factory=dict)
     forecast_groups: list[dict[str, Any]] = Field(default_factory=list)
     execution_summary: dict[str, Any] = Field(default_factory=dict)
 
