@@ -127,6 +127,10 @@ class PipelineContext:
     quality_report: "QualityReport | None" = None
     preprocessing_summary: "PreprocessingSummary | None" = None
     curated_dataset_uri: str | None = None
+    # One record per forecast key describing whether that key's winning
+    # fitted model was persisted, and where. Written by the Persist
+    # Winning Models stage.
+    model_storage_results: list[dict[str, Any]] = field(default_factory=list)
 
     # Model Training output: one record per (group, model) pair, holding the
     # fitted estimator and its training metadata. This is the next phase's
@@ -164,6 +168,10 @@ class PipelineContext:
     # interpretation of everything above. Purely descriptive — nothing here
     # feeds back into any forecasting decision.
     insight_report: "BusinessInsightReport | None" = None
+    # The detailed per-call LLM trace (Section 13.4) — one record per
+    # attempt, including failed/retried ones. `insight_report.trace_summary`
+    # carries only the aggregate; this is the debuggable detail behind it.
+    llm_trace: dict[str, Any] = field(default_factory=dict)
 
     # MLflow tracking output (Section 6.13): whether this run's parameters,
     # metrics, artifacts and winner models were logged/registered. Purely
@@ -276,6 +284,7 @@ class PipelineContext:
                 self.preprocessing_summary.to_dict() if self.preprocessing_summary else None
             ),
             "curated_dataset_uri": self.curated_dataset_uri,
+            "model_storage_results": self.model_storage_results,
             "selected_models": self.selected_models,
             "fallback_model": self.fallback_model,
             "training_report": self.training_report.to_dict() if self.training_report else None,
@@ -288,6 +297,7 @@ class PipelineContext:
                 self.production_selection_report.to_dict() if self.production_selection_report else None
             ),
             "insight_report": self.insight_report.to_dict() if self.insight_report else None,
+            "llm_trace": self.llm_trace,
             "tracking_result": self.tracking_result.to_dict() if self.tracking_result else None,
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "completed_at": self.completed_at.isoformat(timespec="seconds") if self.completed_at else None,

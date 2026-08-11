@@ -157,6 +157,13 @@ def _log_llm_business_summary(client: MLflowClient, result: PipelineResult, conf
     insights = result.business_insights
     client.log_dict_artifact(insights, "insights/business_summary.json")
 
+    # Section 13.4's actual observability requirement: one record per LLM
+    # call, not just the aggregate counts already inside `insights`. Logged
+    # before the early return below so a run where every call failed —
+    # exactly the case this exists to debug — still gets its trace.
+    if result.llm_trace and result.llm_trace.get("calls"):
+        client.log_dict_artifact(result.llm_trace, "insights/llm_trace.json")
+
     if not insights.get("available"):
         return
 

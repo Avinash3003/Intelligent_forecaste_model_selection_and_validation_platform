@@ -64,6 +64,18 @@ class LLMInsightEngine:
         self._service = service or AzureOpenAIService(self._config)
         self._trace: LLMTraceStore | None = trace_store  # built per-run in generate()
 
+    @property
+    def trace_store(self) -> LLMTraceStore | None:
+        """The full per-call trace from the most recent `generate()` call.
+
+        `BusinessInsightReport.trace_summary` (aggregate counts only) is
+        what travels in the run summary; this is the detailed record
+        Section 13.4 actually asks for — one entry per attempt, including
+        failed and retried ones, with per-call tokens/latency/validation/
+        grounding. `None` until `generate()` has run once.
+        """
+        return self._trace
+
     # Generate every group's insight for one pipeline run; never raises
     def generate(self, pipeline_result: PipelineResult) -> BusinessInsightReport:
         report = BusinessInsightReport(prompt_version=self._prompts.version)

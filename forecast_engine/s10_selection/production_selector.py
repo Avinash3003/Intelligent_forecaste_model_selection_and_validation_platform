@@ -200,6 +200,9 @@ class ProductionModelSelector:
             key_values=series.key_values,
             status=FinalSelectionStatus.FALLBACK_USED,
             fallback_used=True,
+            # Carried so persistence can serialize the estimator this path
+            # already fitted, instead of fitting an identical one again.
+            fitted_model=model,
             rejected_candidates=rejected,
             original_candidates=original_candidates,
             fallback_model=fallback_name,

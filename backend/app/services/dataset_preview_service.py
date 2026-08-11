@@ -12,14 +12,19 @@ deliberate choice, not just a convenience:
     row per key per month, so pagination cost stays low without needing the
     raw file's byte-range machinery.
 
-Curated storage is local-disk only today (Section 6.2/6.14) — there is no
-cloud backend yet — so this reads a plain file path, resolved from the run's
-own summary, and never touches Azure.
+The curated file lives wherever the run that produced it wrote it: on the
+local filesystem for local execution, and in the curated Unity Catalog
+Volume for cloud execution. Both are plain POSIX paths in the run's own
+summary; only *this* process's ability to open them differs, since a UC
+Volume path means nothing on the API host. So a path that is not readable
+locally is fetched through the same workspace client the runner already
+uses for the run's other files.
 """
 
 from __future__ import annotations
 
 import csv
+import io
 from collections import OrderedDict
 from pathlib import Path
 
@@ -79,30 +84,58 @@ class DatasetPreviewService:
             self._cache.move_to_end(run_id)
             return self._cache[run_id]
 
-        path = self._curated_path(run_id)
-        if path is None or not path.is_file():
+        uri = self._curated_uri(run_id)
+        if not uri:
             return None
 
-        with path.open("r", newline="", encoding="utf-8", errors="replace") as handle:
-            reader = csv.reader(handle)
-            try:
-                columns = next(reader)
-            except StopIteration:
-                return [], []
-            rows = list(reader)
+        text = self._read(uri)
+        if text is None:
+            return None
+
+        reader = csv.reader(io.StringIO(text))
+        try:
+            columns = next(reader)
+        except StopIteration:
+            return [], []
+        rows = list(reader)
 
         self._cache[run_id] = (columns, rows)
         if len(self._cache) > _CACHE_CAPACITY:
             self._cache.popitem(last=False)
         return columns, rows
 
-    def _curated_path(self, run_id: str) -> Path | None:
+    def _read(self, uri: str) -> str | None:
+        """The curated file's contents, from wherever the run wrote it.
+
+        Tries the local filesystem first, which is both the local-execution
+        case and the cheaper one. A UC Volume path simply is not a local
+        file, so that check fails and the runner's own workspace client
+        fetches it instead.
+        """
+        path = Path(uri)
+        if path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
+        return self._read_remote(uri)
+
+    def _read_remote(self, uri: str) -> str | None:
+        # Only a Databricks-backed runner can reach a UC Volume; a local
+        # runner has no workspace client, and there is nothing to fall back
+        # to, so the preview reports itself unavailable rather than raising.
+        runner = getattr(self._executor, "_runner", None)
+        read_volume_file = getattr(runner, "read_volume_text", None)
+        if read_volume_file is None:
+            return None
+        try:
+            return read_volume_file(uri)
+        except Exception:  # noqa: BLE001 - an unreadable file simply has no preview
+            return None
+
+    def _curated_uri(self, run_id: str) -> str | None:
         try:
             result = self._executor.get_result(run_id)
         except Exception:  # noqa: BLE001 - an unreadable run simply has no preview
             return None
-        uri = (result.run_metadata or {}).get("curated_dataset_uri")
-        return Path(uri) if uri else None
+        return (result.run_metadata or {}).get("curated_dataset_uri") or None
 
 
 _service: DatasetPreviewService | None = None

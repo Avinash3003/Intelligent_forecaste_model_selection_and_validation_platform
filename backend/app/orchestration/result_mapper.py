@@ -13,6 +13,7 @@ Local and Databricks execution can never disagree about the result shape.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Any
 
 from app.orchestration.schemas import ExecutionBackend, JobStatus, PipelineExecutionResult
@@ -49,6 +50,9 @@ def map_summary_to_result(
             # treats as "nothing to show" rather than falling back to the
             # much larger raw upload.
             "curated_dataset_uri": summary.get("curated_dataset_uri"),
+            # Written by Persist Winning Models — where each group's winning
+            # fitted model was durably stored, and whether it was.
+            "model_storage": _model_storage(summary.get("model_storage_results") or []),
         },
         forecast_results=summary.get("evaluation_report") or {},
         metrics={
@@ -76,6 +80,36 @@ def map_summary_to_result(
         completed_at=completed_at,
         duration_seconds=duration_seconds,
     )
+
+
+def _model_storage(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize where this run's winning models were persisted.
+
+    `models_saved` counts models actually written, not groups attempted —
+    a group whose winner could not be serialized is reported by its own
+    entry in `by_group` with the reason, never absorbed into the count.
+    """
+    persisted = [item for item in results if item.get("persisted")]
+
+    return {
+        "models_saved": len(persisted),
+        "groups_total": len(results),
+        # The run's model directory, read back from a path that was really
+        # written rather than recomputed from configuration — so it cannot
+        # report a location the files are not actually in. None when the
+        # run persisted nothing.
+        "location": str(PurePosixPath(persisted[0]["uri"]).parent) if persisted else None,
+        "by_group": {
+            item.get("forecast_group"): {
+                "model_name": item.get("model_name"),
+                "persisted": bool(item.get("persisted")),
+                "uri": item.get("uri"),
+                "error": item.get("error"),
+            }
+            for item in results
+            if item.get("forecast_group")
+        },
+    }
 
 
 def _drift_results_by_group(winners: list[dict[str, Any]]) -> dict[str, Any]:

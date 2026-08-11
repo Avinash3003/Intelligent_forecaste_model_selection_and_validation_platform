@@ -416,7 +416,33 @@ class DatabricksRunner(PipelineRunner):
             payload["fallback_model"] = request.fallback_model
         if request.horizon is not None:
             payload["horizon"] = int(request.horizon)
+        # Curated output, resolved to an absolute UC Volume path here rather
+        # than left to the engine's relative default — on a Databricks driver
+        # that default resolves against a working directory the job destroys
+        # on exit, so the curated dataset never outlived the run. Partitioned
+        # by run id for the same reason the other outputs are: one run must
+        # never overwrite another's.
+        payload["curated_storage"] = {"root_dir": self._curated_root(run_id)}
+        # Same reasoning for the winning models the run persists: a
+        # relative root would put them on disposable driver storage.
+        payload["model_storage"] = {"root_dir": self._models_root()}
         return payload
+
+    def _curated_root(self, run_id: str) -> str:
+        """The curated volume's run directory — *without* the run id.
+
+        The engine's curated writer appends the run id itself, so adding it
+        here too would nest it twice.
+        """
+        return f"{self._settings.databricks_curated_volumes_root.rstrip('/')}/runs"
+
+    def _models_root(self) -> str:
+        """The models volume's run directory — *without* the run id.
+
+        Like the curated writer, the model writer appends the run id itself,
+        which is also what keeps one run from overwriting another's models.
+        """
+        return f"{self._settings.databricks_models_volumes_root.rstrip('/')}/runs"
 
     def _trigger_databricks_job(
         self, run_id: str, request: PipelineExecutionRequest, dataset_uri: str
@@ -507,6 +533,20 @@ class DatabricksRunner(PipelineRunner):
         if payload is not None:
             return payload
         return self._history.get_summary(record.run_id)
+
+    def read_volume_text(self, uri: str) -> str | None:
+        """A UC Volume file's contents as text, or None if unreadable.
+
+        Public because it is the only way a caller outside this package
+        (the Results page's dataset preview) can reach a file the *job*
+        wrote: a UC Volume path is meaningless on the API host's own
+        filesystem, so it has to be fetched through this workspace client.
+        """
+        try:
+            response = self._workspace.files.download(uri)
+            return response.contents.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - absence is normal, not an error
+            return None
 
     def _read_volume_json(self, uri: str | None) -> dict[str, Any] | None:
         if not uri:

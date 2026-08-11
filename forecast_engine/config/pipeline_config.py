@@ -185,6 +185,21 @@ class CuratedStorageConfig:
 
 
 @dataclass(frozen=True)
+class ModelStorageConfig:
+    """Where each forecast key's winning fitted model is written.
+
+    Same shape and the same reasoning as `CuratedStorageConfig`: only the
+    location lives here, and a caller running in the cloud passes an
+    already-resolved absolute path so no storage decision reaches the
+    engine. Only the model that won Final Production Model Selection is
+    persisted — candidates that lost are not.
+    """
+
+    enabled: bool = True
+    root_dir: str = "models"
+
+
+@dataclass(frozen=True)
 class GroupingConfig:
     """Controls how business keys become forecasting groups."""
 
@@ -237,6 +252,7 @@ class PipelineConfig:
     aggregation: AggregationConfig = field(default_factory=AggregationConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
     curated_storage: CuratedStorageConfig = field(default_factory=CuratedStorageConfig)
+    model_storage: ModelStorageConfig = field(default_factory=ModelStorageConfig)
     grouping: GroupingConfig = field(default_factory=GroupingConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     forecast_defaults: ForecastDefaults = field(default_factory=ForecastDefaults)
@@ -255,6 +271,7 @@ class PipelineConfig:
             aggregation=_build_block(AggregationConfig, payload.get("aggregation")),
             quality=_build_block(QualityConfig, payload.get("quality")),
             curated_storage=_build_block(CuratedStorageConfig, payload.get("curated_storage")),
+            model_storage=_build_block(ModelStorageConfig, payload.get("model_storage")),
             grouping=_build_block(GroupingConfig, payload.get("grouping")),
             execution=_build_block(ExecutionConfig, payload.get("execution")),
             forecast_defaults=_build_block(ForecastDefaults, payload.get("forecast_defaults")),

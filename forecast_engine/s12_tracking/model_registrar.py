@@ -21,7 +21,7 @@ as logging.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -73,6 +73,21 @@ if _PYFUNC_AVAILABLE:
                 }
             )
 
+    def _signature_for(wrapper: "_FrozenForecastModel") -> Any:
+        """A model signature inferred from the wrapper's own output.
+
+        Unity Catalog refuses to register any model without one ("did not
+        contain any signature metadata"). `predict` ignores `model_input`
+        entirely (see its docstring), so the input side is a placeholder
+        shaped like what a caller would pass — not data the model reads —
+        and the output side is the same DataFrame `predict` already
+        returns, computed once here and reused, not called twice.
+        """
+        from mlflow.models import infer_signature
+
+        input_example = pd.DataFrame({"horizon": [float(len(wrapper.forecast.get("values", [])))]})
+        return infer_signature(input_example, wrapper.predict(None))
+
 
 @dataclass
 class ModelRegistrationResult:
@@ -89,6 +104,13 @@ class ModelRegistrationResult:
     model_version: str | None = None
     registered_at: str | None = None
     error: str | None = None
+    # The registry metadata actually applied to this version, and any
+    # failure to apply it. Separate from `error` on purpose: a model that
+    # registered but could not be annotated is registered, and reporting
+    # it as a registration failure would be a lie in the more alarming
+    # direction.
+    metadata_tags: dict[str, str] = field(default_factory=dict)
+    tag_error: str | None = None
 
     # Convert to a plain dict for the tracking report
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +123,8 @@ class ModelRegistrationResult:
             "model_version": self.model_version,
             "registered_at": self.registered_at,
             "error": self.error,
+            "metadata_tags": self.metadata_tags,
+            "tag_error": self.tag_error,
         }
 
 
@@ -161,11 +185,7 @@ def _register_one(
             python_model=wrapper,
             artifact_path=f"model-{group_slug}",
             registered_model_name=registered_model_name,
-            tags={
-                "forecast_group": group_id,
-                "model_name": model_name,
-                "fallback_used": str(bool(winner.get("fallback_flag", False))),
-            },
+            signature=_signature_for(wrapper),
         )
     except MLflowTrackingError as exc:
         return ModelRegistrationResult(
@@ -173,6 +193,29 @@ def _register_one(
         )
 
     version = getattr(model_info, "registered_model_version", None)
+
+    # Applied to the version just created rather than passed to the logging
+    # call, which only accepts tags on MLflow 3.x — see
+    # MLflowClient.set_model_version_tags. These identify *which* selection
+    # this version records, so the registry alone answers "what did the
+    # platform put into production for this group, and was it a fallback".
+    tags = {
+        "forecast_group": group_id,
+        "model_name": model_name,
+        "fallback_used": str(bool(winner.get("fallback_flag", False))),
+    }
+    tag_error: str | None = None
+    if version is None:
+        tag_error = "No registered version was returned, so metadata could not be attached."
+    else:
+        try:
+            client.set_model_version_tags(registered_model_name, str(version), tags)
+        except MLflowTrackingError as exc:
+            # The model is registered; only its annotation failed. Recorded
+            # rather than raised so one group's tagging problem neither
+            # downgrades its own registration nor stops the next group's.
+            tag_error = str(exc)
+
     return ModelRegistrationResult(
         forecast_group=group_id,
         model_name=model_name,
@@ -181,4 +224,6 @@ def _register_one(
         registered_model_name=registered_model_name,
         model_version=str(version) if version is not None else None,
         registered_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        metadata_tags=tags if tag_error is None else {},
+        tag_error=tag_error,
     )

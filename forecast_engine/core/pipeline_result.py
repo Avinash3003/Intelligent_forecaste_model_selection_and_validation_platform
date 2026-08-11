@@ -61,6 +61,9 @@ class PipelineResult:
     final_winner_models: list[dict[str, Any]] = field(default_factory=list)
     forecast_outputs: list[dict[str, Any]] = field(default_factory=list)
     business_insights: dict[str, Any] = field(default_factory=dict)
+    # Detailed per-call LLM trace (Section 13.4) — separate from the
+    # aggregate counts inside `business_insights["trace_summary"]`.
+    llm_trace: dict[str, Any] = field(default_factory=dict)
 
     # Serialize for logging, MLflow tracking and the LLM Insight Engine
     def to_dict(self) -> dict[str, Any]:
@@ -85,6 +88,7 @@ class PipelineResult:
             "final_winner_models": self.final_winner_models,
             "forecast_outputs": self.forecast_outputs,
             "business_insights": self.business_insights,
+            "llm_trace": self.llm_trace,
         }
 
 
@@ -165,6 +169,7 @@ class PipelineResultBuilder:
             final_winner_models=winners,
             forecast_outputs=forecast_outputs,
             business_insights=context.insight_report.to_dict() if context.insight_report else {},
+            llm_trace=context.llm_trace,
         )
 
 

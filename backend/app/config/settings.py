@@ -141,6 +141,23 @@ class Settings(BaseSettings):
     # databricks.yml's `volumes_root`; no second storage location is created.
     databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
 
+    # Unity Catalog external volume over the ADLS `curated` container, where
+    # the engine writes the curated (post-preprocessing) dataset. A separate
+    # volume from the one above so raw uploads and derived datasets keep
+    # their own lifecycle and retention; both are existing containers, and
+    # no new storage account is introduced.
+    #
+    # Read only for cloud execution. Local runs keep the engine's own
+    # relative default, which is correct there because the filesystem
+    # outlives the process.
+    databricks_curated_volumes_root: str = "/Volumes/forecastiq/forecasting/curated_files"
+
+    # Unity Catalog external volume over the ADLS `models` container,
+    # where the engine writes each forecast key's winning fitted model.
+    # Its own container so serialized models keep a lifecycle separate
+    # from datasets; again an existing container, no new account.
+    databricks_models_volumes_root: str = "/Volumes/forecastiq/forecasting/models_files"
+
     azure_storage_connection_string: str | None = None
     # Dataset preview reads the uploaded file back from ADLS. A container-
     # scoped read-only SAS is preferred over the connection string: it cannot

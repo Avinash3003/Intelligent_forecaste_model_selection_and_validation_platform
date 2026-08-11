@@ -50,6 +50,7 @@ from forecast_engine.s01_preprocessing.group_generator import GroupGenerator
 from forecast_engine.s01_preprocessing.series_builder import SeriesBuilder
 from forecast_engine.s02_quality.quality_assessor import DataQualityAssessor
 from forecast_engine.s03_storage.curated_writer import CuratedDatasetWriter
+from forecast_engine.s03_storage.model_writer import WinningModelWriter
 from forecast_engine.s04_training.curated_validator import CuratedDatasetValidator
 from forecast_engine.s04_training.model_trainer import ModelTrainer
 from forecast_engine.s05_models.model_registry import ModelRegistry
@@ -82,6 +83,7 @@ class ForecastEnginePipeline:
         quality_assessor: DataQualityAssessor | None = None,
         preprocessor: DataPreprocessor | None = None,
         curated_writer: CuratedDatasetWriter | None = None,
+        model_writer: WinningModelWriter | None = None,
         group_generator: GroupGenerator | None = None,
         series_builder: SeriesBuilder | None = None,
         model_config: ModelConfig | None = None,
@@ -111,6 +113,7 @@ class ForecastEnginePipeline:
             self._config.aggregation,
         )
         self._curated_writer = curated_writer or CuratedDatasetWriter(self._config.curated_storage)
+        self._model_writer = model_writer or WinningModelWriter(self._config.model_storage)
         self._group_generator = group_generator or GroupGenerator(self._config.grouping)
         self._series_builder = series_builder or SeriesBuilder(self._config.grouping)
         self._curated_validator = curated_validator or CuratedDatasetValidator(self._config.quality)
@@ -232,6 +235,7 @@ class ForecastEnginePipeline:
             self._evaluate_models(context)
             self._generate_explainability(context)
             self._select_production_models(context)
+            self._persist_winning_models(context)
             self._generate_business_insights(context)
             self._track_to_mlflow(context)
         except Exception as exc:
@@ -519,6 +523,32 @@ class ForecastEnginePipeline:
             context.fail_stage(record, exc)
             raise
 
+    # Persist the winning fitted model for each forecast key
+    def _persist_winning_models(self, context: PipelineContext) -> None:
+        record = context.begin_stage("Persist Winning Models")
+        try:
+            # Runs after selection so "the winner" is already decided, and
+            # reads the fitted wrapper the training stage kept on its own
+            # record — nothing is retrained here, and no candidate that lost
+            # is written. A key that cannot be persisted is reported on its
+            # own record rather than ending the run: the forecast itself is
+            # already complete and correct by this point.
+            selection = context.production_selection_report
+            winners = list(selection.results) if selection else []
+            trained = context.training_report.trained_models() if context.training_report else []
+
+            results = self._model_writer.write_all(winners, trained, context.run_id)
+            context.model_storage_results = results
+
+            persisted = sum(1 for item in results if item["persisted"])
+            context.record(models_persisted=persisted)
+            context.complete_stage(
+                record, f"{persisted:,} winning model(s) persisted of {len(results):,} group(s)."
+            )
+        except ForecastEngineError as exc:
+            context.fail_stage(record, exc)
+            raise
+
     # Stage 13 — LLM business insights (Section 6.12)
     def _generate_business_insights(self, context: PipelineContext) -> None:
         record = context.begin_stage("Generate Business Insights")
@@ -532,6 +562,8 @@ class ForecastEnginePipeline:
             pipeline_result = PipelineResultBuilder().build(context)
             report = self._insight_engine.generate(pipeline_result)
             context.insight_report = report
+            if self._insight_engine.trace_store is not None:
+                context.llm_trace = self._insight_engine.trace_store.to_dict()
 
             trace = report.trace_summary or {}
             detail = (
@@ -743,7 +775,17 @@ def main(argv: list[str] | None = None) -> int:
         configuration = build_configuration_from_args(args)
         # Run-level options may also travel inside --config; see
         # apply_config_run_options for why cloud execution needs that.
-        apply_config_run_options(args, load_config_payload(args))
+        config_payload = load_config_payload(args)
+        apply_config_run_options(args, config_payload)
+
+        # The same payload also carries pipeline-level blocks. Only
+        # `curated_storage` is set by a caller today, and only for cloud
+        # execution: its default root is *relative*, which on a Databricks
+        # driver resolves against a working directory that is destroyed when
+        # the job ends, so the curated dataset would not outlive the run.
+        # The caller passes an already-resolved absolute path, which keeps
+        # every storage decision outside the engine.
+        pipeline_config = PipelineConfig.from_dict(config_payload) if config_payload else None
 
         evaluation_config = EvaluationConfig.default()
         if args.horizon is not None:
@@ -756,7 +798,9 @@ def main(argv: list[str] | None = None) -> int:
             # user-chosen horizon without needing it threaded separately.
             evaluation_config = replace(evaluation_config, forecast_horizon=args.horizon)
 
-        pipeline = ForecastEnginePipeline(evaluation_config=evaluation_config)
+        pipeline = ForecastEnginePipeline(
+            evaluation_config=evaluation_config, pipeline_config=pipeline_config
+        )
         context = pipeline.run(
             args.dataset,
             configuration,

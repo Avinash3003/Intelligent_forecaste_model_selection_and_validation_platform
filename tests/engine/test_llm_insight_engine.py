@@ -164,6 +164,33 @@ def test_happy_path_returns_llm_generated_grounded_payload(config):
     assert report.trace_summary["estimated_cost_usd"] == pytest.approx(0.15 * 0.5 + 0.6 * 0.1)
 
 
+def test_the_detailed_per_call_trace_is_available_after_generate(config):
+    """`trace_summary` on the report is aggregate-only; Section 13.4's
+    actual per-call record (one entry per attempt, with its own tokens,
+    validation, and grounding status) must be reachable separately so it
+    can be persisted, not just counted."""
+    result = _make_result([{"group_id": "1 | 1", "model": "xgboost", "wmape": 8.2}])
+    service = FakeAzureOpenAIService([_valid_json("xgboost", 8.2)])
+    engine = LLMInsightEngine(config=config, service=service)
+
+    engine.generate(result)
+
+    store = engine.trace_store
+    assert store is not None
+    calls = store.to_dict()["calls"]
+    assert len(calls) == 1
+    assert calls[0]["group_id"] == "1 | 1"
+    assert calls[0]["validation_status"] == "passed"
+    assert calls[0]["grounding_status"] == "grounded"
+    assert calls[0]["final_status"] == "success"
+
+
+def test_trace_store_is_none_before_generate_has_run(config):
+    engine = LLMInsightEngine(config=config, service=FakeAzureOpenAIService([]))
+
+    assert engine.trace_store is None
+
+
 def test_routing_sends_single_rejection_group_to_the_simple_deployment(config):
     result = _make_result([{"group_id": "1 | 1", "model": "xgboost", "wmape": 8.2, "rejected": []}])
     service = FakeAzureOpenAIService([_valid_json("xgboost", 8.2)])

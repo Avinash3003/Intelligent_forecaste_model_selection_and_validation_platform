@@ -74,6 +74,15 @@ class ProductionModelResult:
     # decision. Populated for both a ranked winner and a fallback.
     forecast: ForwardForecast | None = None
 
+    # The fitted estimator behind this decision, when the fallback path
+    # produced it. A ranked winner's estimator already lives on its
+    # training record; the fallback's is fitted here during selection and
+    # would otherwise be discarded, so persistence would have to refit it.
+    # Excluded from `to_dict()` — a live in-process object, not part of
+    # the run's serializable record — exactly as `TrainedModel` treats its
+    # own. Holding it changes no decision this stage makes.
+    fitted_model: Any = None
+
     # Serialize the full production decision to a plain dict
     def to_dict(self) -> dict[str, Any]:
         return {

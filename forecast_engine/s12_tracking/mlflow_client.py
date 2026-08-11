@@ -226,7 +226,7 @@ class MLflowClient:
         python_model: Any,
         artifact_path: str,
         registered_model_name: str,
-        tags: dict[str, str] | None = None,
+        signature: Any = None,
     ) -> Any:
         """Log a `mlflow.pyfunc.PythonModel` and register it in one call.
 
@@ -235,6 +235,21 @@ class MLflowClient:
         used for every model family (statistical, tree-based, or the
         seasonal-naive fallback) deliberately — one wrapper avoids a
         five-way branch of near-identical native-flavour logging code.
+
+        Registry metadata is *not* passed here. `log_model` grew a `tags`
+        argument only in MLflow 3.x, and 2.x's signature has no `**kwargs`
+        to absorb it, so supplying it raises `TypeError` on every 2.x
+        deployment — which is what the pinned runtime resolves to. Tags are
+        applied through `set_model_version_tags` instead, whose API is
+        identical across both, so one code path serves every supported
+        version. See that method.
+
+        `signature` is accepted (built by the caller via
+        `mlflow.models.infer_signature`, not here — this facade never
+        inspects a model's own data) because Unity Catalog rejects any
+        registration missing one: "Model passed for registration did not
+        contain any signature metadata." Optional rather than required so
+        a caller that logs without registering is unaffected.
         """
         mlflow = self._sdk()
         try:
@@ -242,11 +257,37 @@ class MLflowClient:
                 artifact_path=artifact_path,
                 python_model=python_model,
                 registered_model_name=registered_model_name,
-                tags=tags or {},
+                signature=signature,
             )
         except Exception as exc:  # noqa: BLE001
             raise MLflowTrackingError(
                 f"Failed to register model '{registered_model_name}': {exc}"
+            ) from exc
+
+    def set_model_version_tags(self, name: str, version: str, tags: dict[str, str]) -> None:
+        """Attach registry metadata to one registered model version.
+
+        The counterpart to `register_pyfunc_model`: the tags land on the
+        version that call produced, which is where the Model Registry
+        surfaces them. `log_model` waits for the new version to reach a
+        terminal state before returning (`await_registration_for`), so the
+        version referenced here already exists by the time this runs.
+
+        Raises:
+            MLflowTrackingError: if the tags cannot be applied. The caller
+                decides what that means — a registration that succeeded but
+                could not be annotated is still a registration.
+        """
+        safe = {sanitize_key(str(key)): _stringify(value) for key, value in tags.items() if value is not None}
+        if not safe:
+            return
+        try:
+            client = self._sdk().tracking.MlflowClient()
+            for key, value in safe.items():
+                client.set_model_version_tag(name=name, version=str(version), key=key, value=value)
+        except Exception as exc:  # noqa: BLE001
+            raise MLflowTrackingError(
+                f"Failed to tag version {version} of model '{name}': {exc}"
             ) from exc
 
     def _sdk(self) -> Any:
