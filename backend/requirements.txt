@@ -11,6 +11,12 @@ openpyxl==3.1.5
 # Databricks SDK, which is what lets the same reader work against a
 # Databricks tracking server with only the URI changing.
 mlflow-skinny==2.17.2
+# mlflow-skinny's MlflowClient needs this to talk to a local sqlite tracking
+# store (the local-dev default and what tests run against) — mlflow-skinny
+# itself does not bundle it. Was already present transitively in every
+# developer's venv but missing from this file, so a clean install (CI) fails.
+sqlalchemy>=2.0,<3
+alembic>=1.13,<2
 
 # Dataset preview: reads the uploaded file back from ADLS for the Results
 # page. Read-only — the backend is given a container-scoped SAS, never an
