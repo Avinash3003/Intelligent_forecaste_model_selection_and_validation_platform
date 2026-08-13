@@ -3,30 +3,64 @@
 # The primary cloud execution path (see docs/execution-modes.md): no VM,
 # no Docker image, no ACR pull — Databricks-managed compute resolves the
 # wheel's dependencies from the `environments:` spec below. Same wheel,
-# same entry point, same four-parameter contract as
-# forecast_job_dcs.yml — the only thing that differs above the runtime
-# boundary is which compute layer runs it.
+# same entry point, same four-parameter contract as forecast_job_dcs.yml —
+# the only thing that differs above the runtime boundary is which compute
+# layer runs it, and (as of this multi-task DAG) how many tasks that
+# compute runs it as.
 #
-# ONE task running the complete existing forecast_engine workflow, exactly
-# as the DCS job does — the engine already sequences all 14 stages
-# internally, so splitting it into Databricks tasks here would duplicate
-# that orchestration.
+# ELEVEN tasks, not one — reflecting the engine's own stage dependencies,
+# not visual effect:
+#
+#   load_prepare -> build_series -> train_models -> evaluate_models
+#     -> explain_models -> rank_select
+#         -> persist_models  \
+#         -> export_forecasts +-> business_insights -> mirror_artifacts
+#                             /                          -> mlflow_tracking
+#
+# persist_models and export_forecasts are the one genuine parallel branch:
+# `run_pipeline.py`'s `_persist_winning_models` and `_export_forecasts`
+# both read only Rank & Select's output and write to disjoint context
+# fields/files — neither depends on the other. Every other edge is a real
+# data dependency (see run_pipeline.py's `ForecastEnginePipeline.
+# STAGE_GROUP_PREDECESSORS`), not an artificial split: Ranking normalizes
+# scores across a group's own surviving candidates (a real barrier),
+# Selection walks that ranking in order, and MLflow is last so the LLM
+# Business Summary is available to log.
+#
+# Model/group-level fan-out (5 model families x N forecast groups) stays
+# INSIDE train_models/evaluate_models/explain_models exactly as before —
+# the engine already handles that internally, and splitting it into
+# per-model or per-group Databricks tasks would multiply this POC's
+# limited Serverless task-startup/environment overhead for no benefit at
+# this scale. See the model-parallelism analysis for why.
+#
+# Each task is one `python_wheel_task` call to the SAME entry point the
+# single-task job used to call for the whole pipeline, now given
+# `--stage-group <name>` so `ForecastEnginePipeline.run_stage()` runs only
+# that group's stages and checkpoints `PipelineContext` to the shared
+# `checkpoint_dir` for the next task to resume from (see
+# forecast_engine/core/pipeline_checkpoint.py) — nothing about any stage's
+# own logic changed for this split.
 
 resources:
   jobs:
     forecast_pipeline_serverless:
       name: ${var.job_name}
       description: >-
-        Runs the complete forecast_engine pipeline (load -> preprocess -> train ->
-        evaluate -> explain -> rank -> drift-gate -> select -> insights -> MLflow)
-        as a single task on Databricks Serverless compute.
+        Runs the forecast_engine pipeline (load -> preprocess -> train -> evaluate
+        -> explain -> rank -> drift-gate -> select -> insights -> MLflow) as an
+        11-task DAG on Databricks Serverless compute, with Persist Winning Models
+        and Export Forecasts running in parallel after Rank & Select.
 
-      # Identical four-parameter contract to forecast_job_dcs.yml — see that
-      # file for why per-run values travel in `config` rather than as flat
-      # job parameters. Kept in lockstep on purpose: the backend's
+      # Identical four-parameter contract to forecast_job_dcs.yml plus one
+      # addition (checkpoint_dir) this multi-task DAG needs — see that file
+      # for why per-run values travel in `config` rather than as flat job
+      # parameters. Kept in lockstep on purpose: the backend's
       # DatabricksRunner (parameterized to target either job — see
-      # app/orchestration/databricks_runner.py) builds the same job_parameters
-      # dict for both.
+      # app/orchestration/databricks_runner.py) builds the same
+      # job_parameters dict for both, and never needs to know this job has
+      # eleven tasks instead of one — `checkpoint_dir` has a default here
+      # exactly like `summary_out`/`live_status_out` already do.
       parameters:
         - name: dataset
           # --dataset. No default: a forgotten `--params` must fail loudly,
@@ -43,15 +77,43 @@ resources:
         - name: live_status_out
           default: ${var.volumes_root}/runs/{{job.run_id}}/live_status.json
 
-      tasks:
-        - task_key: run_forecast_pipeline_serverless
-          # Required for python_wheel_task on serverless compute; resolves
-          # dependencies from the `environments:` spec below instead of a
-          # `libraries:` stanza on a cluster (serverless has no cluster).
-          environment_key: forecast_env
+        # Where PipelineContext checkpoints land between tasks — one file
+        # per stage group (after_<stage_group>.pkl), all under this one
+        # run-scoped directory. `{{job.run_id}}` (Databricks' own run id)
+        # is shared by every task in the same job run, exactly like
+        # summary_out/live_status_out above.
+        - name: checkpoint_dir
+          default: ${var.volumes_root}/runs/{{job.run_id}}/_checkpoint
 
-          # Console script declared in pyproject.toml:
-          #   [project.scripts] forecast-engine = "forecast_engine.run_pipeline:main"
+        # AZURE_OPENAI_* — only business_insights actually calls Azure
+        # OpenAI, so only that task's parameters reference these (see
+        # below). Same `${var.azure_openai_*}` values the DCS job sets
+        # directly via spark_env_vars — each resolves through this
+        # bundle's existing `{{secrets/forecastiq/...}}` reference in the
+        # target's variable override, never a literal here. Databricks
+        # does not resolve that reference in job parameters the way it
+        # does in a cluster's spark_env_vars, so `run_pipeline.py` resolves
+        # it itself via `dbutils.secrets.get()` — see the note on
+        # `environments:` below. Empty (the unconfigured default) means no
+        # value is passed and the engine reports insights unavailable,
+        # exactly as before this DAG existed.
+        - name: azure_openai_endpoint
+          default: ${var.azure_openai_endpoint}
+
+        - name: azure_openai_api_key
+          default: ${var.azure_openai_api_key}
+
+        - name: azure_openai_deployment
+          default: ${var.azure_openai_deployment}
+
+      tasks:
+        # 1. Load, detect frequency, assess quality, preprocess, persist +
+        # verify the curated dataset. No predecessor — opens the MLflow
+        # Parent Run (see ForecastEnginePipeline.run_stage()) so a failure
+        # at any later task still closes a real MLflow run with an
+        # accurate status, exactly as the single-task job already did.
+        - task_key: load_prepare
+          environment_key: forecast_env
           python_wheel_task:
             package_name: forecast_engine
             entry_point: forecast-engine
@@ -64,7 +126,262 @@ resources:
               - "{{job.parameters.summary_out}}"
               - --live-status-out
               - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - load_prepare
 
+        # 2. Generate forecast groups, build ForecastSeries.
+        - task_key: build_series
+          depends_on:
+            - task_key: load_prepare
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - build_series
+
+        # 3. Train every selected model on every forecast group — the
+        # engine's own internal (group x model) fan-out, unchanged.
+        - task_key: train_models
+          depends_on:
+            - task_key: build_series
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - train_models
+
+        # 4. Backtest, forward-forecast and validate every trained model.
+        - task_key: evaluate_models
+          depends_on:
+            - task_key: train_models
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - evaluate_models
+
+        # 5. SHAP / feature-importance for every surviving model.
+        - task_key: explain_models
+          depends_on:
+            - task_key: evaluate_models
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - explain_models
+
+        # 6. Rank & drift-gated Final Production Model Selection. A real
+        # barrier: ranking normalizes each metric across every surviving
+        # candidate WITHIN a forecast group before any one of them gets a
+        # score, so it cannot start until that group's evaluation and
+        # explainability are both complete.
+        - task_key: rank_select
+          depends_on:
+            - task_key: explain_models
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - rank_select
+
+        # 7. Persist the winning model per group (.pkl). Reads ONLY Rank &
+        # Select's output and writes to its own files — Export Forecasts
+        # (below) reads the identical upstream state and writes to
+        # different files, so THE TWO ARE INDEPENDENT: neither is in the
+        # other's `depends_on`, which is what makes Databricks schedule
+        # them in parallel.
+        - task_key: persist_models
+          depends_on:
+            - task_key: rank_select
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - persist_models
+
+        # 8. Export the run's forecast CSV. Independent of persist_models —
+        # see that task's comment.
+        - task_key: export_forecasts
+          depends_on:
+            - task_key: rank_select
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - export_forecasts
+
+        # 9. LLM Business Insights — the ALREADY VERIFIED Serverless ->
+        # Azure OpenAI integration, untouched. Waits for BOTH parallel
+        # branches (depends_on lists both task keys, which Databricks
+        # requires to complete — either order, either success — before
+        # starting this task) and merges their two checkpoints
+        # (pipeline_checkpoint.merge_checkpoints) before continuing, so the
+        # context it builds the LLM prompt from carries both persisted
+        # model URIs and the exported forecast.
+        - task_key: business_insights
+          depends_on:
+            - task_key: persist_models
+            - task_key: export_forecasts
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - business_insights
+              - --azure-openai-endpoint
+              - "{{job.parameters.azure_openai_endpoint}}"
+              - --azure-openai-api-key
+              - "{{job.parameters.azure_openai_api_key}}"
+              - --azure-openai-deployment
+              - "{{job.parameters.azure_openai_deployment}}"
+
+        # 10. Mirror the insight report + LLM trace outside MLflow.
+        - task_key: mirror_artifacts
+          depends_on:
+            - task_key: business_insights
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - mirror_artifacts
+
+        # 11. MLflow logging — last, on purpose, so the LLM Business
+        # Summary artifact from task 9 is available to log. Writes the
+        # final summary_out, exactly as the single-task job's last stage
+        # did.
+        - task_key: mlflow_tracking
+          depends_on:
+            - task_key: mirror_artifacts
+          environment_key: forecast_env
+          python_wheel_task:
+            package_name: forecast_engine
+            entry_point: forecast-engine
+            parameters:
+              - --dataset
+              - "{{job.parameters.dataset}}"
+              - --config
+              - "{{job.parameters.config}}"
+              - --summary-out
+              - "{{job.parameters.summary_out}}"
+              - --live-status-out
+              - "{{job.parameters.live_status_out}}"
+              - --checkpoint-dir
+              - "{{job.parameters.checkpoint_dir}}"
+              - --stage-group
+              - mlflow_tracking
+
+      # One environment, defined once, referenced by every task above
+      # (`environment_key: forecast_env`) — Databricks resolves it per
+      # task without needing eleven copies of the same dependency list.
       environments:
         - environment_key: forecast_env
           spec:
@@ -96,22 +413,37 @@ resources:
               - openai>=1.30,<2.0
               - mlflow>=2.15,<3.0
 
+              # dbutils.secrets.get() access (via databricks.sdk.runtime) —
+              # how run_pipeline.py resolves the AZURE_OPENAI_* job
+              # parameters, since Databricks does not resolve
+              # `{{secrets/...}}` syntax in job parameters the way it does
+              # in a cluster's spark_env_vars. Typically preinstalled on
+              # Databricks compute already; pinned explicitly rather than
+              # relied upon implicitly.
+              - databricks-sdk>=0.20,<1.0
+
       # MLflow tracking: Databricks compute (serverless included) defaults
       # `MLFLOW_TRACKING_URI` to its own managed store with no environment
       # variable needed — this is standard MLflow-on-Databricks behavior,
       # not something this job configures. What the DCS job's
-      # `spark_env_vars` sets explicitly and this job CANNOT currently set:
+      # `spark_env_vars` sets explicitly and this job still CANNOT set:
       #   - MLFLOW_REGISTRY_URI=databricks-uc (Unity Catalog model registry)
-      #   - AZURE_OPENAI_* (LLM business insights)
       # `python_wheel_task` on serverless has no `spark_env_vars` equivalent
       # available in this bundle's Databricks CLI version (verified against
-      # the installed CLI's bundle schema — `environment_variables` /
-      # `environment_variables_key` are not yet present). Until the CLI is
-      # upgraded to a version whose schema includes them, this job registers
-      # winning models to the legacy workspace registry rather than Unity
-      # Catalog, and reports business insights as unavailable — both fail
-      # soft by design (see forecast_engine's own graceful-degradation
-      # behavior), never a hard failure. See docs/execution-modes.md.
+      # the installed CLI's bundle schema — neither `environment_variables`
+      # nor an `environment_variables_key` field exists on `jobs.Task` or
+      # `compute.Environment` in this CLI's schema). This job therefore still
+      # registers winning models to the legacy workspace registry rather than
+      # Unity Catalog — fails soft by design, never a hard failure.
+      #
+      # The MLflow Parent Run itself now spans multiple tasks/processes: the
+      # first task (load_prepare) opens it, every later task resumes it
+      # (MLflowTrackingPipeline.resume(), forecast_engine/s12_tracking/
+      # tracking_pipeline.py) by reopening the same run id carried on the
+      # checkpointed PipelineContext, and the last task (mlflow_tracking)
+      # closes it — the same open-before-stage-1 / close-at-the-end
+      # guarantee the single-task job already gave, now honored across
+      # process boundaries instead of within one.
 
       # A forecasting run is long; two concurrent runs would contend for the
       # same MLflow experiment and output paths.

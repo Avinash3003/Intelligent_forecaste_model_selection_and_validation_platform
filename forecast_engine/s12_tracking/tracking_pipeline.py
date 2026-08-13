@@ -108,6 +108,32 @@ class MLflowTrackingPipeline:
             result.error = f"{type(exc).__name__}: {exc}"
         return result
 
+    # Reopen an already-open run in a NEW process — the multi-task
+    # Databricks workflow's later tasks, none of which called begin().
+    def resume(self, mlflow_run_id: str | None) -> None:
+        """Make `track()`/`fail()` usable again in a fresh process.
+
+        `begin()` opens the Parent Run once, in the first task. Every
+        later task is a separate process with no run active in its own
+        MLflow fluent state, so `self._open` starts `False` there too —
+        without this, `track()`/`fail()` would report "no run was open"
+        even though one genuinely is, on the tracking server.
+
+        No-op (mirroring `begin()`'s own graceful degradation) when
+        `mlflow_run_id` is falsy — tracking was disabled/unavailable when
+        the first task called `begin()`, so there is nothing to resume —
+        or when the reopen itself fails; either way `track()`/`fail()`
+        already treat "not open" as a reportable status, never a crash.
+        """
+        if not mlflow_run_id or not self._config.enabled or not self._client.is_available():
+            return
+        try:
+            self._client.configure()
+            self._client.start_run(run_name="", resume_run_id=mlflow_run_id)
+            self._open = True
+        except Exception:  # noqa: BLE001 - tracking must never crash the pipeline
+            pass
+
     # Log a finished execution into the open run and close it FINISHED; never raises
     def track(self, pipeline_result: PipelineResult, summary: dict | None = None) -> TrackingResult:
         result = self._base_result()

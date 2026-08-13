@@ -105,7 +105,9 @@ class MLflowClient:
                 f"Could not prepare MLflow experiment '{self._config.experiment_name}': {exc}"
             ) from exc
 
-    def start_run(self, run_name: str, tags: dict[str, str] | None = None) -> "ActiveRun":
+    def start_run(
+        self, run_name: str, tags: dict[str, str] | None = None, resume_run_id: str | None = None
+    ) -> "ActiveRun":
         """Open the Parent Run for one forecasting pipeline execution.
 
         Returns the SDK's `ActiveRun`. Unlike a `with` block, the run is
@@ -114,11 +116,22 @@ class MLflowClient:
         a real MLflow run, and closes it with an explicit terminal status
         via `end_run()`. Child Runs (a future extension, e.g. one per
         forecasting group) nest inside it via `mlflow.start_run(nested=True)`.
+
+        Args:
+            resume_run_id: When set, reopens this existing run instead of
+                creating a new one — how a later Databricks task in the
+                multi-task workflow (a separate process, with no run active
+                in its own fluent MLflow state) continues logging into the
+                same Parent Run the first task opened. `run_name`/`tags`
+                are not reapplied in this case; they were already set when
+                the run was first opened.
         """
         if not self._configured:
             self.configure()
         mlflow = self._sdk()
         try:
+            if resume_run_id:
+                return mlflow.start_run(run_id=resume_run_id)
             return mlflow.start_run(run_name=run_name, tags={sanitize_key(k): str(v) for k, v in (tags or {}).items()})
         except Exception as exc:  # noqa: BLE001
             raise MLflowTrackingError(f"Could not start MLflow run '{run_name}': {exc}") from exc
