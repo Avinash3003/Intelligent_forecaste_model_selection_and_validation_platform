@@ -83,7 +83,6 @@ export default function LLMCallCard({ call }) {
           >
             <div className="space-y-4 border-t border-slate-100 px-4 py-4 dark:border-slate-800">
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                <Field label="Prompt version" value={call.prompt_version} />
                 <Field label="Timestamp" value={call.timestamp ? formatISTTime(call.timestamp) : '—'} />
                 <Field label="Input tokens" value={formatTokens(call.input_tokens)} />
                 <Field label="Output tokens" value={formatTokens(call.output_tokens)} />

@@ -13,7 +13,6 @@ import LlmEvaluationSection from './components/LlmEvaluationSection'
 import { fetchDeployments, fetchLlmObservability, fetchPromptUsage } from '../../services'
 import { formatRunLabel } from '../../utils/formatDateTime'
 import { formatCost, formatGroundedness, formatLatency, formatTokens } from '../../utils/formatLlmMetrics'
-import { cn } from '../../utils/cn'
 
 const PAGE_SIZE = 20
 
@@ -61,44 +60,53 @@ function MetricRow({ label, value }) {
   )
 }
 
-// A version's numbers, split into the three families the spec calls out:
-// usage (what was spent), performance (how fast), quality (how good, and
-// how often the system had to compensate via retry/fallback).
-function PromptVersionDetail({ v }) {
-  return (
-    <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-      <div>
-        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Usage</h4>
-        <MetricRow label="Calls" value={v.call_count.toLocaleString('en-US')} />
-        <MetricRow label="Input Tokens" value={formatTokens(v.input_tokens)} />
-        <MetricRow label="Output Tokens" value={formatTokens(v.output_tokens)} />
-        <MetricRow label="Total Tokens" value={formatTokens(v.total_tokens)} />
-        <MetricRow label="Estimated Cost" value={formatCost(v.estimated_cost_usd, v.cost_available)} />
-      </div>
-      <div>
-        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Performance</h4>
-        <MetricRow label="Avg Latency" value={formatLatency(v.average_latency_ms)} />
-        <MetricRow label="Runs Included" value={v.runs_included.toLocaleString('en-US')} />
-      </div>
-      <div>
-        <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Quality</h4>
-        <MetricRow label="Groundedness" value={formatGroundedness(v.groundedness_rate)} />
-        <MetricRow label="Validation Pass" value={formatGroundedness(v.validation_pass_rate)} />
-        <MetricRow label="Retry Rate" value={formatGroundedness(v.retry_rate)} />
-        <MetricRow label="Fallback Rate" value={formatGroundedness(v.fallback_rate)} />
-      </div>
-    </div>
+// Every completed run's usage/performance, summed into one set of numbers
+// (Section 13's per-run trace, aggregated server-side — no second tracking
+// system, see `LLMOpsService.get_prompt_usage`). Deliberately its own fetch
+// and its own state: this reports across all runs, while the rest of the
+// page reports on the one run selected below, and the two must never be
+// conflated. Quality/grounding figures are deliberately not repeated here —
+// their one canonical home is the selected run's own summary further down,
+// so "Groundedness" never shows two different numbers on this page.
+function aggregateUsage(versions) {
+  const totals = versions.reduce(
+    (acc, v) => ({
+      runsIncluded: acc.runsIncluded + v.runs_included,
+      callCount: acc.callCount + v.call_count,
+      inputTokens: acc.inputTokens + v.input_tokens,
+      outputTokens: acc.outputTokens + v.output_tokens,
+      totalTokens: acc.totalTokens + v.total_tokens,
+      costUsd: acc.costUsd + (v.cost_available && v.estimated_cost_usd != null ? v.estimated_cost_usd : 0),
+      costAvailable: acc.costAvailable || v.cost_available,
+      latencySum: acc.latencySum + (v.average_latency_ms ?? 0) * v.call_count,
+      latencyCalls: acc.latencyCalls + (v.average_latency_ms != null ? v.call_count : 0),
+    }),
+    {
+      runsIncluded: 0,
+      callCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      costAvailable: false,
+      latencySum: 0,
+      latencyCalls: 0,
+    }
   )
+  return {
+    runsIncluded: totals.runsIncluded,
+    callCount: totals.callCount,
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    totalTokens: totals.totalTokens,
+    estimatedCostUsd: totals.costAvailable ? totals.costUsd : null,
+    costAvailable: totals.costAvailable,
+    averageLatencyMs: totals.latencyCalls ? totals.latencySum / totals.latencyCalls : null,
+  }
 }
 
-// Usage/performance/quality aggregated across every completed run, grouped
-// by the prompt version each run actually used (Section 13's per-run trace,
-// summed server-side — no second tracking system, see
-// `LLMOpsService.get_prompt_usage`). Deliberately its own fetch and its own
-// state: this reports across all runs, while the rest of the page reports
-// on the one run selected below, and the two must never be conflated.
-function PromptUsageSection({ usage, loading, error, selected, onSelect }) {
-  if (loading) return <Loader label="Loading prompt usage…" />
+function LlmUsageSummary({ usage, loading, error }) {
+  if (loading) return <Loader label="Loading LLM usage…" />
 
   if (error) {
     return (
@@ -113,49 +121,25 @@ function PromptUsageSection({ usage, loading, error, selected, onSelect }) {
     return (
       <EmptyState
         icon={Bot}
-        title="No prompt usage yet"
-        description="Once a run completes with LLM activity, its calls will be aggregated here by prompt version."
+        title="No LLM usage yet"
+        description="Once a run completes with LLM activity, its usage will be summarized here."
       />
     )
   }
 
-  const activeVersion = usage.versions.find((v) => v.prompt_version === selected) || usage.versions[0]
+  const totals = aggregateUsage(usage.versions)
 
   return (
-    <div className="space-y-4">
-      {/* A pure selector, not a second copy of the numbers — every figure
-          it might otherwise repeat (calls, tokens, latency, cost...)
-          already lives in the detail card below, once. Only shown at all
-          once there is something to switch between. */}
-      {usage.versions.length > 1 && (
-        <div className="flex flex-wrap gap-2">
-          {usage.versions.map((v) => (
-            <button
-              key={v.prompt_version}
-              type="button"
-              onClick={() => onSelect(v.prompt_version)}
-              className={cn(
-                'rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors',
-                v.prompt_version === activeVersion.prompt_version
-                  ? 'border-brand-300 bg-brand-50 text-brand-700 dark:border-brand-700 dark:bg-brand-900/30 dark:text-brand-300'
-                  : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800/50'
-              )}
-            >
-              {v.prompt_version}
-              <span className="ml-1.5 text-xs opacity-70">
-                {v.call_count.toLocaleString('en-US')} call{v.call_count === 1 ? '' : 's'}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
-        <h3 className="mb-3 text-sm font-semibold text-slate-800 dark:text-slate-100">
-          Prompt: {activeVersion.prompt_version}
-        </h3>
-        <PromptVersionDetail v={activeVersion} />
-      </div>
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <SummaryTile label="Runs Included" value={totals.runsIncluded.toLocaleString('en-US')} />
+      <SummaryTile label="LLM Calls" value={totals.callCount.toLocaleString('en-US')} />
+      <SummaryTile
+        label="Total Tokens"
+        value={formatTokens(totals.totalTokens)}
+        sub={`${formatTokens(totals.inputTokens)} in · ${formatTokens(totals.outputTokens)} out`}
+      />
+      <SummaryTile label="Avg Latency" value={formatLatency(totals.averageLatencyMs)} />
+      <SummaryTile label="Estimated Cost" value={formatCost(totals.estimatedCostUsd, totals.costAvailable)} />
     </div>
   )
 }
@@ -190,14 +174,10 @@ export default function LLMOps() {
   const [promptUsage, setPromptUsage] = useState(null)
   const [promptUsageLoading, setPromptUsageLoading] = useState(true)
   const [promptUsageError, setPromptUsageError] = useState(null)
-  const [selectedPromptVersion, setSelectedPromptVersion] = useState(null)
 
   useEffect(() => {
     fetchPromptUsage()
-      .then((res) => {
-        setPromptUsage(res)
-        if (res.versions.length) setSelectedPromptVersion(res.versions[0].prompt_version)
-      })
+      .then(setPromptUsage)
       .catch((e) => setPromptUsageError(e.message || String(e)))
       .finally(() => setPromptUsageLoading(false))
   }, [])
@@ -283,23 +263,17 @@ export default function LLMOps() {
 
       <div className="mb-6">
         <SectionContainer
-          title="Prompt Usage & Performance"
-          subtitle="Usage, performance and quality aggregated across every completed run, grouped by prompt version"
+          title="LLM Usage & Performance"
+          subtitle="Usage and performance aggregated across every completed run"
         >
-          <PromptUsageSection
-            usage={promptUsage}
-            loading={promptUsageLoading}
-            error={promptUsageError}
-            selected={selectedPromptVersion}
-            onSelect={setSelectedPromptVersion}
-          />
+          <LlmUsageSummary usage={promptUsage} loading={promptUsageLoading} error={promptUsageError} />
         </SectionContainer>
       </div>
 
       <div className="mb-6">
         <SectionContainer
           title="LLM Evaluation"
-          subtitle="Regression suite (Section 13.3) — is the explanation still correct and high quality for the current prompt version and model?"
+          subtitle="Regression suite — is the explanation still correct and high quality?"
         >
           <LlmEvaluationSection />
         </SectionContainer>
@@ -375,7 +349,7 @@ export default function LLMOps() {
               value={s.deployment || s.provider || '—'}
               sub={s.deployment && s.provider ? s.provider : undefined}
             />
-            <SummaryTile label="Prompt version" value={s.prompt_version || '—'} sub={`Run status: ${s.status}`} />
+            <SummaryTile label="Run Status" value={s.status || '—'} />
           </div>
 
           <div>

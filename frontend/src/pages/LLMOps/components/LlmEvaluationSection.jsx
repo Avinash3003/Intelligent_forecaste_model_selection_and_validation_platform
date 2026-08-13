@@ -21,6 +21,16 @@ function formatPct(value) {
   return `${(value * 100).toFixed(1)}%`
 }
 
+// The evaluation report's one canonical groundedness value — shown once,
+// as a headline, never repeated elsewhere as a second (and possibly
+// different) number on this screen.
+function groundednessStatus(rate) {
+  if (rate == null) return '—'
+  if (rate >= 1) return 'Grounded'
+  if (rate <= 0) return 'Not Grounded'
+  return 'Partially Grounded'
+}
+
 function MetricTile({ label, value, tone }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-3.5 dark:border-slate-800 dark:bg-slate-900">
@@ -152,14 +162,11 @@ export default function LlmEvaluationSection() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm text-slate-500 dark:text-slate-400">
           <span>
             Evaluation Dataset: <span className="font-medium text-slate-700 dark:text-slate-200">{data.dataset_version}</span>
-          </span>
-          <span>
-            Prompt Version: <span className="font-medium text-slate-700 dark:text-slate-200">{data.prompt_version}</span>
           </span>
           <span>
             Generation: <span className="font-medium text-slate-700 dark:text-slate-200">{data.generation_mode}</span>
@@ -167,23 +174,36 @@ export default function LlmEvaluationSection() {
           {data.generated_at && <span>As of {data.generated_at}</span>}
         </div>
         <Badge status={data.regression_passed ? 'Completed' : 'Failed'}>
-          Regression {data.regression_passed ? 'PASS' : 'FAIL'}
+          Overall: {data.regression_passed ? 'Passed' : 'Failed'}
         </Badge>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <MetricTile label="Cases Evaluated" value={data.case_count} />
-        <MetricTile
-          label="Overall Pass Rate"
-          value={formatPct(data.overall_pass_rate)}
-          tone={data.overall_pass_rate >= 0.9 ? 'good' : data.overall_pass_rate >= 0.7 ? undefined : 'bad'}
-        />
-        <MetricTile label="Groundedness" value={formatPct(data.groundedness_rate)} />
-        <MetricTile label="Hallucination" value={formatPct(data.hallucination_rate)} tone={data.hallucination_rate > 0 ? undefined : 'good'} />
-        <MetricTile label="Winner Consistency" value={formatPct(data.winner_consistency_rate)} />
-        <MetricTile label="Rejection Accuracy" value={formatPct(data.rejection_accuracy_rate)} />
-        <MetricTile label="Schema Validity" value={formatPct(data.schema_pass_rate)} />
-        <MetricTile label="Readability" value={formatPct(data.readability_pass_rate)} />
+      {/* The evaluation report's ONE canonical Groundedness value — the
+          only place this section shows it, so it can never disagree with
+          a second copy elsewhere on this screen. */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900 sm:max-w-xs">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Groundedness</p>
+        <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-800 dark:text-slate-100">
+          {formatPct(data.groundedness_rate)}
+        </p>
+        <p className="mt-0.5 text-xs text-slate-400">{groundednessStatus(data.groundedness_rate)}</p>
+      </div>
+
+      <div>
+        <h3 className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-200">Key Metrics</h3>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <MetricTile label="Cases Evaluated" value={data.case_count} />
+          <MetricTile
+            label="Overall Pass Rate"
+            value={formatPct(data.overall_pass_rate)}
+            tone={data.overall_pass_rate >= 0.9 ? 'good' : data.overall_pass_rate >= 0.7 ? undefined : 'bad'}
+          />
+          <MetricTile label="Hallucination" value={formatPct(data.hallucination_rate)} tone={data.hallucination_rate > 0 ? undefined : 'good'} />
+          <MetricTile label="Winner Consistency" value={formatPct(data.winner_consistency_rate)} />
+          <MetricTile label="Rejection Accuracy" value={formatPct(data.rejection_accuracy_rate)} />
+          <MetricTile label="Schema Validity" value={formatPct(data.schema_pass_rate)} />
+          <MetricTile label="Readability" value={formatPct(data.readability_pass_rate)} />
+        </div>
       </div>
 
       {data.threshold_violations?.length > 0 && (
@@ -194,9 +214,11 @@ export default function LlmEvaluationSection() {
         </div>
       )}
 
-      <div>
-        <h3 className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-200">Evaluation Cases</h3>
-        <div className="space-y-2">
+      {/* Detail, not the primary presentation — collapsed by default so a
+          POC demo opens on the result, not a wall of individual cases.
+          Nothing here is removed, only deferred behind one click. */}
+      <CollapsibleSection title={`Individual Evaluation Cases (${data.results.length})`}>
+        <div className="space-y-2 p-2">
           {data.results.map((result) => (
             <CollapsibleSection
               key={result.case_id}
@@ -216,7 +238,7 @@ export default function LlmEvaluationSection() {
             </CollapsibleSection>
           ))}
         </div>
-      </div>
+      </CollapsibleSection>
     </div>
   )
 }
