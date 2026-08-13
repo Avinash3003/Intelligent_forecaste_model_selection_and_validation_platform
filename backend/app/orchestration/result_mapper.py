@@ -45,6 +45,20 @@ def map_summary_to_result(
             "group_count": summary.get("group_count"),
             "series_count": summary.get("series_count"),
             "selected_models": summary.get("selected_models"),
+            # The derived feature columns this run's tree-based models were
+            # actually given (Priority C) — `None` means every supported
+            # feature (the run never mentioned the field, or explicitly
+            # accepted every default), never confused with an explicit
+            # empty selection. Recorded so a future viewer of this run can
+            # tell which optional features were selected.
+            "derived_features": summary.get("derived_features"),
+            # Written by Assess Data Quality, computed from the raw
+            # dataset's own date column — never the upload/run time. Absent
+            # (both None) when the date column had no parseable values at
+            # all, which the Results page shows as "unavailable" rather
+            # than a fabricated range.
+            "date_range_start": (summary.get("quality_report") or {}).get("date_range_start"),
+            "date_range_end": (summary.get("quality_report") or {}).get("date_range_end"),
             # Written by Stage 5 (Persist Curated Dataset) — absent if curated
             # storage was disabled for the run, which the dataset preview
             # treats as "nothing to show" rather than falling back to the

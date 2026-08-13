@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import PageContainer from '../../components/common/PageContainer'
 import StepIndicator from '../../components/common/StepIndicator'
@@ -9,13 +9,14 @@ import StepMetadataMapping from './components/StepMetadataMapping'
 import StepForecastConfiguration from './components/StepForecastConfiguration'
 import StepReviewDeploy from './components/StepReviewDeploy'
 import WizardFooter from './components/WizardFooter'
-import { uploadDataset, profileDataset, validateMetadata, deployRun, estimateRun } from '../../services'
+import { uploadDataset, profileDataset, fetchDatasetDateRange, validateMetadata, deployRun, estimateRun } from '../../services'
 import {
   forecastPipelineSteps,
   forecastModels,
   defaultFallbackModel,
   defaultForecastHorizon,
   defaultAggregationMethod,
+  defaultDerivedFeatures,
 } from '../../data/appConfig'
 
 const initialMapping = {
@@ -23,6 +24,10 @@ const initialMapping = {
   targetColumn: '',
   keyColumns: [],
   featureColumns: [],
+  // Derived feature columns for XGBoost/LightGBM (Priority C) — defaults
+  // to every supported feature, reproducing pre-existing behavior exactly
+  // until a user actually unchecks something.
+  derivedFeatures: defaultDerivedFeatures,
 }
 
 const initialConfig = {
@@ -103,6 +108,13 @@ export default function ForecastPipeline() {
   const [validationResult, setValidationResult] = useState(null)
   const [validationError, setValidationError] = useState(null)
 
+  // Data Coverage (Priority B) — the real date range for whichever column
+  // is currently assigned as the date column, shown on the Basic Dataset
+  // Inspection card (Step 2). Unavailable until a date column exists, and
+  // re-fetched every time it changes; never a stale value from a previous
+  // dataset or a previous column choice.
+  const [dateRange, setDateRange] = useState(null)
+
   // Chosen only when the detected grain is finer than monthly; carried into
   // the run configuration so preprocessing knows how to roll the target up.
   const [aggregationMethod, setAggregationMethod] = useState(defaultAggregationMethod)
@@ -145,6 +157,7 @@ export default function ForecastPipeline() {
     setUploadError(null)
     setInspection(null)
     setProfileError(null)
+    setDateRange(null)
     setUploading(true)
 
     try {
@@ -167,8 +180,30 @@ export default function ForecastPipeline() {
     setInspection(null)
     setUploadError(null)
     setProfileError(null)
+    setDateRange(null)
     setErrors((prev) => ({ ...prev, file: undefined }))
   }
+
+  // Re-fetch Data Coverage whenever the candidate date column changes (or
+  // is cleared, or a new dataset replaces this one) — never left showing a
+  // range computed for a different column or a different upload.
+  useEffect(() => {
+    if (!fileId || !mapping.dateColumn) {
+      setDateRange(null)
+      return
+    }
+    let cancelled = false
+    fetchDatasetDateRange(fileId, mapping.dateColumn)
+      .then((response) => {
+        if (!cancelled) setDateRange(response)
+      })
+      .catch(() => {
+        if (!cancelled) setDateRange(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [fileId, mapping.dateColumn])
 
   const handleRetryProfile = () => {
     if (fileId) loadProfile(fileId)
@@ -401,6 +436,7 @@ export default function ForecastPipeline() {
               loading={profiling}
               error={profileError}
               onRetry={handleRetryProfile}
+              dateRange={dateRange}
             />
           )}
           {currentStep === 3 && (

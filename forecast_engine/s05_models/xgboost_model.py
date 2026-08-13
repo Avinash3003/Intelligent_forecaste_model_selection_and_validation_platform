@@ -27,4 +27,4 @@ class XGBoostModel(SupervisedTreeModel):
         # required to install it.
         from xgboost import XGBRegressor
 
-        return XGBRegressor(**self.params)
+        return XGBRegressor(**self._estimator_params())

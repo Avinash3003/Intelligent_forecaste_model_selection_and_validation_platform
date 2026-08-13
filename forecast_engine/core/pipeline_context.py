@@ -144,6 +144,14 @@ class PipelineContext:
     training_report: "TrainingReport | None" = None
     selected_models: list[str] | None = None
 
+    # Derived feature columns selected for this run (Priority C) —
+    # `lag_*`/`rolling_mean_*`/calendar feature ids, consumed by the
+    # tree-based models. `None` means this run never mentioned the field at
+    # all (every run before this feature existed, or one that explicitly
+    # accepts every default), never confused with an explicit empty
+    # selection — see `forecast_engine.config.derived_features_config`.
+    derived_features: list[str] | None = None
+
     # Model used when every evaluated model fails validation (Section 6.9).
     # Recorded on the context so the run summary, and MLflow through it,
     # report the fallback that was actually configured for this run.
@@ -295,6 +303,7 @@ class PipelineContext:
             "artifacts_mirror_result": self.artifacts_mirror_result,
             "selected_models": self.selected_models,
             "fallback_model": self.fallback_model,
+            "derived_features": self.derived_features,
             "training_report": self.training_report.to_dict() if self.training_report else None,
             "evaluation_report": self.evaluation_report.to_dict() if self.evaluation_report else None,
             "explainability_report": (

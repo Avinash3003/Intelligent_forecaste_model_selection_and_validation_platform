@@ -14,6 +14,12 @@ class DeploymentRequest(BaseModel):
     # Months to forecast forward (Section 3: minimum 12-month horizon,
     # extended by this platform down to 6 and up to 60).
     horizon: int = Field(12, ge=6, le=60)
+    # Derived feature columns (lag_*/rolling_mean_*/calendar) for the
+    # tree-based models — Priority C. `None` (the field omitted) means
+    # "every supported feature", reproducing pre-existing behavior exactly;
+    # validated against the authoritative registry in `deployment_service`
+    # before this ever reaches a Runner.
+    derived_features: list[str] | None = None
 
 
 class DeploymentResponse(BaseModel):

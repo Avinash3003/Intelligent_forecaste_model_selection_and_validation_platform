@@ -44,6 +44,10 @@ export function deployRun({
     selected_models: selectedModels,
     fallback_model: fallbackModel,
     horizon,
+    // Derived feature columns for XGBoost/LightGBM (Priority C) — a
+    // top-level field, not part of `metadata`: it configures how the tree
+    // models featurize the target, not a column role assignment.
+    derived_features: mapping.derivedFeatures,
   })
 }
 

@@ -556,6 +556,8 @@ class DatabricksRunner(PipelineRunner):
             payload["models"] = list(request.selected_models)
         if request.fallback_model:
             payload["fallback_model"] = request.fallback_model
+        if request.derived_features is not None:
+            payload["derived_features"] = list(request.derived_features)
         if request.horizon is not None:
             payload["horizon"] = int(request.horizon)
         if request.started_by_user_id:

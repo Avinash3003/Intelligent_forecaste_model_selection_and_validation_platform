@@ -1,14 +1,14 @@
 """Dataset Profiling Service — the "Basic Dataset Inspection" summary shown
 immediately after upload (Section 5.1.1), before any metadata is mapped.
 
-Strictly descriptive: it reports what the file physically contains — raw
-pandas dtypes, sample values, null ratios, cardinality — and makes no
-forecasting judgement whatsoever. Deciding whether a column can serve as a
-date, target or key belongs to the Validation Engine and only becomes
-answerable once the user has assigned roles.
-
-Because it never interprets, this service is inherently dataset-agnostic:
-no column name is referenced anywhere.
+`ProfileService.profile()` is strictly descriptive: it reports what the
+file physically contains — raw pandas dtypes, sample values, null ratios,
+cardinality — and makes no forecasting judgement whatsoever, referencing no
+column name. `compute_date_range()` below is the one exception, and
+deliberately a separate function rather than folded into `profile()`: it
+exists for Metadata Mapping (Priority B), one step later, once the user
+has tentatively named a date column, not for the column-agnostic
+inspection step.
 """
 
 import pandas as pd
@@ -77,3 +77,27 @@ class ProfileService:
             null_pct=f"{(series.isna().mean() * 100):.1f}%",
             distinct_values=f"{non_null.nunique():,}",
         )
+
+
+def compute_date_range(series: pd.Series) -> tuple[str | None, str | None]:
+    """A column's observed date coverage — (None, None) when nothing in it
+    parses as a date, never a guessed/fabricated range.
+
+    Mirrors `forecast_engine.s02_quality.quality_assessor`'s
+    `parse_date_column` / `date_range_from_parsed` (same rule: a numeric or
+    boolean column is refused rather than parsed, since pandas would read
+    integers as nanosecond epochs and report a meaningless range). Kept as
+    a small, separate duplicate rather than an import of that module — the
+    backend and forecast_engine are two independently deployable processes
+    with separate dependencies; the backend only ever invokes
+    forecast_engine as an external subprocess/job, never in-process.
+    """
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        parsed = pd.Series(pd.NaT, index=series.index)
+    else:
+        parsed = pd.to_datetime(series, errors="coerce")
+
+    valid = parsed.dropna()
+    if valid.empty:
+        return None, None
+    return valid.min().isoformat(), valid.max().isoformat()

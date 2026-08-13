@@ -5,6 +5,7 @@ import Button from '../../../components/ui/Button'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import DataTable from '../../../components/tables/DataTable'
 import Loader from '../../../components/ui/Loader'
+import { formatDateRange } from '../../../utils/formatDateTime'
 
 function InspectionStat({ label, value, icon }) {
   const Icon = Icons[icon] || Icons.Activity
@@ -31,7 +32,7 @@ const schemaColumns = [
   { key: 'distinctValues', header: 'Distinct Values' },
 ]
 
-export default function StepDatasetProfiling({ inspection, loading, error, onRetry }) {
+export default function StepDatasetProfiling({ inspection, loading, error, onRetry, dateRange }) {
   if (loading) {
     return (
       <SectionContainer title="Basic dataset inspection">
@@ -69,6 +70,20 @@ export default function StepDatasetProfiling({ inspection, loading, error, onRet
           <InspectionStat label="Total Rows" value={inspection.totalRows} icon="Rows3" />
           <InspectionStat label="Total Columns" value={inspection.totalColumns} icon="Columns3" />
           <InspectionStat label="File Size" value={inspection.fileSize} icon="HardDrive" />
+          {/* Only shown once a date column has been chosen (Metadata
+              Mapping, the next step) — before that there is nothing real
+              to report, so the card stays absent rather than guessing. */}
+          {dateRange && (
+            <InspectionStat
+              label="Data Coverage"
+              value={
+                dateRange.available
+                  ? formatDateRange(dateRange.date_range_start, dateRange.date_range_end)
+                  : 'Date range unavailable'
+              }
+              icon="CalendarRange"
+            />
+          )}
         </div>
       </SectionContainer>
 

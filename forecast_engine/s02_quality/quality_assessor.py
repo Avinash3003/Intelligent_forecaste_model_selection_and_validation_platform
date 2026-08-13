@@ -22,6 +22,31 @@ from forecast_engine.core.forecast_configuration import ForecastConfiguration
 from forecast_engine.s02_quality.quality_report import ColumnQuality, QualityReport, SuitabilityStatus
 
 
+# Parse a raw column as dates, the same way `QualityAssessor.assess()` does
+# for `configuration.date_column` — module-level (not a method) so a caller
+# that only wants a date range, not a full quality assessment, can reuse
+# the exact same parsing rule without constructing a ForecastConfiguration.
+# Numeric columns are refused rather than parsed — pandas would read
+# integers as nanosecond epochs and report a meaningless date range.
+def parse_date_column(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return pd.Series(pd.NaT, index=series.index)
+    return pd.to_datetime(series, errors="coerce")
+
+
+# The observed timeline bounds of an already-parsed date series, as ISO
+# strings — (None, None) when nothing in it parsed. Never guesses; a
+# caller with no valid dates gets an honest "unavailable", not a fabricated
+# range.
+def date_range_from_parsed(parsed_dates: pd.Series) -> tuple[str | None, str | None]:
+    valid = parsed_dates.dropna()
+    if valid.empty:
+        return None, None
+    return valid.min().isoformat(), valid.max().isoformat()
+
+
 class DataQualityAssessor:
     """Produces a QualityReport for a raw dataset. Never modifies data."""
 
@@ -48,11 +73,11 @@ class DataQualityAssessor:
         report.duplicate_rows = int(dataframe.duplicated().sum())
         report.duplicate_timestamps = self._count_duplicate_timestamps(dataframe, configuration)
 
-        parsed_dates = self._parse_dates(dataframe[configuration.date_column])
+        parsed_dates = parse_date_column(dataframe[configuration.date_column])
         report.invalid_date_values = self._count_unconvertible(
             dataframe[configuration.date_column], parsed_dates
         )
-        report.date_range_start, report.date_range_end = self._date_range(parsed_dates)
+        report.date_range_start, report.date_range_end = date_range_from_parsed(parsed_dates)
 
         numeric_target = pd.to_numeric(dataframe[configuration.target_column], errors="coerce")
         report.invalid_target_values = self._count_unconvertible(
@@ -93,32 +118,11 @@ class DataQualityAssessor:
         subset = [*configuration.key_columns, configuration.date_column]
         return int(dataframe.duplicated(subset=subset).sum())
 
-    # Parse the date column for measurement only
-    def _parse_dates(self, series: pd.Series) -> pd.Series:
-        # The result is used to count invalid values and derive the timeline;
-        # it is never written back, so the caller's dataset stays untouched.
-        # Numeric columns are refused rather than parsed — pandas would read
-        # integers as nanosecond epochs and report a meaningless date range.
-        if pd.api.types.is_datetime64_any_dtype(series):
-            return series
-
-        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
-            return pd.Series(pd.NaT, index=series.index)
-
-        return pd.to_datetime(series, errors="coerce")
-
     # Count values that were present but failed to convert
     def _count_unconvertible(self, original: pd.Series, converted: pd.Series) -> int:
         # Genuinely missing entries are excluded — they are reported
         # separately as missing values, not as invalid ones.
         return int((original.notna() & converted.isna()).sum())
-
-    # Return the observed timeline bounds as ISO strings
-    def _date_range(self, parsed_dates: pd.Series) -> tuple[str | None, str | None]:
-        valid = parsed_dates.dropna()
-        if valid.empty:
-            return None, None
-        return valid.min().isoformat(), valid.max().isoformat()
 
     # Count distinct forecasting groups implied by the key columns
     def _count_business_keys(

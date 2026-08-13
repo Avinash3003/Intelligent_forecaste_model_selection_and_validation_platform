@@ -449,6 +449,11 @@ class LocalRunner(PipelineRunner):
                 command += ["--models", *request.selected_models]
             if request.fallback_model:
                 command += ["--fallback-model", request.fallback_model]
+            if request.derived_features is not None:
+                # `is not None`, not truthy: an explicit empty list means
+                # "select none" and must still reach the engine as such,
+                # not be treated as "not specified" and silently default.
+                command += ["--derived-features", *request.derived_features]
             if request.horizon is not None:
                 command += ["--horizon", str(request.horizon)]
             if record.dataset_name:

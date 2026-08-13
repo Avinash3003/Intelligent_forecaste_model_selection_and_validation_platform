@@ -62,7 +62,7 @@ include = ["forecast_engine*"]
 exclude = ["forecast_engine.tests*"]
 
 [tool.setuptools.package-data]
-"forecast_engine.s11_llm" = ["prompts/*.txt"]
+"forecast_engine.s11_llm" = ["prompts/**/*.txt"]
 
 [tool.setuptools]
 include-package-data = true

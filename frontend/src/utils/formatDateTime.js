@@ -71,3 +71,19 @@ export function formatDuration(seconds) {
 export function formatRunLabel(startedAtIso) {
   return `Forecast Run · ${formatIST(startedAtIso)}`
 }
+
+const monthYearFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' })
+
+// "Jan 2021 → Feb 2025" — a dataset's own observed date coverage, always
+// month+year even when the underlying values are full timestamps (a
+// dataset's coverage is never meaningfully about time-of-day). Neither
+// bound is ever guessed: "Date range unavailable" when either is missing
+// or unparsable, matching the honest-about-missing-data convention the
+// rest of this file follows ("—" for a single value).
+export function formatDateRange(startIso, endIso) {
+  if (!startIso || !endIso) return 'Date range unavailable'
+  const start = new Date(startIso)
+  const end = new Date(endIso)
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 'Date range unavailable'
+  return `${monthYearFormatter.format(start)} → ${monthYearFormatter.format(end)}`
+}

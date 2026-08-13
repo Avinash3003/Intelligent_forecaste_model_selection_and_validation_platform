@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +37,14 @@ from forecast_engine.config.evaluation_config import EvaluationConfig
 from forecast_engine.config.explainability_config import ExplainabilityConfig
 from forecast_engine.config.llm_config import LLMConfig
 from forecast_engine.config.mlflow_config import MLflowConfig
+from forecast_engine.config.derived_features_config import apply_to_model_config
 from forecast_engine.config.model_config import ModelConfig
 from forecast_engine.config.pipeline_config import PipelineConfig
 from forecast_engine.config.ranking_config import RankingConfig
+from forecast_engine.core.databricks_secrets import apply_azure_openai_cli_overrides
 from forecast_engine.core.forecast_configuration import AggregationMethod, ForecastConfiguration
 from forecast_engine.core.live_status import LiveStatusWriter
+from forecast_engine.core.pipeline_checkpoint import load_checkpoint, merge_checkpoints, save_checkpoint
 from forecast_engine.core.pipeline_context import PipelineContext, StageStatus
 from forecast_engine.core.pipeline_result import PipelineResultBuilder
 from forecast_engine.s01_preprocessing.data_preprocessor import DataPreprocessor
@@ -76,6 +80,51 @@ class ForecastEnginePipeline:
     a test) can substitute one — e.g. a loader that reads from ADLS —
     without modifying the orchestration.
     """
+
+    # Every private `_stage(context)` method below, grouped into the units
+    # the multi-task Databricks Serverless workflow runs as separate tasks
+    # (see `databricks/resources/forecast_job_serverless.yml`). Nothing
+    # about a stage's own logic changes for `run_stage()` versus `run()` —
+    # this dict only says which stages share a task.
+    STAGE_GROUPS: dict[str, tuple[str, ...]] = {
+        "load_prepare": (
+            "_load_dataset",
+            "_detect_frequency",
+            "_assess_quality",
+            "_preprocess",
+            "_persist_curated_dataset",
+            "_verify_curated_dataset",
+        ),
+        "build_series": ("_generate_groups", "_build_series"),
+        "train_models": ("_train_models",),
+        "evaluate_models": ("_evaluate_models",),
+        "explain_models": ("_generate_explainability",),
+        "rank_select": ("_select_production_models",),
+        "persist_models": ("_persist_winning_models",),
+        "export_forecasts": ("_export_forecasts",),
+        "business_insights": ("_generate_business_insights",),
+        "mirror_artifacts": ("_mirror_artifacts",),
+        "mlflow_tracking": ("_track_to_mlflow",),
+    }
+
+    # Which stage group(s) a task loads its checkpoint from. Empty means
+    # "start fresh" (the first task); more than one entry is the DAG's one
+    # fork/join — Persist Winning Models and Export Forecasts both descend
+    # from Rank & Select, and Business Insights needs both of their
+    # contributions merged (see `pipeline_checkpoint.merge_checkpoints`).
+    STAGE_GROUP_PREDECESSORS: dict[str, tuple[str, ...]] = {
+        "load_prepare": (),
+        "build_series": ("load_prepare",),
+        "train_models": ("build_series",),
+        "evaluate_models": ("train_models",),
+        "explain_models": ("evaluate_models",),
+        "rank_select": ("explain_models",),
+        "persist_models": ("rank_select",),
+        "export_forecasts": ("rank_select",),
+        "business_insights": ("persist_models", "export_forecasts"),
+        "mirror_artifacts": ("business_insights",),
+        "mlflow_tracking": ("mirror_artifacts",),
+    }
 
     def __init__(
         self,
@@ -157,6 +206,7 @@ class ForecastEnginePipeline:
         live_status_path: str | Path | None = None,
         started_by_user_id: str | None = None,
         started_by_display_name: str | None = None,
+        derived_features: list[str] | None = None,
     ) -> PipelineContext:
         """Execute all 14 pipeline stages for one dataset.
 
@@ -217,6 +267,7 @@ class ForecastEnginePipeline:
         )
         context.selected_models = selected_models
         context.fallback_model = self._model_config.fallback_model
+        context.derived_features = derived_features
 
         # Set before stage 1 so even "Load Dataset" begins reporting live,
         # rather than only every stage after the first.
@@ -267,10 +318,98 @@ class ForecastEnginePipeline:
         context.finish()
         return context
 
+    def run_stage(
+        self,
+        stage_group: str,
+        *,
+        checkpoint_dir: str | Path,
+        dataset_path: str | Path,
+        configuration: ForecastConfiguration,
+        run_id: str | None = None,
+        selected_models: list[str] | None = None,
+        fallback_model: str | None = None,
+        dataset_name: str | None = None,
+        live_status_path: str | Path | None = None,
+        started_by_user_id: str | None = None,
+        started_by_display_name: str | None = None,
+        derived_features: list[str] | None = None,
+    ) -> PipelineContext:
+        """Run ONE stage group as an independent Databricks task.
+
+        The multi-task Serverless workflow (see
+        `forecast_job_serverless.yml`) calls this once per task instead of
+        `run()`'s single in-process pass — every stage method it invokes is
+        the exact same one `run()` calls, in the exact same order; this
+        only adds checkpointing at the task boundary.
+
+        `load_prepare` (no predecessor) starts a fresh context and opens
+        the MLflow Parent Run, exactly as `run()` does. Every later stage
+        group loads its predecessor's checkpoint(s) — two, only for
+        `business_insights`, which is the DAG's join after Persist Winning
+        Models and Export Forecasts run in parallel — and resumes that
+        same MLflow run in this new process, so a failure at any stage
+        still closes the run with an accurate status.
+        """
+        if stage_group not in self.STAGE_GROUPS:
+            raise ConfigurationError(
+                f"Unknown stage group '{stage_group}'. Valid values: "
+                f"{', '.join(self.STAGE_GROUPS)}."
+            )
+
+        if fallback_model:
+            self._apply_fallback_model(fallback_model)
+
+        checkpoint_dir = Path(checkpoint_dir)
+        predecessors = self.STAGE_GROUP_PREDECESSORS[stage_group]
+
+        if not predecessors:
+            context = PipelineContext.create(
+                dataset_path=dataset_path,
+                configuration=configuration,
+                pipeline_config=self._config,
+                run_id=run_id,
+            )
+            context.selected_models = selected_models
+            context.fallback_model = self._model_config.fallback_model
+            context.derived_features = derived_features
+            if live_status_path is not None:
+                context.on_stage_change = LiveStatusWriter(live_status_path)
+            context.tracking_result = self._tracking_pipeline.begin(
+                context.run_id,
+                dataset_name or Path(dataset_path).name,
+                started_by_user_id=started_by_user_id,
+                started_by_display_name=started_by_display_name,
+            )
+        else:
+            contexts = [
+                load_checkpoint(checkpoint_dir / f"after_{predecessor}.pkl")
+                for predecessor in predecessors
+            ]
+            context = contexts[0]
+            for other in contexts[1:]:
+                merge_checkpoints(context, other)
+            if live_status_path is not None:
+                context.on_stage_change = LiveStatusWriter(live_status_path)
+            resume_run_id = context.tracking_result.run_id if context.tracking_result else None
+            self._tracking_pipeline.resume(resume_run_id)
+
+        try:
+            for method_name in self.STAGE_GROUPS[stage_group]:
+                getattr(self, method_name)(context)
+        except Exception as exc:
+            context.tracking_result = self._tracking_pipeline.fail(context.run_id, exc, _failed_stage(context))
+            context.finish()
+            raise
+
+        if stage_group == "mlflow_tracking":
+            context.finish()
+        else:
+            save_checkpoint(context, checkpoint_dir / f"after_{stage_group}.pkl")
+
+        return context
+
     # Override the configured fallback model for this run
     def _apply_fallback_model(self, fallback_model: str) -> None:
-        from dataclasses import replace
-
         # ModelConfig is frozen, so a replacement is built and the one stage
         # that already captured it (production selection) is rebuilt against
         # the new config — otherwise it would keep validating against the
@@ -725,6 +864,11 @@ def apply_config_run_options(args: argparse.Namespace, payload: dict[str, Any]) 
         args.models = [str(model) for model in payload["models"]]
     if args.fallback_model is None and payload.get("fallback_model"):
         args.fallback_model = str(payload["fallback_model"])
+    # `is None`, not falsy: a user who deselected every derived feature
+    # sends an explicit empty list, which must survive — not be treated as
+    # "the config file didn't say" and fall back to the default selection.
+    if args.derived_features is None and payload.get("derived_features") is not None:
+        args.derived_features = [str(f) for f in payload["derived_features"]]
     if args.horizon is None and payload.get("horizon") is not None:
         horizon = int(payload["horizon"])
         if not (MIN_FORECAST_HORIZON <= horizon <= MAX_FORECAST_HORIZON):
@@ -805,6 +949,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Model used when every evaluated model fails validation (default: the configured baseline).",
     )
     parser.add_argument(
+        "--derived-features",
+        nargs="*",
+        default=None,
+        help=(
+            "Derived feature columns (lag_*, rolling_mean_*, month, quarter) to generate for "
+            "XGBoost/LightGBM (default: every supported feature, matching pre-existing behavior). "
+            "Pass with no values to select none."
+        ),
+    )
+    parser.add_argument(
         "--horizon",
         type=int,
         default=None,
@@ -812,6 +966,42 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"Forward forecast horizon in months, {MIN_FORECAST_HORIZON}-{MAX_FORECAST_HORIZON} "
             "(default: the configured EvaluationConfig default, 12)."
         ),
+    )
+    parser.add_argument(
+        "--azure-openai-endpoint",
+        default=None,
+        help=(
+            "Sets AZURE_OPENAI_ENDPOINT for this process before the pipeline runs. Exists for "
+            "compute (Databricks Serverless python_wheel_task) that cannot inject environment "
+            "variables directly — a deployment that already sets the environment variable itself "
+            "does not need this flag. Never logged."
+        ),
+    )
+    parser.add_argument(
+        "--azure-openai-api-key",
+        default=None,
+        help="Sets AZURE_OPENAI_API_KEY for this process before the pipeline runs. See --azure-openai-endpoint. Never logged.",
+    )
+    parser.add_argument(
+        "--azure-openai-deployment",
+        default=None,
+        help="Sets AZURE_OPENAI_DEPLOYMENT_NAME for this process before the pipeline runs. See --azure-openai-endpoint. Never logged.",
+    )
+    parser.add_argument(
+        "--stage-group",
+        choices=list(ForecastEnginePipeline.STAGE_GROUPS),
+        default=None,
+        help=(
+            "Run only this stage group instead of the whole pipeline, checkpointing "
+            "PipelineContext via --checkpoint-dir for the next task to resume from. Exists for "
+            "the multi-task Databricks Serverless workflow (see forecast_job_serverless.yml); "
+            "omit to run the complete pipeline in one process, as local and DCS execution do."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="Directory for cross-task PipelineContext checkpoints. Required together with --stage-group.",
     )
 
     args = parser.parse_args(argv)
@@ -823,12 +1013,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.horizon is not None and not (MIN_FORECAST_HORIZON <= args.horizon <= MAX_FORECAST_HORIZON):
         parser.error(f"--horizon must be between {MIN_FORECAST_HORIZON} and {MAX_FORECAST_HORIZON} (got {args.horizon}).")
 
+    if args.stage_group is not None and not args.checkpoint_dir:
+        parser.error("--stage-group requires --checkpoint-dir.")
+
     return args
 
 
 # CLI entry point; returns a process exit code (0 success, 1 stage failure)
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    # Databricks-Serverless-only: resolves {{secrets/...}} job-parameter
+    # values via dbutils.secrets.get() — see
+    # forecast_engine/core/databricks_secrets.py. A no-op for local/DCS
+    # execution, which already sets these as real environment variables.
+    apply_azure_openai_cli_overrides(args)
 
     try:
         configuration = build_configuration_from_args(args)
@@ -848,8 +1046,6 @@ def main(argv: list[str] | None = None) -> int:
 
         evaluation_config = EvaluationConfig.default()
         if args.horizon is not None:
-            from dataclasses import replace
-
             # EvaluationConfig is frozen; forecast_horizon is the one value
             # this run overrides, so every stage that reads it — forward
             # forecast generation (EvaluationPipeline) and Final Production
@@ -857,23 +1053,56 @@ def main(argv: list[str] | None = None) -> int:
             # user-chosen horizon without needing it threaded separately.
             evaluation_config = replace(evaluation_config, forecast_horizon=args.horizon)
 
+        # Resolved once, before any collaborator is built from it — see
+        # apply_to_model_config()'s own docstring for why that ordering
+        # matters. `args.derived_features is None` (never mentioned by
+        # this run) returns ModelConfig.default() completely unchanged.
+        model_config = apply_to_model_config(ModelConfig.default(), args.derived_features)
+
         pipeline = ForecastEnginePipeline(
-            evaluation_config=evaluation_config, pipeline_config=pipeline_config
+            evaluation_config=evaluation_config, pipeline_config=pipeline_config, model_config=model_config
         )
-        context = pipeline.run(
-            args.dataset,
-            configuration,
-            run_id=args.run_id,
-            selected_models=args.models,
-            fallback_model=args.fallback_model,
-            dataset_name=args.dataset_name,
-            live_status_path=args.live_status_out,
-            started_by_user_id=args.started_by_user_id,
-            started_by_display_name=args.started_by_display_name,
-        )
+        if args.stage_group is None:
+            # The whole pipeline in one process — local execution and the
+            # DCS job, unchanged from before the multi-task workflow existed.
+            context = pipeline.run(
+                args.dataset,
+                configuration,
+                run_id=args.run_id,
+                selected_models=args.models,
+                fallback_model=args.fallback_model,
+                dataset_name=args.dataset_name,
+                live_status_path=args.live_status_out,
+                started_by_user_id=args.started_by_user_id,
+                started_by_display_name=args.started_by_display_name,
+                derived_features=args.derived_features,
+            )
+        else:
+            # One task of the multi-task Databricks Serverless workflow.
+            context = pipeline.run_stage(
+                args.stage_group,
+                checkpoint_dir=args.checkpoint_dir,
+                dataset_path=args.dataset,
+                configuration=configuration,
+                run_id=args.run_id,
+                selected_models=args.models,
+                fallback_model=args.fallback_model,
+                dataset_name=args.dataset_name,
+                live_status_path=args.live_status_out,
+                started_by_user_id=args.started_by_user_id,
+                started_by_display_name=args.started_by_display_name,
+                derived_features=args.derived_features,
+            )
     except ForecastEngineError as exc:
         print(f"Forecast Engine failed: {exc}", file=sys.stderr)
         return 1
+
+    # An intermediate task's real output is the checkpoint run_stage()
+    # already saved; the consolidated summary only exists once the last
+    # task (mlflow_tracking) has run, exactly as it always has for a
+    # single-process run.
+    if args.stage_group is not None and args.stage_group != "mlflow_tracking":
+        return 0
 
     summary = context.summary()
     print(json.dumps(summary, indent=2))

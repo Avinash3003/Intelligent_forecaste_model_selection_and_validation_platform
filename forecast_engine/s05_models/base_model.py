@@ -271,11 +271,15 @@ class SupervisedTreeModel(BaseForecastingModel):
     MIN_TRAINING_ROWS = 8
 
     def _configured_lags(self, observations: int | None = None) -> tuple[int, ...]:
-        return self._fit_to_history(tuple(self.params.get("lags") or self.DEFAULT_LAGS), observations)
+        # `.get(key, default)`, not `.get(key) or default`: an *absent* key
+        # (every caller before per-feature selection existed) means "use
+        # the default", but an explicit empty list (a user who deselected
+        # every lag) must stay empty, not silently fall back to it.
+        return self._fit_to_history(tuple(self.params.get("lags", self.DEFAULT_LAGS)), observations)
 
     def _configured_windows(self, observations: int | None = None) -> tuple[int, ...]:
         return self._fit_to_history(
-            tuple(self.params.get("rolling_windows") or self.DEFAULT_ROLLING_WINDOWS), observations
+            tuple(self.params.get("rolling_windows", self.DEFAULT_ROLLING_WINDOWS)), observations
         )
 
     def _fit_to_history(self, spans: tuple[int, ...], observations: int | None) -> tuple[int, ...]:
@@ -287,19 +291,44 @@ class SupervisedTreeModel(BaseForecastingModel):
         nothing to fit, and the model silently produces no backtest at all.
         Narrowing the spans to what the history can actually support keeps the
         feature set honest for short series instead of emptying the matrix.
+
+        An empty `spans` is left alone regardless of `observations`: that is
+        a deliberate "none of these" (a user who selected zero lags/windows,
+        Priority C), not a series too short to support what was asked —
+        the floor below exists only for the latter.
         """
-        if observations is None:
+        if observations is None or not spans:
             return spans
         usable = tuple(s for s in spans if observations - s >= self.MIN_TRAINING_ROWS)
         # Lag 1 is always affordable and is what carries the level, so it is
         # kept as the floor rather than returning no features at all.
         return usable or (1,)
 
-    def _use_calendar(self) -> bool:
-        return bool(self.params.get("calendar_features", True))
+    # Names of the calendar columns to generate. Accepts the historical
+    # `calendar_features: bool` (True = both, False/absent-with-explicit-
+    # False = neither) as well as an explicit list of names (Priority C's
+    # per-run derived-feature selection) — a caller that has never heard of
+    # per-feature selection keeps working unchanged.
+    _CALENDAR_FEATURE_NAMES = ("month", "quarter")
+
+    def _calendar_features(self) -> tuple[str, ...]:
+        configured = self.params.get("calendar_features", True)
+        if isinstance(configured, bool):
+            return self._CALENDAR_FEATURE_NAMES if configured else ()
+        return tuple(name for name in configured if name in self._CALENDAR_FEATURE_NAMES)
 
     def _differenced(self) -> bool:
         return (self.params.get("target_transform") or self.DEFAULT_TARGET_TRANSFORM) == "difference"
+
+    # `self.params` also carries these feature-engineering knobs (read by
+    # `_configured_lags`/`_configured_windows`/`_calendar_features` above),
+    # which are never valid keyword arguments for the underlying sklearn-style
+    # estimator — `build_estimator()` must construct it from `self.params`
+    # with these removed, not `self.params` verbatim.
+    _FEATURE_ENGINEERING_PARAM_KEYS = frozenset({"lags", "rolling_windows", "calendar_features", "target_transform"})
+
+    def _estimator_params(self) -> dict[str, Any]:
+        return {k: v for k, v in self.params.items() if k not in self._FEATURE_ENGINEERING_PARAM_KEYS}
 
     def _feature_row(
         self, history: list[float], position: int, timestamp: pd.Timestamp | None
@@ -326,9 +355,12 @@ class SupervisedTreeModel(BaseForecastingModel):
 
         # Month and quarter let the tree separate seasonal positions that an
         # ordinal index cannot express once it runs past the training range.
-        if self._use_calendar() and timestamp is not None:
-            row["month"] = float(timestamp.month)
-            row["quarter"] = float(timestamp.quarter)
+        if timestamp is not None:
+            calendar_features = self._calendar_features()
+            if "month" in calendar_features:
+                row["month"] = float(timestamp.month)
+            if "quarter" in calendar_features:
+                row["quarter"] = float(timestamp.quarter)
 
         return row
 

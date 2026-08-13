@@ -40,6 +40,7 @@ from app.schemas.results import (
     UnderlyingMetrics,
 )
 from app.services.confidence import compute_confidence
+from app.services.dataset_preview_service import DatasetPreviewService, get_dataset_preview_service
 
 MAX_SHAP_DRIVERS = 8
 
@@ -47,8 +48,18 @@ MAX_SHAP_DRIVERS = 8
 class ResultService:
     """Builds the dashboard payload for one run and one forecasting group."""
 
-    def __init__(self, executor: PipelineExecutor | None = None) -> None:
+    def __init__(
+        self,
+        executor: PipelineExecutor | None = None,
+        dataset_preview_service: DatasetPreviewService | None = None,
+    ) -> None:
         self._executor = executor or get_pipeline_executor()
+        # The "Actual vs Forecast" chart's actual-history line reads the
+        # full curated dataset through this — the same already-persisted,
+        # already-cached file the "Curated dataset" preview panel reads —
+        # rather than the bounded tail `PipelineContext.summary()` carries
+        # for lightweight fallback use only. See `_actual_vs_forecast()`.
+        self._dataset_preview_service = dataset_preview_service or get_dataset_preview_service()
 
     def get_results(self, run_id: str, group_id: str | None = None) -> ResultsResponse:
         """Assemble the Results payload.
@@ -84,6 +95,9 @@ class ResultService:
             group_id=selected,
             groups=groups,
             horizon_points=self._horizon_points(winner),
+            dataset_date_range_start=(result.run_metadata or {}).get("date_range_start"),
+            dataset_date_range_end=(result.run_metadata or {}).get("date_range_end"),
+            derived_features=(result.run_metadata or {}).get("derived_features"),
             model_decision=self._model_decision(result, selected, winner, drift),
             evaluated_models=self._evaluated_models(result, selected, ranked, winner, drift),
             actual_vs_forecast=self._actual_vs_forecast(result, selected, winner),
@@ -415,10 +429,8 @@ class ResultService:
             (g for g in result.forecast_groups if g.get("group_id") == group_id),
             {},
         )
-        for observation in group.get("recent_history") or []:
-            points.append(
-                ForecastPoint(period=self._short_date(observation.get("date")), actual=observation.get("value"))
-            )
+        for date, value in self._full_actual_history(result, group):
+            points.append(ForecastPoint(period=date, actual=value))
 
         forecast = winner.get("forecast") or {}
         dates = forecast.get("dates") or []
@@ -442,6 +454,39 @@ class ResultService:
             )
 
         return points
+
+    def _full_actual_history(
+        self, result: PipelineExecutionResult, group: dict[str, Any]
+    ) -> list[tuple[str, float]]:
+        """The complete actual-value history for one business key — every
+        observation in the curated dataset, never a bounded tail (the
+        Results chart must represent the whole available history, not an
+        arbitrary fixed window).
+
+        Reads back the run's own curated file — already persisted, already
+        read for the "Curated dataset" preview panel — filtered to this
+        group's key values, full resolution. Falls back to
+        `PipelineContext.summary()`'s bounded `recent_history` only when
+        the curated file itself is unavailable (e.g. curated storage was
+        disabled for this run), so a run without one still shows something
+        rather than an empty chart.
+        """
+        configuration = (result.run_metadata or {}).get("configuration") or {}
+        date_column = configuration.get("date_column")
+        target_column = configuration.get("target_column")
+
+        if date_column and target_column:
+            full = self._dataset_preview_service.get_full_series(
+                result.run_id, date_column, target_column, group.get("key_values")
+            )
+            if full is not None:
+                return full
+
+        return [
+            (observation.get("date"), observation.get("value"))
+            for observation in group.get("recent_history") or []
+            if observation.get("date") is not None and observation.get("value") is not None
+        ]
 
     def _horizon_points(self, winner: dict[str, Any]) -> list[str]:
         values = (winner.get("forecast") or {}).get("values") or []
@@ -612,11 +657,6 @@ class ResultService:
     # ------------------------------------------------------------------
     # Formatting
     # ------------------------------------------------------------------
-
-    def _short_date(self, value: Any) -> str:
-        # "2024-03-01T00:00:00" -> "2024-03"; the chart axis is monthly.
-        text = str(value or "")
-        return text[:7] if len(text) >= 7 else text
 
     def _number(self, value: Any) -> str:
         return f"{float(value):.4g}" if isinstance(value, (int, float)) else "—"

@@ -212,6 +212,15 @@ class ResultsResponse(BaseModel):
     group_id: str | None = None
     groups: list[GroupOption] = Field(default_factory=list)
     horizon_points: list[str] = Field(default_factory=list)
+    # The dataset's own observed date coverage (Assess Data Quality,
+    # computed from its date column) — not the upload or run time. Either
+    # both set or both None; never a fabricated partial range.
+    dataset_date_range_start: str | None = None
+    dataset_date_range_end: str | None = None
+    # Derived feature columns actually used to train this run's tree-based
+    # models (Priority C) — `None` means every supported feature (this run
+    # never mentioned the field, or explicitly accepted every default).
+    derived_features: list[str] | None = None
 
     model_decision: ModelDecision
     # Every model trained for this group, with its full training →

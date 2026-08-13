@@ -26,4 +26,4 @@ class LightGBMModel(SupervisedTreeModel):
         # Imported lazily so the library is only required when selected.
         from lightgbm import LGBMRegressor
 
-        return LGBMRegressor(**self.params)
+        return LGBMRegressor(**self._estimator_params())

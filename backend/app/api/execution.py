@@ -25,6 +25,7 @@ from app.orchestration.schemas import ExecutionBackend, PipelineExecutionResult
 from app.schemas.deployment import DeploymentRequest
 from app.schemas.execution import ExecutionCancelResponse, ExecutionStatusResponse, ExecutionSubmitResponse
 from app.services.deployment_service import build_execution_request
+from app.services.derived_feature_registry import validate_derived_features
 from app.services.upload_service import UploadService
 from app.utils.errors import safe_detail
 from app.utils.exceptions import FileResolutionError
@@ -40,6 +41,14 @@ def submit_execution(
 ) -> ExecutionSubmitResponse:
     if not request.file_id:
         raise HTTPException(status_code=400, detail="Please upload a dataset before submitting a run.")
+
+    if request.derived_features is not None:
+        unsupported = validate_derived_features(request.derived_features)
+        if unsupported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported derived feature(s): {', '.join(unsupported)}.",
+            )
 
     try:
         dataset_path, original_filename = upload_service.resolve(request.file_id)

@@ -5,6 +5,7 @@ from app.auth.models import Permission, Principal
 from app.orchestration.exceptions import ExecutionError, UnknownRunError
 from app.schemas.deployment import DeploymentRequest, DeploymentResponse, DeploymentStatus
 from app.services.deployment_service import DeploymentService
+from app.services.derived_feature_registry import validate_derived_features
 from app.utils.errors import safe_detail
 from app.utils.exceptions import FileResolutionError
 
@@ -19,6 +20,14 @@ def deploy(
 ) -> DeploymentResponse:
     if not request.file_id:
         raise HTTPException(status_code=400, detail="Please upload a dataset before submitting a run.")
+
+    if request.derived_features is not None:
+        unsupported = validate_derived_features(request.derived_features)
+        if unsupported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported derived feature(s): {', '.join(unsupported)}.",
+            )
 
     try:
         return deployment_service.deploy(request, principal)

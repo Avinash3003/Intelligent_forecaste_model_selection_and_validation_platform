@@ -66,6 +66,10 @@ class PipelineExecutionRequest(BaseModel):
     selected_models: list[str] | None = None
     fallback_model: str | None = None
     horizon: int | None = None
+    # Derived feature columns for the tree-based models (Priority C) —
+    # already validated against the authoritative registry by the caller
+    # (deployment_service.build_execution_request) before this is built.
+    derived_features: list[str] | None = None
 
     # Who submitted this run. Always derived server-side from the
     # authenticated `Principal` behind the `/deploy` or `/execution/submit`

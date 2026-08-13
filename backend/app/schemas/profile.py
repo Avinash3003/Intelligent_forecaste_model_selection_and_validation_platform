@@ -33,3 +33,27 @@ class ProfileResponse(BaseModel):
     file_size_bytes: int
     file_size: str
     columns: list[ColumnProfile]
+
+
+class DateRangeRequest(BaseModel):
+    """References a previously uploaded dataset and the column the user has
+    tentatively assigned as its date column (Metadata Mapping, Priority B) —
+    the same file `ProfileRequest` reads, one column further along.
+    """
+
+    file_id: str
+    date_column: str
+
+
+class DateRangeResponse(BaseModel):
+    """The dataset's observed date coverage for `date_column`, computed by
+    the same parsing rule `DataQualityAssessor` uses for a real run
+    (`forecast_engine.s02_quality.quality_assessor.parse_date_column` /
+    `date_range_from_parsed`) — never a second, independent implementation.
+    `available=False` (both bounds `None`) means the column had no
+    parseable date values, not a fabricated range.
+    """
+
+    available: bool
+    date_range_start: str | None = None
+    date_range_end: str | None = None

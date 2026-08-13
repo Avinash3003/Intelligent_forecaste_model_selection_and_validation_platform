@@ -94,6 +94,33 @@ export const forecastModels = [
   },
 ]
 
+// Derived feature columns selectable for XGBoost/LightGBM (Priority C) —
+// lag / rolling-mean / calendar features those two models already generate
+// internally for themselves (forecast_engine/s05_models/base_model.py's
+// SupervisedTreeModel). Mirrors the authoritative registry
+// (forecast_engine/config/derived_features_config.py,
+// backend/app/services/derived_feature_registry.py) exactly — kept as a
+// small, separate duplicate rather than a fetched list, the same reasoning
+// those two already document: three independently deployable
+// processes/bundles, so this is what stays in sync deliberately rather
+// than through a runtime dependency. `id` doubles as the resulting curated
+// preview column name.
+export const derivedFeatureOptions = [
+  { id: 'lag_1', label: 'Lag 1' },
+  { id: 'lag_2', label: 'Lag 2' },
+  { id: 'lag_3', label: 'Lag 3' },
+  { id: 'lag_12', label: 'Lag 12' },
+  { id: 'rolling_mean_3', label: 'Rolling Mean (3)' },
+  { id: 'rolling_mean_6', label: 'Rolling Mean (6)' },
+  { id: 'month', label: 'Month' },
+  { id: 'quarter', label: 'Quarter' },
+]
+
+// The selection that reproduces current behavior exactly — every model
+// that has never heard of per-run feature selection already generates all
+// of these unprompted, so this is the wizard's default checkbox state.
+export const defaultDerivedFeatures = derivedFeatureOptions.map((option) => option.id)
+
 // Forecast horizon is chosen on a continuous month scale (6 months–5 years)
 // rather than from fixed options, so a user can pick any exact horizon. Year
 // marks are supplied as tick labels purely to orient the scale.

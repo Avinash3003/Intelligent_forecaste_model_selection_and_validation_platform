@@ -2,10 +2,11 @@ import { AlertCircle, CheckCircle2, AlertTriangle, XCircle, Loader2, ShieldCheck
 import SectionContainer from '../../../components/layout/SectionContainer'
 import Select from '../../../components/ui/Select'
 import MultiSelect from '../../../components/ui/MultiSelect'
+import Checkbox from '../../../components/ui/Checkbox'
 import Badge from '../../../components/ui/Badge'
 import Button from '../../../components/ui/Button'
 import Loader from '../../../components/ui/Loader'
-import { aggregationMethodOptions } from '../../../data/appConfig'
+import { aggregationMethodOptions, derivedFeatureOptions } from '../../../data/appConfig'
 
 function Field({ label, required, hint, error, children }) {
   return (
@@ -172,6 +173,35 @@ export default function StepMetadataMapping({
             )}
             {validating ? 'Validating…' : isValidated ? 'Re-validate metadata' : 'Validate metadata'}
           </Button>
+        </div>
+      </SectionContainer>
+
+      {/* Distinct from "Feature Column(s)" above (existing raw exogenous
+          columns, passed through unchanged): these are engineered from the
+          target/date columns themselves — lag and rolling-mean values of
+          past target values, plus calendar position — for XGBoost/LightGBM
+          only. Every other model has its own native trend/seasonality
+          handling and ignores this selection entirely. */}
+      <SectionContainer
+        title="Feature Columns"
+        subtitle="Derived columns (lag, rolling mean, calendar) included in the curated dataset for XGBoost/LightGBM — controls what those models actually train on"
+      >
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {derivedFeatureOptions.map((option) => (
+            <Checkbox
+              key={option.id}
+              label={option.label}
+              checked={mapping.derivedFeatures.includes(option.id)}
+              onChange={(checked) =>
+                onChange(
+                  'derivedFeatures',
+                  checked
+                    ? [...mapping.derivedFeatures, option.id]
+                    : mapping.derivedFeatures.filter((id) => id !== option.id)
+                )
+              }
+            />
+          ))}
         </div>
       </SectionContainer>
 

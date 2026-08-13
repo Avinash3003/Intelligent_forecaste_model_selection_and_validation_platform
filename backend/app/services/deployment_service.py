@@ -56,6 +56,7 @@ def build_execution_request(
         selected_models=request.selected_models or None,
         fallback_model=request.fallback_model,
         horizon=request.horizon,
+        derived_features=request.derived_features,
         started_by_user_id=principal.subject,
         started_by_display_name=principal.display_name or principal.subject,
         started_by_email=principal.email,
