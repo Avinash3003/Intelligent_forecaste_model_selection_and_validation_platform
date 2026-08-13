@@ -16,9 +16,11 @@ export default function RunSummaryBar({ run }) {
       <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-6">
         <SummaryItem label="Run ID" value={run.id} />
         <SummaryItem label="Dataset" value={run.dataset} />
+        <SummaryItem label="Started By" value={run.startedBy || '—'} />
         <SummaryItem label="Started" value={run.startTime} />
         <SummaryItem label="Current Stage" value={run.currentStage} />
         <SummaryItem label="Remaining" value={run.estimatedRemaining} />
+        {run.cancelledBy && <SummaryItem label="Cancelled By" value={run.cancelledBy} />}
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Progress</p>
           <div className="mt-2">

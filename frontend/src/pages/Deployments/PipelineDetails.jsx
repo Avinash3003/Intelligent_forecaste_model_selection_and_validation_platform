@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { AlertCircle, AlertTriangle, ArrowLeft, LineChart, SearchX } from 'lucide-react'
+import { AlertCircle, AlertTriangle, ArrowLeft, LineChart, SearchX, XCircle } from 'lucide-react'
 import PageContainer from '../../components/common/PageContainer'
 import SectionContainer from '../../components/layout/SectionContainer'
 import Badge from '../../components/ui/Badge'
 import Button from '../../components/ui/Button'
+import ConfirmDialog from '../../components/ui/ConfirmDialog'
 import EmptyState from '../../components/ui/EmptyState'
 import Loader from '../../components/ui/Loader'
 import PipelineTimeline from '../../components/common/PipelineTimeline'
 import RunSummaryBar from './components/RunSummaryBar'
-import { fetchDeployment, isTerminalStatus } from '../../services'
+import { cancelDeployment, fetchDeployment, isTerminalStatus } from '../../services'
 
 const REFRESH_INTERVAL_MS = 3000
+const CANCELLABLE_STATUSES = ['Pending', 'Running']
 
 export default function PipelineDetails() {
   const { runId } = useParams()
@@ -21,6 +23,10 @@ export default function PipelineDetails() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [notFound, setNotFound] = useState(false)
+
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelCleanupWarning, setCancelCleanupWarning] = useState(null)
 
   const cancelledRef = useRef(false)
   const timeoutRef = useRef(null)
@@ -64,6 +70,26 @@ export default function PipelineDetails() {
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
     }
   }, [load])
+
+  const handleConfirmCancel = async () => {
+    setCancelling(true)
+    try {
+      const response = await cancelDeployment(runId)
+      // Immediate feedback rather than waiting for the next poll cycle —
+      // the poller will also pick this run up as terminal on its own, but
+      // there is no reason to make the user wait 3 seconds to see it.
+      setRun((current) => (current ? { ...current, status: 'Cancelled' } : current))
+      if (response.cleanup_errors?.length) {
+        setCancelCleanupWarning(response.cleanup_errors)
+      }
+      await load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setCancelling(false)
+      setShowCancelConfirm(false)
+    }
+  }
 
   const backButton = (
     <Button variant="secondary" icon={ArrowLeft} onClick={() => navigate('/deployments')}>
@@ -133,12 +159,33 @@ export default function PipelineDetails() {
           </p>
         </div>
 
-        {run.status === 'Completed' && (
-          <Button variant="secondary" icon={LineChart} onClick={() => navigate(`/results?run=${run.id}`)}>
-            View Results
-          </Button>
-        )}
+        <div className="flex items-center gap-2.5">
+          {CANCELLABLE_STATUSES.includes(run.status) && (
+            <Button variant="danger" icon={XCircle} onClick={() => setShowCancelConfirm(true)}>
+              Cancel Run
+            </Button>
+          )}
+          {run.status === 'Completed' && (
+            <Button variant="secondary" icon={LineChart} onClick={() => navigate(`/results?run=${run.id}`)}>
+              View Results
+            </Button>
+          )}
+        </div>
       </div>
+
+      {cancelCleanupWarning && (
+        <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium">Run cancelled, but some data could not be fully cleaned up</p>
+            <ul className="mt-1 list-inside list-disc space-y-0.5">
+              {cancelCleanupWarning.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       {run.error && (
         <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-sm text-rose-600 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
@@ -170,6 +217,17 @@ export default function PipelineDetails() {
           </p>
         )}
       </SectionContainer>
+
+      <ConfirmDialog
+        open={showCancelConfirm}
+        title="Cancel this run?"
+        description="Are you sure you want to cancel this run? All generated run data will be deleted."
+        confirmLabel="Cancel Run"
+        cancelLabel="Keep it"
+        loading={cancelling}
+        onConfirm={handleConfirmCancel}
+        onCancel={() => setShowCancelConfirm(false)}
+      />
     </PageContainer>
   )
 }

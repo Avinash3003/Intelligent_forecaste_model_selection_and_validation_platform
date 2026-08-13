@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
+from app.auth.models import Principal
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.exceptions import UnknownRunError
 from app.orchestration.schemas import JobStatus, PipelineExecutionRequest, RunListing
@@ -31,7 +32,9 @@ PIPELINE_STAGES = [
 _TERMINAL_STATUSES = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
 
 
-def build_execution_request(request: DeploymentRequest, dataset_path: Path) -> PipelineExecutionRequest:
+def build_execution_request(
+    request: DeploymentRequest, dataset_path: Path, principal: Principal
+) -> PipelineExecutionRequest:
     """Reshape a `DeploymentRequest` (file_id + metadata mapping) into the
     orchestration layer's backend-and-transport-agnostic
     `PipelineExecutionRequest`.
@@ -39,6 +42,12 @@ def build_execution_request(request: DeploymentRequest, dataset_path: Path) -> P
     Shared between `DeploymentService` (the existing `/deploy` contract)
     and the `/execution/*` routes, so the two entry points never build this
     mapping differently.
+
+    `principal` is the authenticated caller behind this HTTP request — the
+    same object `Depends(require(...))` already produced for the route —
+    never a value read from `request` itself. `DeploymentRequest` has no
+    `started_by` field at all, so there is nothing here a client could ever
+    override.
     """
     return PipelineExecutionRequest(
         dataset_path=str(dataset_path),
@@ -47,6 +56,9 @@ def build_execution_request(request: DeploymentRequest, dataset_path: Path) -> P
         selected_models=request.selected_models or None,
         fallback_model=request.fallback_model,
         horizon=request.horizon,
+        started_by_user_id=principal.subject,
+        started_by_display_name=principal.display_name or principal.subject,
+        started_by_email=principal.email,
     )
 
 
@@ -66,7 +78,7 @@ class DeploymentService:
         self._executor = executor or get_pipeline_executor()
         self._upload_service = upload_service or UploadService()
 
-    def deploy(self, request: DeploymentRequest) -> DeploymentResponse:
+    def deploy(self, request: DeploymentRequest, principal: Principal) -> DeploymentResponse:
         """Submit one run and return the id it can be polled by.
 
         Raises:
@@ -78,7 +90,7 @@ class DeploymentService:
         very next status poll, which is worse than a clear failure here.
         """
         dataset_path, original_filename = self._upload_service.resolve(request.file_id)
-        execution_request = build_execution_request(request, dataset_path)
+        execution_request = build_execution_request(request, dataset_path, principal)
         execution_request.dataset_name = execution_request.dataset_name or original_filename
 
         run_id = self._executor.execute(execution_request)
@@ -141,6 +153,8 @@ class DeploymentService:
             estimated_remaining="0 min" if listing.job_status is JobStatus.COMPLETED else "—",
             stages=stages,
             error=listing.error,
+            started_by=listing.started_by,
+            cancelled_by=listing.cancelled_by,
         )
 
     def _to_stage_statuses(self, listing: RunListing) -> list[StageStatus]:

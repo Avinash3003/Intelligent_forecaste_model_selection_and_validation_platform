@@ -20,6 +20,11 @@ export default function DeploymentsTable({ runs }) {
     },
     { key: 'dataset', header: 'Dataset' },
     { key: 'status', header: 'Status', render: (r) => <Badge status={r.status}>{r.status}</Badge> },
+    {
+      key: 'startedBy',
+      header: 'Started By',
+      render: (r) => <span className="text-sm text-slate-600 dark:text-slate-300">{r.startedBy || '—'}</span>,
+    },
     { key: 'startTime', header: 'Start Time (IST)' },
     { key: 'duration', header: 'Duration' },
     {

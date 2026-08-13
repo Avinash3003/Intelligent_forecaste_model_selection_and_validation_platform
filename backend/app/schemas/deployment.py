@@ -46,3 +46,8 @@ class DeploymentStatus(BaseModel):
     # Populated only for a failed run, so the UI can show why it failed
     # rather than a generic message.
     error: str | None = None
+    # Display names only. Always server-derived from the authenticated
+    # principal behind the request that started/cancelled the run — never
+    # accepted as input from a client, so neither can be spoofed.
+    started_by: str | None = None
+    cancelled_by: str | None = None

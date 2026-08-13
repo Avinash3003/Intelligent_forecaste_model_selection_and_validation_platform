@@ -70,6 +70,8 @@ function normalizeDeployment(payload) {
       completedAt: stage.completed_at,
     })),
     error: payload.error ?? null,
+    startedBy: payload.started_by ?? null,
+    cancelledBy: payload.cancelled_by ?? null,
   }
 }
 
@@ -89,4 +91,14 @@ export async function fetchDeployment(runId) {
 // run executes. Returns { run_id, job_status }.
 export function fetchExecutionStatus(runId) {
   return apiClient.get(`/execution/${encodeURIComponent(runId)}/status`)
+}
+
+// Cancels a Pending/Running run: stops execution, deletes everything that
+// run had already written, and marks it CANCELLED — see
+// `POST /execution/{run_id}/cancel`. Returns
+// { run_id, cancelled, cleanup_errors }; `cleanup_errors` names exactly
+// which storage location(s), if any, could not be cleaned up rather than
+// silently reporting success.
+export function cancelDeployment(runId) {
+  return apiClient.post(`/execution/${encodeURIComponent(runId)}/cancel`)
 }

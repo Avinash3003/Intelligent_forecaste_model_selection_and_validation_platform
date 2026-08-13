@@ -155,6 +155,8 @@ class ForecastEnginePipeline:
         fallback_model: str | None = None,
         dataset_name: str | None = None,
         live_status_path: str | Path | None = None,
+        started_by_user_id: str | None = None,
+        started_by_display_name: str | None = None,
     ) -> PipelineContext:
         """Execute all 14 pipeline stages for one dataset.
 
@@ -184,6 +186,11 @@ class ForecastEnginePipeline:
                 the file's own name.
             live_status_path: When set, the stage trail is written here after
                 every transition so a poller can show live progress.
+            started_by_user_id: Stable identity of the user who submitted
+                this run (e.g. an Entra object id), recorded with the MLflow
+                Parent Run so who-started-it survives even a run that fails
+                or is cancelled before finishing.
+            started_by_display_name: Display name for the same user.
 
         Returns:
             The populated `PipelineContext`.
@@ -225,7 +232,10 @@ class ForecastEnginePipeline:
         # upload is named "{file_id}_{original}.csv" on disk, which is not
         # what a user recognises in a run-history view.
         context.tracking_result = self._tracking_pipeline.begin(
-            context.run_id, dataset_name or Path(dataset_path).name
+            context.run_id,
+            dataset_name or Path(dataset_path).name,
+            started_by_user_id=started_by_user_id,
+            started_by_display_name=started_by_display_name,
         )
 
         try:
@@ -707,6 +717,10 @@ def apply_config_run_options(args: argparse.Namespace, payload: dict[str, Any]) 
         args.run_id = str(payload["run_id"])
     if args.dataset_name is None and payload.get("dataset_name"):
         args.dataset_name = str(payload["dataset_name"])
+    if args.started_by_user_id is None and payload.get("started_by_user_id"):
+        args.started_by_user_id = str(payload["started_by_user_id"])
+    if args.started_by_display_name is None and payload.get("started_by_display_name"):
+        args.started_by_display_name = str(payload["started_by_display_name"])
     if not args.models and payload.get("models"):
         args.models = [str(model) for model in payload["models"]]
     if args.fallback_model is None and payload.get("fallback_model"):
@@ -762,6 +776,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dataset-name",
         default=None,
         help="Display name for the dataset, recorded with the run (defaults to the file's own name).",
+    )
+    parser.add_argument(
+        "--started-by-user-id",
+        default=None,
+        help="Stable identity of the user who submitted this run, recorded with the MLflow Parent Run.",
+    )
+    parser.add_argument(
+        "--started-by-display-name",
+        default=None,
+        help="Display name for the user who submitted this run.",
     )
     parser.add_argument("--summary-out", help="Write the run summary JSON to this path.")
     parser.add_argument(
@@ -844,6 +868,8 @@ def main(argv: list[str] | None = None) -> int:
             fallback_model=args.fallback_model,
             dataset_name=args.dataset_name,
             live_status_path=args.live_status_out,
+            started_by_user_id=args.started_by_user_id,
+            started_by_display_name=args.started_by_display_name,
         )
     except ForecastEngineError as exc:
         print(f"Forecast Engine failed: {exc}", file=sys.stderr)

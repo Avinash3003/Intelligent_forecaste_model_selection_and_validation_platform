@@ -32,3 +32,12 @@ RUN_ID_TAG = "run_id"
 DATASET_NAME_TAG = "dataset_name"
 ERROR_TAG = "error"
 FAILED_STAGE_TAG = "failed_stage"
+
+# Who submitted the run — set once, at `begin()`, alongside `run_id` and
+# `dataset_name`, so even a run that dies before any other stage still
+# carries who started it. `cancelled_by_*` has no engine-side counterpart:
+# a cancellation is requested from outside this process (the backend, not
+# the pipeline it is cancelling), so those tags are written directly by the
+# backend's own MLflow client, not through this module.
+STARTED_BY_USER_ID_TAG = "started_by_user_id"
+STARTED_BY_DISPLAY_NAME_TAG = "started_by_display_name"

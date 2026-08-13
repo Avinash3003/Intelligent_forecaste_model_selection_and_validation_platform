@@ -17,7 +17,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from app.orchestration.schemas import JobStatus, PipelineExecutionRequest, PipelineExecutionResult, RunListing
+from app.orchestration.schemas import (
+    CancellationOutcome,
+    JobStatus,
+    PipelineExecutionRequest,
+    PipelineExecutionResult,
+    RunListing,
+)
 
 
 class PipelineRunner(ABC):
@@ -72,13 +78,31 @@ class PipelineRunner(ABC):
         """
 
     @abstractmethod
-    def cancel(self, run_id: str) -> bool:
+    def cancel(
+        self,
+        run_id: str,
+        cancelled_by_user_id: str | None = None,
+        cancelled_by_display_name: str | None = None,
+    ) -> CancellationOutcome:
         """Attempt to cancel a pending or running job.
 
+        On acceptance, this also reconciles everything the run may have
+        already written: every run-scoped storage location is deleted
+        (strictly by `run_id`, never touching another run's data), and any
+        MLflow Parent Run already opened for it is marked terminated rather
+        than left `RUNNING` forever. `cancelled_by_*` is recorded alongside
+        the run's own `started_by_*` so a run history entry can show both.
+
+        Idempotent: calling this again on an already-cancelled run returns
+        `cancelled=False` and performs no further action, rather than
+        erroring or repeating the cleanup.
+
         Returns:
-            True if cancellation was accepted (the job's status becomes
-            CANCELLED); False if the job had already reached a terminal
-            status and there was nothing to cancel.
+            A `CancellationOutcome`. `cancelled=False` if the job had
+            already reached a terminal status and there was nothing to
+            cancel — not an error. `cleanup_errors` names exactly which
+            storage location(s) could not be cleaned up, if any; an empty
+            list means every one succeeded (or was already clean).
 
         Raises:
             UnknownRunError: if `run_id` was never submitted.

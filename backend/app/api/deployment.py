@@ -21,7 +21,7 @@ def deploy(
         raise HTTPException(status_code=400, detail="Please upload a dataset before submitting a run.")
 
     try:
-        return deployment_service.deploy(request)
+        return deployment_service.deploy(request, principal)
     except FileResolutionError as exc:
         raise HTTPException(
             status_code=404,

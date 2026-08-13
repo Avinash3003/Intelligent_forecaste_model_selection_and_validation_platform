@@ -8,6 +8,8 @@ const variants = {
   ghost:
     'bg-transparent text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800/70',
   dark: 'bg-slate-900 text-white hover:bg-slate-800',
+  danger:
+    'bg-rose-600 text-white shadow-sm shadow-rose-600/30 hover:bg-rose-700 active:bg-rose-800',
 }
 
 const sizes = {

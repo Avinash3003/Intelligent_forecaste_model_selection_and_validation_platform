@@ -2,6 +2,7 @@ export { apiClient, ApiError } from './apiClient'
 export { uploadDataset, profileDataset } from './uploadService'
 export { validateMetadata } from './metadataService'
 export {
+  cancelDeployment,
   deployRun,
   fetchDeployments,
   fetchDeployment,
@@ -14,4 +15,4 @@ export { estimateRun } from './estimationService'
 export { fetchCurrentUser } from './authService'
 export { fetchResults, fetchDebugSummary, fetchDatasetPreview } from './resultsService'
 export { fetchMLflowRun } from './mlflowService'
-export { fetchLlmObservability, fetchPromptUsage } from './llmObservabilityService'
+export { fetchLlmObservability, fetchPromptUsage, fetchLlmEvaluation } from './llmObservabilityService'

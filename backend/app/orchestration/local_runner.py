@@ -32,6 +32,7 @@ a run is never silently lost just because it could not be persisted.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -47,6 +48,7 @@ from app.orchestration.mlflow_history import MLflowHistoryStore
 from app.orchestration.result_mapper import map_summary_to_result
 from app.orchestration.runner_base import PipelineRunner
 from app.orchestration.schemas import (
+    CancellationOutcome,
     ExecutionBackend,
     JobStatus,
     PipelineExecutionRequest,
@@ -77,6 +79,14 @@ class _JobRecord:
     # on demand while the job is still active, never written by this
     # process — the engine subprocess is the sole writer.
     live_status_path: Path | None = None
+    # The per-run temp directory holding the dataset config, live status,
+    # summary and stderr log — set once, at execute time, so cancellation
+    # can delete the whole thing in one shot rather than naming each file.
+    work_dir: Path | None = None
+    started_by_user_id: str | None = None
+    started_by_display_name: str | None = None
+    cancelled_by_user_id: str | None = None
+    cancelled_by_display_name: str | None = None
 
 
 class LocalRunner(PipelineRunner):
@@ -106,6 +116,8 @@ class LocalRunner(PipelineRunner):
             # Falls back to the staged file's own name so a run submitted
             # without an explicit dataset name is still identifiable.
             dataset_name=request.dataset_name or Path(request.dataset_path).name,
+            started_by_user_id=request.started_by_user_id,
+            started_by_display_name=request.started_by_display_name,
         )
 
         with self._lock:
@@ -199,20 +211,7 @@ class LocalRunner(PipelineRunner):
         with self._lock:
             records = list(self._jobs.values())
 
-        active = [
-            RunListing(
-                run_id=record.run_id,
-                dataset_name=record.dataset_name,
-                job_status=record.status,
-                execution_backend=ExecutionBackend.LOCAL,
-                started_at=record.started_at,
-                completed_at=record.completed_at,
-                duration_seconds=record.duration_seconds,
-                error=record.error,
-                stages=self._current_stages(record),
-            )
-            for record in records
-        ]
+        active = [self._to_listing(record) for record in records]
 
         # In-memory entries win over persisted ones for the same id: a job
         # this process is running is more current than whatever MLflow has
@@ -228,18 +227,23 @@ class LocalRunner(PipelineRunner):
     def get_run(self, run_id: str) -> RunListing | None:
         record = self._find_job(run_id)
         if record is not None:
-            return RunListing(
-                run_id=record.run_id,
-                dataset_name=record.dataset_name,
-                job_status=record.status,
-                execution_backend=ExecutionBackend.LOCAL,
-                started_at=record.started_at,
-                completed_at=record.completed_at,
-                duration_seconds=record.duration_seconds,
-                error=record.error,
-                stages=self._current_stages(record),
-            )
+            return self._to_listing(record)
         return self._history.get_listing(run_id, with_stages=True)
+
+    def _to_listing(self, record: _JobRecord) -> RunListing:
+        return RunListing(
+            run_id=record.run_id,
+            dataset_name=record.dataset_name,
+            job_status=record.status,
+            execution_backend=ExecutionBackend.LOCAL,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            duration_seconds=record.duration_seconds,
+            error=record.error,
+            started_by=record.started_by_display_name,
+            cancelled_by=record.cancelled_by_display_name,
+            stages=self._current_stages(record),
+        )
 
     def _current_stages(self, record: _JobRecord) -> list[dict[str, Any]]:
         """This job's stage trail right now — real, not fabricated.
@@ -264,20 +268,108 @@ class LocalRunner(PipelineRunner):
             return []
         return payload.get("stages") or []
 
-    def cancel(self, run_id: str) -> bool:
+    # Grace period after SIGTERM before escalating to SIGKILL. Bounded and
+    # short: cleanup below must not start deleting a run's storage while
+    # the subprocess could still be mid-write to one of those same paths,
+    # but a cancel request is also a user waiting on this call to return.
+    _TERMINATE_GRACE_SECONDS = 5.0
+
+    def cancel(
+        self,
+        run_id: str,
+        cancelled_by_user_id: str | None = None,
+        cancelled_by_display_name: str | None = None,
+    ) -> CancellationOutcome:
         record = self._require_job(run_id)
         with self._lock:
             if record.status not in (JobStatus.PENDING, JobStatus.RUNNING):
-                return False
+                # Already terminal — nothing to do, and nothing to report as
+                # a failure. A second cancel() on the same run lands here.
+                return CancellationOutcome(cancelled=False)
             record.status = JobStatus.CANCELLED
             record.completed_at = _now_iso()
+            record.cancelled_by_user_id = cancelled_by_user_id
+            record.cancelled_by_display_name = cancelled_by_display_name
             process = record.process
+            work_dir = record.work_dir
 
         # Terminated outside the lock: killing a process is a syscall, not
-        # a state mutation, and should never be made while holding it.
+        # a state mutation, and should never be made while holding it. A
+        # forced kill is not something the subprocess's own `except
+        # Exception` can react to — cleanup below happens from this side,
+        # not by trusting the subprocess to clean up after itself.
         if process is not None and process.poll() is None:
             process.terminate()
-        return True
+            try:
+                process.wait(timeout=self._TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                # Still alive after a polite SIGTERM — stop waiting and
+                # force it, so cleanup below never races a process that is
+                # still writing to the very paths it is about to delete.
+                process.kill()
+                process.wait(timeout=self._TERMINATE_GRACE_SECONDS)
+
+        cleanup_errors = self._cleanup_run_storage(run_id, work_dir)
+
+        try:
+            self._history.mark_cancelled(
+                run_id, cancelled_by_user_id, cancelled_by_display_name, record.completed_at
+            )
+        except Exception as exc:  # noqa: BLE001 - report, never raise out of cancel()
+            cleanup_errors.append(f"MLflow run lifecycle: {exc}")
+
+        return CancellationOutcome(cancelled=True, cleanup_errors=cleanup_errors)
+
+    def _cleanup_run_storage(self, run_id: str, work_dir: Path | None) -> list[str]:
+        """Delete every local path this run could have written, strictly
+        scoped to `run_id`. Safe to call on a run that wrote nothing yet
+        (PENDING) or that was already cleaned up (idempotent) — a missing
+        path is treated as already-clean, not an error.
+
+        Never touches `backend/uploads/` — the originally uploaded file is
+        keyed by `file_id`, not `run_id`, and may be staged for more than
+        one run (e.g. a re-deploy after tweaking configuration), so it is
+        not safely attributable to this run alone.
+
+        Returns a list of human-readable failures — empty means every
+        location was successfully emptied (or was already empty).
+        """
+        errors: list[str] = []
+
+        if work_dir is not None:
+            try:
+                shutil.rmtree(work_dir)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                errors.append(f"run workspace ({work_dir}): {exc}")
+
+        # Mirrors forecast_engine's own default storage roots (Sections
+        # curated_storage/model_storage/forecast_export/artifacts_mirror in
+        # config/pipeline_config.py) — LocalRunner does not override them,
+        # so this must reconstruct the same paths the engine actually wrote.
+        engine_root = Path(self._settings.forecast_engine_root).resolve().parent
+        for label, path in (
+            ("curated dataset", engine_root / "curated" / run_id),
+            ("trained models", engine_root / "models" / run_id),
+            ("mirrored artifacts", engine_root / "artifacts" / run_id),
+        ):
+            try:
+                shutil.rmtree(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                errors.append(f"{label} ({path}): {exc}")
+
+        forecast_csv = engine_root / "forecasts" / f"{run_id}_forecast.csv"
+        try:
+            forecast_csv.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            errors.append(f"forecast export ({forecast_csv}): {exc}")
+
+        return errors
 
     def _find_job(self, run_id: str) -> _JobRecord | None:
         with self._lock:
@@ -333,6 +425,7 @@ class LocalRunner(PipelineRunner):
 
         with self._lock:
             record.live_status_path = live_status_path
+            record.work_dir = work_dir
 
         try:
             config_path.write_text(json.dumps(request.forecast_configuration))
@@ -362,6 +455,10 @@ class LocalRunner(PipelineRunner):
                 # Recorded with the run in MLflow, so run history shows the
                 # name a user uploaded rather than the staged file's.
                 command += ["--dataset-name", record.dataset_name]
+            if record.started_by_user_id:
+                command += ["--started-by-user-id", record.started_by_user_id]
+            if record.started_by_display_name:
+                command += ["--started-by-display-name", record.started_by_display_name]
 
             process = subprocess.Popen(
                 command,
@@ -426,7 +523,13 @@ class LocalRunner(PipelineRunner):
                 record.error = f"Local execution failed: {type(exc).__name__}: {exc}"
         finally:
             with self._lock:
-                record.completed_at = _now_iso()
+                # A CANCELLED record was already finalized by cancel() —
+                # including its own `completed_at` — before this subprocess
+                # actually exited; overwriting it here with "now" would
+                # quietly drift the cancellation timestamp later by however
+                # long the process took to die after being signalled.
+                if record.status is not JobStatus.CANCELLED:
+                    record.completed_at = _now_iso()
                 if record.started_at and record.completed_at:
                     record.duration_seconds = (
                         datetime.fromisoformat(record.completed_at) - datetime.fromisoformat(record.started_at)

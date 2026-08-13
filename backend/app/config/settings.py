@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # derived from `forecast_engine_root` (see `forecast_engine_python_path`).
     forecast_engine_python: str | None = None
 
+    # Override for where the LLM evaluation/regression report is read from;
+    # when unset, derived from `forecast_engine_root`
+    # (see `llm_eval_report_path_resolved`).
+    llm_eval_report_path: str | None = None
+
     job_poll_interval_seconds: float = 2.0
     job_timeout_seconds: float = 3600.0
 
@@ -243,6 +248,21 @@ class Settings(BaseSettings):
         directory rather than its own.
         """
         return Path(self.forecast_engine_root).resolve().parent
+
+    @property
+    def llm_eval_report_path_resolved(self) -> Path:
+        """Where `python -m forecast_engine.s11_llm.evaluate` writes its
+        JSON report, and where the Observability API reads it back from.
+
+        Not a database and not run-scoped: the LLM evaluation/regression
+        suite (Section 13.3) is a standalone check of "prompt version +
+        model", run on demand, independent of any pipeline run — this is
+        exactly the generated-artifact pattern `summary.json` already
+        uses, just for a check that is not tied to a `run_id`.
+        """
+        if self.llm_eval_report_path:
+            return Path(self.llm_eval_report_path)
+        return Path(self.forecast_engine_root).resolve() / "s11_llm" / "eval_output" / "latest_regression_report.json"
 
     @property
     def mlflow_tracking_uri_resolved(self) -> str:

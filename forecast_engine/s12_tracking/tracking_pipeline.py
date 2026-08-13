@@ -39,6 +39,8 @@ from forecast_engine.s12_tracking.run_summary import (
     ERROR_TAG,
     FAILED_STAGE_TAG,
     RUN_ID_TAG,
+    STARTED_BY_DISPLAY_NAME_TAG,
+    STARTED_BY_USER_ID_TAG,
     SUMMARY_ARTIFACT_PATH,
 )
 from forecast_engine.s12_tracking.tracking_report import TrackingResult
@@ -59,7 +61,13 @@ class MLflowTrackingPipeline:
         self._started_at: float | None = None
 
     # Open the Parent Run before the first pipeline stage; never raises
-    def begin(self, run_id: str, dataset_name: str | None = None) -> TrackingResult:
+    def begin(
+        self,
+        run_id: str,
+        dataset_name: str | None = None,
+        started_by_user_id: str | None = None,
+        started_by_display_name: str | None = None,
+    ) -> TrackingResult:
         # Returns a TrackingResult describing the *open* run (or why one
         # could not be opened). The pipeline keeps this only so a failure
         # before `complete()` still has something to report.
@@ -84,7 +92,12 @@ class MLflowTrackingPipeline:
             # here would create a second copy that can go stale.
             active_run = self._client.start_run(
                 run_name=f"forecast-run-{run_id}",
-                tags={RUN_ID_TAG: run_id, DATASET_NAME_TAG: dataset_name or ""},
+                tags={
+                    RUN_ID_TAG: run_id,
+                    DATASET_NAME_TAG: dataset_name or "",
+                    STARTED_BY_USER_ID_TAG: started_by_user_id or "",
+                    STARTED_BY_DISPLAY_NAME_TAG: started_by_display_name or "",
+                },
             )
             result.run_id = active_run.info.run_id
             result.experiment_id = active_run.info.experiment_id

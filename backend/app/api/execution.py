@@ -43,7 +43,7 @@ def submit_execution(
 
     try:
         dataset_path, original_filename = upload_service.resolve(request.file_id)
-        execution_request = build_execution_request(request, dataset_path)
+        execution_request = build_execution_request(request, dataset_path, principal)
         execution_request.dataset_name = execution_request.dataset_name or original_filename
         executor = get_pipeline_executor()
         run_id = executor.execute(execution_request)
@@ -113,7 +113,11 @@ def cancel_execution(
     principal: Principal = Depends(require(Permission.RUN_CANCEL)),
 ) -> ExecutionCancelResponse:
     try:
-        cancelled = get_pipeline_executor().cancel(run_id)
+        outcome = get_pipeline_executor().cancel(
+            run_id,
+            cancelled_by_user_id=principal.subject,
+            cancelled_by_display_name=principal.display_name or principal.subject,
+        )
     except UnknownRunError as exc:
         raise HTTPException(status_code=404, detail="That run could not be found.") from exc
     except ExecutionError as exc:
@@ -122,4 +126,4 @@ def cancel_execution(
             detail=safe_detail(exc, fallback="The run could not be cancelled. Please try again."),
         ) from exc
 
-    return ExecutionCancelResponse(run_id=run_id, cancelled=cancelled)
+    return ExecutionCancelResponse(run_id=run_id, cancelled=outcome.cancelled, cleanup_errors=outcome.cleanup_errors)

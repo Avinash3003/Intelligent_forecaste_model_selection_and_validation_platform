@@ -67,6 +67,14 @@ class PipelineExecutionRequest(BaseModel):
     fallback_model: str | None = None
     horizon: int | None = None
 
+    # Who submitted this run. Always derived server-side from the
+    # authenticated `Principal` behind the `/deploy` or `/execution/submit`
+    # request — never accepted from request-body JSON — so nothing here can
+    # be spoofed by a caller naming a different user.
+    started_by_user_id: str | None = None
+    started_by_display_name: str | None = None
+    started_by_email: str | None = None
+
 
 class RunListing(BaseModel):
     """One submitted run as the Runner knows it — the raw material for a
@@ -89,7 +97,28 @@ class RunListing(BaseModel):
     duration_seconds: float | None = None
     error: str | None = None
 
+    # Display names only — the stable user ids live on the Runner's own
+    # job record / MLflow tags, not here. `RunListing` is what a run-history
+    # view renders directly, and a view never needs more than a name.
+    started_by: str | None = None
+    cancelled_by: str | None = None
+
     stages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CancellationOutcome(BaseModel):
+    """What actually happened when a cancellation was requested.
+
+    `cancelled=False` means there was nothing to cancel (the run had
+    already reached a terminal status) — not an error. `cleanup_errors` is
+    deliberately a list, not a bool: a cancellation can succeed at stopping
+    the run while individual storage locations fail to clean up, and a
+    caller needs to know exactly which ones rather than a single opaque
+    "cleanup failed".
+    """
+
+    cancelled: bool
+    cleanup_errors: list[str] = Field(default_factory=list)
 
 
 class PipelineExecutionResult(BaseModel):

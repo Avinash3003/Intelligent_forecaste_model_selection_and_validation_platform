@@ -16,6 +16,14 @@ from app.orchestration.schemas import JobStatus, PipelineExecutionRequest
 
 
 class _FakeFiles:
+    """A flat `{path: bytes}` map standing in for a UC Volume.
+
+    `list_directory_contents`/`delete`/`delete_directory` derive directory
+    structure from path prefixes rather than modelling a real filesystem —
+    enough fidelity for `DatabricksRunner`'s recursive cleanup, which only
+    ever lists one level, deletes files, then recurses into subdirectories.
+    """
+
     def __init__(self) -> None:
         self.uploaded: dict[str, bytes] = {}
 
@@ -24,8 +32,46 @@ class _FakeFiles:
 
     def download(self, file_path):
         if file_path not in self.uploaded:
-            raise FileNotFoundError(file_path)
+            raise _not_found(file_path)
         return SimpleNamespace(contents=SimpleNamespace(read=lambda: self.uploaded[file_path]))
+
+    def list_directory_contents(self, path):
+        prefix = path.rstrip("/") + "/"
+        children: dict[str, bool] = {}  # child path -> is_directory
+        for key in self.uploaded:
+            if not key.startswith(prefix):
+                continue
+            remainder = key[len(prefix) :]
+            if "/" in remainder:
+                child = prefix + remainder.split("/", 1)[0]
+                children[child] = True
+            else:
+                children[key] = False
+        if not children:
+            raise _not_found(path)
+        return [SimpleNamespace(path=child, is_directory=is_dir) for child, is_dir in children.items()]
+
+    def delete(self, file_path):
+        if file_path not in self.uploaded:
+            raise _not_found(file_path)
+        del self.uploaded[file_path]
+
+    def delete_directory(self, dir_path):
+        prefix = dir_path.rstrip("/") + "/"
+        if any(key.startswith(prefix) for key in self.uploaded):
+            raise RuntimeError(f"directory not empty: {dir_path}")
+        # Deleting an already-empty (or never-existent) directory succeeds
+        # silently, matching the real API — this is what makes repeated
+        # cleanup idempotent.
+
+
+def _not_found(path):
+    try:
+        from databricks.sdk.errors import NotFound
+
+        return NotFound(path)
+    except ImportError:  # pragma: no cover - dependency is declared
+        return FileNotFoundError(path)
 
 
 class _FakeJobs:
@@ -249,7 +295,9 @@ def test_cancel_reaches_the_workspace(settings, dataset):
     runner = DatabricksRunner(settings, workspace_client=workspace)
     run_id = runner.submit(_request(dataset))
 
-    assert runner.cancel(run_id) is True
+    outcome = runner.cancel(run_id)
+    assert outcome.cancelled is True
+    assert outcome.cleanup_errors == []
     assert workspace.jobs.cancelled == [99]
     # A second cancel has nothing to do and says so rather than pretending.
-    assert runner.cancel(run_id) is False
+    assert runner.cancel(run_id).cancelled is False

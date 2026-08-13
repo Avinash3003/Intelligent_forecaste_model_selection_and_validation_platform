@@ -47,6 +47,7 @@ from app.orchestration.mlflow_history import MLflowHistoryStore
 from app.orchestration.result_mapper import map_summary_to_result
 from app.orchestration.runner_base import PipelineRunner
 from app.orchestration.schemas import (
+    CancellationOutcome,
     ExecutionBackend,
     JobStatus,
     PipelineExecutionRequest,
@@ -123,6 +124,10 @@ class _DatabricksJobRecord:
     error: str | None = None
     summary: dict[str, Any] | None = None
     stages: list[dict[str, Any]] = field(default_factory=list)
+    started_by_user_id: str | None = None
+    started_by_display_name: str | None = None
+    cancelled_by_user_id: str | None = None
+    cancelled_by_display_name: str | None = None
 
 
 class DatabricksRunner(PipelineRunner):
@@ -252,6 +257,8 @@ class DatabricksRunner(PipelineRunner):
             status=JobStatus.PENDING,
             started_at=_now_iso(),
             dataset_name=request.dataset_name or Path(request.dataset_path).name,
+            started_by_user_id=request.started_by_user_id,
+            started_by_display_name=request.started_by_display_name,
         )
         with self._lock:
             self._jobs[run_id] = record
@@ -372,21 +379,121 @@ class DatabricksRunner(PipelineRunner):
             return self._to_listing(record)
         return self._history.get_listing(run_id, with_stages=True)
 
-    def cancel(self, run_id: str) -> bool:
+    def cancel(
+        self,
+        run_id: str,
+        cancelled_by_user_id: str | None = None,
+        cancelled_by_display_name: str | None = None,
+    ) -> CancellationOutcome:
         record = self._require_job(run_id)
         if record.status not in (JobStatus.PENDING, JobStatus.RUNNING):
-            return False
+            # Already terminal — nothing to do, and nothing to report as a
+            # failure. A second cancel() on the same run lands here.
+            return CancellationOutcome(cancelled=False)
+
+        cleanup_errors: list[str] = []
 
         if record.databricks_run_id is not None:
             try:
                 self._workspace.jobs.cancel_run(run_id=record.databricks_run_id)
             except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
-                raise ExecutionError(safe_detail(exc)) from exc
+                # A request the control plane never accepted still leaves a
+                # real job running — surfaced, not swallowed, but cleanup
+                # below is still attempted for whatever the job had already
+                # written before this call.
+                cleanup_errors.append(f"Databricks job cancellation: {safe_detail(exc)}")
 
+        cancelled_at = _now_iso()
         with self._lock:
             record.status = JobStatus.CANCELLED
-            record.completed_at = _now_iso()
-        return True
+            record.completed_at = cancelled_at
+            record.cancelled_by_user_id = cancelled_by_user_id
+            record.cancelled_by_display_name = cancelled_by_display_name
+
+        # Requesting cancellation and the job actually stopping are not the
+        # same instant — Databricks gives no synchronous "wait until fully
+        # stopped" call, so there is an inherent, narrow race where the job
+        # is still mid-write to a UC Volume file the instant cleanup below
+        # runs. That is a property of asynchronous job cancellation, not
+        # something this driver-side call can close without polling
+        # `jobs.get_run()` in a loop — deliberately not done here, to avoid
+        # turning a cancel request into a multi-second blocking call.
+        cleanup_errors += self._cleanup_run_storage(run_id)
+
+        try:
+            self._history.mark_cancelled(run_id, cancelled_by_user_id, cancelled_by_display_name, cancelled_at)
+        except Exception as exc:  # noqa: BLE001 - report, never raise out of cancel()
+            cleanup_errors.append(f"MLflow run lifecycle: {safe_detail(exc)}")
+
+        return CancellationOutcome(cancelled=True, cleanup_errors=cleanup_errors)
+
+    def _cleanup_run_storage(self, run_id: str) -> list[str]:
+        """Delete every UC Volume path this run could have written, strictly
+        scoped to `run_id` via the same `runs/{run_id}` structure every
+        writer already uses (see `_run_root`/`_curated_root`/etc.). Safe to
+        call on a run that wrote nothing yet (PENDING) or that was already
+        cleaned up (idempotent) — a missing path is treated as already
+        clean, not an error.
+
+        Never touches the raw upload the dataset was staged from
+        (`request.dataset_path`, keyed by `file_id` on the API host) — only
+        the run-scoped *copy* this run uploaded to its own `runs/{run_id}`
+        directory, which nothing else can be depending on.
+
+        Returns a list of human-readable failures — empty means every
+        location was successfully emptied (or was already empty).
+        """
+        errors: list[str] = []
+        for label, path in (
+            ("uploaded dataset/config/status", self._run_root(run_id)),
+            ("curated dataset", f"{self._curated_root(run_id)}/{run_id}"),
+            ("trained models", f"{self._models_root()}/{run_id}"),
+            ("mirrored artifacts", f"{self._artifacts_root()}/{run_id}"),
+        ):
+            try:
+                self._delete_volume_directory(path)
+            except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
+                errors.append(f"{label} ({path}): {safe_detail(exc)}")
+
+        forecast_path = f"{self._forecasts_root()}/{run_id}_forecast.csv"
+        try:
+            self._workspace.files.delete(forecast_path)
+        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
+            if not _is_not_found(exc):
+                errors.append(f"forecast export ({forecast_path}): {safe_detail(exc)}")
+
+        return errors
+
+    def _delete_volume_directory(self, path: str) -> None:
+        """Recursively empty and remove one UC Volume directory.
+
+        The Files API only deletes an empty directory in one call — see
+        `FilesAPI.delete_directory`'s own docstring — so this walks the
+        tree depth-first, deleting every file, then every now-empty
+        subdirectory, then `path` itself. A directory that does not exist
+        at all is treated as already clean, not an error, which is what
+        makes a repeated cancel (or cleanup racing a job that never wrote
+        anything here) safe.
+        """
+        try:
+            entries = list(self._workspace.files.list_directory_contents(path))
+        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
+            if _is_not_found(exc):
+                return
+            raise
+
+        for entry in entries:
+            if entry.is_directory:
+                self._delete_volume_directory(entry.path.rstrip("/"))
+                self._workspace.files.delete_directory(entry.path.rstrip("/"))
+            else:
+                self._workspace.files.delete(entry.path)
+
+        try:
+            self._workspace.files.delete_directory(path)
+        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
+            if not _is_not_found(exc):
+                raise
 
     # ------------------------------------------------------------------
     # Integration points
@@ -451,6 +558,10 @@ class DatabricksRunner(PipelineRunner):
             payload["fallback_model"] = request.fallback_model
         if request.horizon is not None:
             payload["horizon"] = int(request.horizon)
+        if request.started_by_user_id:
+            payload["started_by_user_id"] = request.started_by_user_id
+        if request.started_by_display_name:
+            payload["started_by_display_name"] = request.started_by_display_name
         # Curated output, resolved to an absolute UC Volume path here rather
         # than left to the engine's relative default — on a Databricks driver
         # that default resolves against a working directory the job destroys
@@ -679,6 +790,8 @@ class DatabricksRunner(PipelineRunner):
             completed_at=record.completed_at,
             duration_seconds=record.duration_seconds,
             error=record.error,
+            started_by=record.started_by_display_name,
+            cancelled_by=record.cancelled_by_display_name,
             stages=stages,
         )
 
@@ -691,6 +804,18 @@ class DatabricksRunner(PipelineRunner):
         if record is None:
             raise UnknownRunError(f"No run found for run_id '{run_id}'.")
         return record
+
+
+def _is_not_found(exc: Exception) -> bool:
+    """Whether `exc` means "that path does not exist" rather than a real
+    failure — the expected, non-error outcome when cleanup reaches a
+    location a run never wrote to, or a second cancel() finds already gone.
+    """
+    try:
+        from databricks.sdk.errors import NotFound
+    except ImportError:  # pragma: no cover - dependency is declared
+        return False
+    return isinstance(exc, NotFound)
 
 
 def _enum_value(value: Any) -> str | None:

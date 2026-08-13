@@ -45,6 +45,16 @@ RUN_ID_TAG = "run_id"
 DATASET_NAME_TAG = "dataset_name"
 ERROR_TAG = "error"
 FAILED_STAGE_TAG = "failed_stage"
+# Written by the engine's own `begin()` — see forecast_engine/s12_tracking/
+# run_summary.py for why these exist alongside the tags above.
+STARTED_BY_USER_ID_TAG = "started_by_user_id"
+STARTED_BY_DISPLAY_NAME_TAG = "started_by_display_name"
+# Written by this module alone (`mark_cancelled`), never by the engine: a
+# cancellation is requested from *outside* the process being cancelled, so
+# there is no engine-side code path that could ever set these.
+CANCELLED_BY_USER_ID_TAG = "cancelled_by_user_id"
+CANCELLED_BY_DISPLAY_NAME_TAG = "cancelled_by_display_name"
+CANCELLED_AT_TAG = "cancelled_at"
 
 # MLflow's own RunInfo.status vocabulary -> this platform's JobStatus.
 # RUNNING maps to FAILED deliberately: a *persisted* run still marked
@@ -219,11 +229,61 @@ class MLflowHistoryStore:
             completed_at=completed_at,
             duration_seconds=duration,
             error=error,
+            started_by=tags.get(STARTED_BY_DISPLAY_NAME_TAG) or None,
+            cancelled_by=tags.get(CANCELLED_BY_DISPLAY_NAME_TAG) or None,
             # Stages live in the consolidated summary artifact, not in tags;
             # the history list deliberately does not download an artifact
             # per run just to render a table.
             stages=[],
         )
+
+    def mark_cancelled(
+        self,
+        run_id: str,
+        cancelled_by_user_id: str | None,
+        cancelled_by_display_name: str | None,
+        cancelled_at: str,
+    ) -> bool:
+        """Reconcile a cancelled run's MLflow Parent Run, if one exists.
+
+        A run cancelled before its Parent Run could even be opened (still
+        PENDING, or tracking disabled/unreachable) has nothing to reconcile
+        here — that is a normal case, reported as `False`, not an error.
+
+        Idempotent: safe to call more than once for the same run. Tags are
+        simply re-set to the same values, and `set_terminated` is only
+        attempted while MLflow still reports the run `RUNNING` — calling
+        this again after that succeeds is a no-op beyond re-setting tags.
+
+        Deliberately does not delete the MLflow run itself: `begin()` logs
+        only `run_id`/`dataset_name`/`started_by_*` as tags, and nothing
+        else is ever logged to a run before `track()` — the final stage a
+        cancelled run by definition never reached. So a cancelled run's
+        MLflow record is already exactly the minimal metadata Section 7
+        (Feature 1.4) asks history to retain: marking it `KILLED` is
+        sufficient, there is no larger artifact set to strip away first.
+        """
+        client = self._get_client()
+        if client is None:
+            return False
+
+        run = self._find_run(client, run_id)
+        if run is None:
+            return False
+
+        mlflow_run_id = run.info.run_id
+        client.set_tag(mlflow_run_id, CANCELLED_BY_USER_ID_TAG, cancelled_by_user_id or "")
+        client.set_tag(mlflow_run_id, CANCELLED_BY_DISPLAY_NAME_TAG, cancelled_by_display_name or "")
+        client.set_tag(mlflow_run_id, CANCELLED_AT_TAG, cancelled_at)
+
+        if run.info.status == "RUNNING":
+            from mlflow.entities import RunStatus
+
+            client.set_terminated(mlflow_run_id, status=RunStatus.to_string(RunStatus.KILLED))
+
+        with self._lock:
+            self._summary_cache.pop(run_id, None)
+        return True
 
     def _get_client(self) -> Any:
         with self._lock:

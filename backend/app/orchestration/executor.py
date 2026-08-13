@@ -27,6 +27,7 @@ from app.orchestration.exceptions import RunnerConfigurationError
 from app.orchestration.local_runner import LocalRunner
 from app.orchestration.runner_base import PipelineRunner
 from app.orchestration.schemas import (
+    CancellationOutcome,
     ExecutionBackend,
     JobStatus,
     PipelineExecutionRequest,
@@ -60,8 +61,13 @@ class PipelineExecutor:
         """One run's listing including its stage trail, or None if unknown."""
         return self._runner.get_run(run_id)
 
-    def cancel(self, run_id: str) -> bool:
-        return self._runner.cancel(run_id)
+    def cancel(
+        self,
+        run_id: str,
+        cancelled_by_user_id: str | None = None,
+        cancelled_by_display_name: str | None = None,
+    ) -> CancellationOutcome:
+        return self._runner.cancel(run_id, cancelled_by_user_id, cancelled_by_display_name)
 
 
 def build_runner(settings: Settings) -> PipelineRunner:
