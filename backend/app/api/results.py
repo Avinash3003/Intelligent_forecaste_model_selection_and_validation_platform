@@ -13,6 +13,7 @@ from app.orchestration.exceptions import RunNotReadyError, UnknownRunError
 from app.schemas.debug import DebugSummary
 from app.schemas.dataset_preview import DatasetPreview
 from app.schemas.llmops import LLMOpsResponse, PromptUsageResponse
+from app.schemas.llm_evaluation import LlmEvaluationResponse
 from app.services.dataset_preview_service import (
     DatasetPreviewService,
     get_dataset_preview_service,
@@ -20,6 +21,7 @@ from app.services.dataset_preview_service import (
 from app.schemas.results import ResultsResponse
 from app.services.debug_service import DebugService
 from app.services.llmops_service import LLMOpsService, get_llmops_service
+from app.services.llm_evaluation_service import LlmEvaluationService, get_llm_evaluation_service
 from app.services.result_service import ResultService
 
 router = APIRouter(prefix="/results", tags=["Results"])
@@ -39,6 +41,21 @@ def get_prompt_usage(
     # Declared before "/{run_id}" so this exact path can never be
     # shadowed by the run_id path param, regardless of route ordering.
     return service.get_prompt_usage()
+
+
+@router.get(
+    "/llmops/evaluation",
+    response_model=LlmEvaluationResponse,
+    summary="LLM Evaluation & Regression — latest report for the current prompt version + model",
+)
+def get_llm_evaluation(
+    service: LlmEvaluationService = Depends(get_llm_evaluation_service),
+    principal: Principal = Depends(require(Permission.MODEL_INSPECT)),
+) -> LlmEvaluationResponse:
+    # Declared before "/{run_id}" for the same reason prompt-usage is.
+    # Read-only: this never triggers an evaluation run, only reads back
+    # whatever `python -m forecast_engine.s11_llm.evaluate` last wrote.
+    return service.get_latest_report()
 
 
 @router.get("/{run_id}", response_model=ResultsResponse, summary="Get the Forecast Insights Dashboard for a run")

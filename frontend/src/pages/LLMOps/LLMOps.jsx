@@ -9,6 +9,7 @@ import SearchBox from '../../components/ui/SearchBox'
 import Pagination from '../../components/common/Pagination'
 import Card from '../../components/ui/Card'
 import LLMCallCard from './components/LLMCallCard'
+import LlmEvaluationSection from './components/LlmEvaluationSection'
 import { fetchDeployments, fetchLlmObservability, fetchPromptUsage } from '../../services'
 import { formatRunLabel } from '../../utils/formatDateTime'
 import { formatCost, formatGroundedness, formatLatency, formatTokens } from '../../utils/formatLlmMetrics'
@@ -259,19 +260,12 @@ export default function LLMOps() {
   const totalPages = Math.max(1, Math.ceil(filteredCalls.length / PAGE_SIZE))
   const pageCalls = filteredCalls.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
-  if (!runsLoading && !runs.length && !runsError) {
-    return (
-      <PageContainer>
-        <SectionContainer title="LLMOps Observability" subtitle="Per-call LLM activity behind business insights">
-          <EmptyState
-            icon={Bot}
-            title="No completed runs yet"
-            description="Deploy a forecast run; its LLM calls, tokens, latency, cost and grounding results will be traceable here once it finishes."
-          />
-        </SectionContainer>
-      </PageContainer>
-    )
-  }
+  // Only the per-run "LLM Call Details" section below actually needs a
+  // completed run to show anything — Prompt Usage & Performance aggregates
+  // across whatever runs exist (nothing, today) and LLM Evaluation is a
+  // standalone regression suite tied to no run at all, so neither should
+  // be hidden just because no forecast has been deployed yet.
+  const noCompletedRuns = !runsLoading && !runs.length && !runsError
 
   const s = data?.summary
 
@@ -301,6 +295,27 @@ export default function LLMOps() {
           />
         </SectionContainer>
       </div>
+
+      <div className="mb-6">
+        <SectionContainer
+          title="LLM Evaluation"
+          subtitle="Regression suite (Section 13.3) — is the explanation still correct and high quality for the current prompt version and model?"
+        >
+          <LlmEvaluationSection />
+        </SectionContainer>
+      </div>
+
+      {noCompletedRuns && (
+        <div className="mb-6">
+          <SectionContainer title="LLM Call Details" subtitle="Per-call LLM activity behind one run's business insights">
+            <EmptyState
+              icon={Bot}
+              title="No completed runs yet"
+              description="Deploy a forecast run; its LLM calls, tokens, latency, cost and grounding results will be traceable here once it finishes."
+            />
+          </SectionContainer>
+        </div>
+      )}
 
       {runsLoading && <Loader label="Loading runs…" />}
 

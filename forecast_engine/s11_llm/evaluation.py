@@ -43,6 +43,11 @@ class EvalCase:
     # Extra grounding facts beyond wmape/confidence (e.g. a drift
     # statistic) a generator might legitimately cite.
     extra_metrics: dict[str, float | None] = field(default_factory=dict)
+    # Free-form category label (e.g. "excessive_smoothing", "fallback_winner")
+    # — purely for grouping/reporting in the regression harness
+    # (`regression_eval.py`); never read by grading logic itself, so an
+    # unrecognised or missing label can never change a case's score.
+    scenario: str | None = None
 
     def metrics(self) -> dict[str, float | None]:
         return {"wmape": self.wmape, "confidence_estimate": self.confidence_pct, **self.extra_metrics}

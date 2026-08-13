@@ -21,3 +21,11 @@ export function fetchLlmObservability(runId) {
 export function fetchPromptUsage() {
   return apiClient.get('/results/llmops/prompt-usage')
 }
+
+// The latest LLM Evaluation & Regression report (Section 13.3) — read-only:
+// this never triggers an evaluation run, only reads back whatever
+// `python -m forecast_engine.s11_llm.evaluate` last wrote. `available:
+// false` (not an error) means no report has been generated yet.
+export function fetchLlmEvaluation() {
+  return apiClient.get('/results/llmops/evaluation')
+}

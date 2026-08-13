@@ -1,0 +1,228 @@
+{
+  "dataset_version": "v1",
+  "description": "Held-out LLM evaluation/regression set (Section 13.3). Every value here is synthetic — modeled on the shapes real pipeline runs produce, not copied from any real dataset, user, or run. No production data or secrets. Extend this file, not the harness code, to add coverage.",
+  "cases": [
+    {
+      "case_id": "normal_winner_clean",
+      "scenario": "normal_winner",
+      "selected_model": "xgboost",
+      "wmape": 8.2,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [],
+      "confidence_pct": 91.8,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "normal_winner_single_rejection",
+      "scenario": "normal_winner",
+      "selected_model": "lightgbm",
+      "wmape": 12.7,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "prophet", "reason": "Rejected by ranking: lower composite score"}
+      ],
+      "confidence_pct": 85.1,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "multi_rejection_win",
+      "scenario": "multi_rejection",
+      "selected_model": "lightgbm",
+      "wmape": 15.5,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "prophet", "reason": "Eliminated at forward validation: missing seasonality"},
+        {"model_name": "arima", "reason": "Rejected by ranking: lower composite score"}
+      ],
+      "confidence_pct": 78.3,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "multi_rejection_three_candidates",
+      "scenario": "multi_rejection",
+      "selected_model": "tft",
+      "wmape": 10.9,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "xgboost", "reason": "Eliminated at forward validation: excessive smoothing"},
+        {"model_name": "prophet", "reason": "Eliminated at forward validation: missing trend"},
+        {"model_name": "arima", "reason": "Rejected by ranking: lower composite score"}
+      ],
+      "confidence_pct": 88.4,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "fallback_from_drift",
+      "scenario": "fallback_winner",
+      "selected_model": "seasonal_naive",
+      "wmape": null,
+      "is_fallback": true,
+      "fallback_trigger": "All 1 evaluated model(s) failed validation (xgboost).",
+      "rejected_candidates": [
+        {"model_name": "xgboost", "reason": "wasserstein_distance statistic 0.89 > threshold 0.73."}
+      ],
+      "confidence_pct": 94.0,
+      "caveats": ["fallback model used"],
+      "extra_metrics": {"drift_statistic": 0.89, "drift_threshold": 0.73}
+    },
+    {
+      "case_id": "fallback_full_elimination",
+      "scenario": "fallback_winner",
+      "selected_model": "seasonal_naive",
+      "wmape": null,
+      "is_fallback": true,
+      "fallback_trigger": "No ranked candidate survived earlier validation stages.",
+      "rejected_candidates": [],
+      "confidence_pct": null,
+      "caveats": ["fallback model used"],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "strong_accuracy_near_perfect",
+      "scenario": "strong_accuracy",
+      "selected_model": "prophet",
+      "wmape": 0.4,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [],
+      "confidence_pct": 99.6,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "strong_accuracy_typical",
+      "scenario": "strong_accuracy",
+      "selected_model": "xgboost",
+      "wmape": 4.1,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "lightgbm", "reason": "Rejected by ranking: lower composite score"}
+      ],
+      "confidence_pct": 95.9,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "weak_accuracy_high_wmape",
+      "scenario": "weak_accuracy",
+      "selected_model": "arima",
+      "wmape": 48.6,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "prophet", "reason": "Eliminated at forward validation: excessive smoothing"}
+      ],
+      "confidence_pct": 51.4,
+      "caveats": ["thin evidence"],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "weak_accuracy_borderline",
+      "scenario": "weak_accuracy",
+      "selected_model": "lightgbm",
+      "wmape": 39.2,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "xgboost", "reason": "Rejected by ranking: lower composite score"},
+        {"model_name": "tft", "reason": "Skipped: insufficient history (30 < 60)."}
+      ],
+      "confidence_pct": 60.8,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "excessive_smoothing_rejection",
+      "scenario": "excessive_smoothing",
+      "selected_model": "xgboost",
+      "wmape": 11.3,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "prophet", "reason": "Eliminated at forward validation: excessive smoothing"}
+      ],
+      "confidence_pct": 84.7,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "missing_seasonality_rejection",
+      "scenario": "missing_seasonality",
+      "selected_model": "lightgbm",
+      "wmape": 13.6,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "arima", "reason": "Eliminated at forward validation: missing seasonality"}
+      ],
+      "confidence_pct": 82.0,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "missing_trend_rejection",
+      "scenario": "missing_trend",
+      "selected_model": "tft",
+      "wmape": 9.8,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "seasonal_naive", "reason": "Eliminated at forward validation: missing trend"}
+      ],
+      "confidence_pct": 87.9,
+      "caveats": [],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "drift_warning_survived",
+      "scenario": "drift_warning",
+      "selected_model": "xgboost",
+      "wmape": 14.2,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "prophet", "reason": "wasserstein_distance statistic 0.61 > threshold 0.55."}
+      ],
+      "confidence_pct": 79.5,
+      "caveats": [],
+      "extra_metrics": {"drift_statistic": 0.31, "drift_threshold": 0.55}
+    },
+    {
+      "case_id": "thin_evidence_short_history",
+      "scenario": "thin_evidence",
+      "selected_model": "arima",
+      "wmape": 22.4,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "tft", "reason": "Skipped: insufficient history (24 < 60)."}
+      ],
+      "confidence_pct": 61.0,
+      "caveats": ["short history"],
+      "extra_metrics": {}
+    },
+    {
+      "case_id": "single_series_no_key",
+      "scenario": "normal_winner",
+      "selected_model": "seasonal_naive",
+      "wmape": 6.7,
+      "is_fallback": false,
+      "fallback_trigger": null,
+      "rejected_candidates": [
+        {"model_name": "arima", "reason": "Rejected by ranking: lower composite score"}
+      ],
+      "confidence_pct": 90.2,
+      "caveats": [],
+      "extra_metrics": {}
+    }
+  ]
+}
