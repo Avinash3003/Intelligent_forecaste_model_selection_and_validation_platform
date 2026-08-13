@@ -18,6 +18,7 @@ import MLflowRunCard from './components/MLflowRunCard'
 import DebugPanel from './components/DebugPanel'
 import { useRunStatusPolling } from '../../hooks/useRunStatusPolling'
 import { fetchDeployments, fetchResults, isTerminalStatus } from '../../services'
+import { formatDateRange, formatIST } from '../../utils/formatDateTime'
 
 // Maps the backend's snake_case dashboard payload into the shape the
 // Results components render. Every value originates from the run's real
@@ -28,6 +29,8 @@ function normalizeResults(response) {
     groupId: response.group_id,
     groups: response.groups.map((group) => ({ value: group.group_id, label: group.label })),
     horizonPoints: response.horizon_points,
+    datasetDateRangeStart: response.dataset_date_range_start,
+    datasetDateRangeEnd: response.dataset_date_range_end,
     modelDecision: {
       selectedModel: response.model_decision.selected_model,
       // null when even backtest data is unavailable — never a fabricated
@@ -122,8 +125,12 @@ export default function Results() {
   // hands off straight after deploying.
   const runFromUrl = searchParams.get('run') || ''
 
+  // Raw normalized deployments (id, dataset, startTimeRaw, ...) — every
+  // Dataset/Run option below is derived from this one list, never
+  // re-fetched or guessed independently.
   const [runs, setRuns] = useState([])
   const [runsLoading, setRunsLoading] = useState(true)
+  const [dataset, setDataset] = useState('')
   const [run, setRun] = useState(runFromUrl)
   const [groupId, setGroupId] = useState('')
   const [horizon, setHorizon] = useState('')
@@ -143,21 +150,55 @@ export default function Results() {
 
   // Every submitted run, so a user can switch between them. Unlike before,
   // in-progress runs are listed too — they are what polling is for.
+  // `fetchDeployments` already returns newest-first, which is what both
+  // the Dataset dropdown's de-duplication and the Run dropdown's ordering
+  // rely on below — neither re-sorts.
   useEffect(() => {
     let cancelled = false
     fetchDeployments()
       .then((data) => {
         if (cancelled) return
-        setRuns(data.map((item) => ({ value: item.id, label: `${item.displayName} · ${item.dataset}` })))
-        // Default to the newest run only when the URL did not name one.
-        setRun((current) => current || (data.length > 0 ? data[0].id : ''))
+        setRuns(data)
+        // Default to the run named in the URL (a deep link, or a refresh
+        // of one) when present, otherwise the newest run overall — and
+        // the Dataset dropdown follows whichever run that resolves to, so
+        // a refresh never shows a stale dataset with no matching run.
+        const preselected = data.find((item) => item.id === runFromUrl)
+        const seed = preselected || data[0]
+        setRun((current) => current || seed?.id || '')
+        setDataset((current) => current || seed?.dataset || '')
       })
       .catch((err) => !cancelled && setError(err.message))
       .finally(() => !cancelled && setRunsLoading(false))
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [runFromUrl])
+
+  // Dataset dropdown: every distinct dataset, each exactly once, in the
+  // order its most recent run appears (i.e. most-recently-used dataset
+  // first) — never one entry per run.
+  const datasetOptions = useMemo(() => {
+    const seen = new Set()
+    const options = []
+    for (const item of runs) {
+      if (!seen.has(item.dataset)) {
+        seen.add(item.dataset)
+        options.push({ value: item.dataset, label: item.dataset })
+      }
+    }
+    return options
+  }, [runs])
+
+  // Run dropdown: only this dataset's own runs, newest first, labeled by
+  // when it ran and its run id — never by the dataset name again.
+  const runOptions = useMemo(
+    () =>
+      runs
+        .filter((item) => item.dataset === dataset)
+        .map((item) => ({ value: item.id, label: `${formatIST(item.startTimeRaw)} — Run ${item.id}` })),
+    [runs, dataset]
+  )
 
   // Keep the URL in step with the selected run so the page is linkable and
   // survives a refresh.
@@ -211,8 +252,19 @@ export default function Results() {
 
   const filters = useMemo(
     () => ({
+      dataset,
+      datasetOptions,
+      onDatasetChange: (value) => {
+        // A different dataset has its own runs — select its newest one
+        // (runs are newest-first) and drop everything the old run owned.
+        setDataset(value)
+        const firstRun = runs.find((item) => item.dataset === value)
+        setRun(firstRun?.id || '')
+        setGroupId('')
+        setResults(null)
+      },
       run,
-      runOptions: runs,
+      runOptions,
       onRunChange: (value) => {
         // A different run has its own groups, so drop the current key.
         setRun(value)
@@ -226,7 +278,7 @@ export default function Results() {
       horizonOptions: results?.horizonPoints ?? [],
       onHorizonChange: setHorizon,
     }),
-    [run, runs, groupId, results, horizon]
+    [dataset, datasetOptions, run, runOptions, runs, groupId, results, horizon]
   )
 
   const goToDeployments = (
@@ -461,16 +513,50 @@ export default function Results() {
         </p>
       </div>
 
-      {/* The run selector stays available in every state, so a user can
-          always switch away from a failed or missing run. */}
+      {/* The dataset/run selector stays available in every state, so a
+          user can always switch away from a failed or missing run.
+          Dataset first (one entry per dataset, no matter how many runs it
+          has), then Run — filtered to that dataset's own runs, newest
+          first. Selecting a dataset jumps to its newest run; selecting a
+          run loads that run's results (see filters.onRunChange). */}
       {runs.length > 0 && (
-        <div className="mb-5 sm:max-w-md">
-          <Select
-            value={run}
-            onChange={filters.onRunChange}
-            options={runs}
-            placeholder="Select a run"
-          />
+        <div className="mb-5 flex flex-col gap-3 sm:max-w-2xl sm:flex-row">
+          <div className="flex-1">
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Dataset
+            </label>
+            <Select
+              value={dataset}
+              onChange={filters.onDatasetChange}
+              options={datasetOptions}
+              placeholder="Select dataset"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Run
+            </label>
+            <Select
+              value={run}
+              onChange={filters.onRunChange}
+              options={runOptions}
+              placeholder="Select run"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* The selected run's own dataset date coverage — computed from the
+          dataset's real date column (Assess Data Quality), never the
+          upload/run time. Tied to `results`, not a separate state, so
+          switching Dataset/Run clears it immediately with everything else
+          and it is never stale from a previous selection. */}
+      {results && (
+        <div className="mb-5">
+          <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Data Coverage</p>
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+            {formatDateRange(results.datasetDateRangeStart, results.datasetDateRangeEnd)}
+          </p>
         </div>
       )}
 
