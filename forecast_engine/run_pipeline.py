@@ -1,21 +1,14 @@
-"""Forecast Engine entry point — orchestrates the foundation pipeline.
+"""The engine's entry point: runs every stage in order.
 
-Wires the preprocessing stages together in the order the design document
-prescribes and hands back a PipelineContext holding the forecast-ready
-series:
+    load -> detect frequency -> assess quality -> preprocess -> build series
+    -> train -> evaluate -> explain -> rank & select -> persist -> export
+    -> insights -> mirror -> track
 
-    Load dataset
-        -> Detect frequency
-        -> Preprocess (clean / type / sort)
-        -> Generate business-key groups
-        -> Build forecast-ready series
+This file owns sequencing and error handling only; how each step behaves
+lives in its own stage class and config. Adding a stage means appending
+here, not restructuring.
 
-The orchestrator owns sequencing and error handling only; every decision
-about *how* a step behaves lives in the stage class and its configuration.
-Adding the Model Training Engine in the next phase means appending a stage
-here, not restructuring this file.
-
-Run locally, e.g.:
+Run locally:
 
     python -m forecast_engine.run_pipeline \\
         --dataset store_item_dev.csv \\
@@ -74,11 +67,10 @@ MAX_FORECAST_HORIZON = 60
 
 
 class ForecastEnginePipeline:
-    """Runs the Forecast Engine foundation end to end.
+    """Runs the engine end to end.
 
-    Stages are injected rather than constructed inline so a deployment (or
-    a test) can substitute one — e.g. a loader that reads from ADLS —
-    without modifying the orchestration.
+    Stages are injected rather than built inline, so a deployment or test can
+    substitute one without touching the orchestration.
     """
 
     # Every private `_stage(context)` method below, grouped into the units
@@ -208,45 +200,25 @@ class ForecastEnginePipeline:
         started_by_display_name: str | None = None,
         derived_features: list[str] | None = None,
     ) -> PipelineContext:
-        """Execute all 14 pipeline stages for one dataset.
+        """Run every stage for one dataset, in one process.
 
-        Stages run in a fixed order and share state through a single
-        `PipelineContext`, which each stage annotates as it completes. That
-        context is the return value, so a caller gets the same object whether
-        the run succeeded or died partway through.
+        Stages share one PipelineContext, which each annotates as it
+        completes. That context is returned whether the run succeeded or died
+        partway through.
 
-        Failure handling is deliberately two-layered: each stage records its
-        own failure on the context, then the error propagates here where the
-        MLflow run is closed as FAILED before being re-raised. A run that dies
-        in preprocessing therefore still leaves a complete, queryable record —
-        swallowing the exception instead would report a broken run as a
-        successful empty one.
+        Failures are handled twice on purpose: the stage records its own
+        failure, then the error reaches here, closes the MLflow run as FAILED
+        and re-raises. So a run that dies in preprocessing still leaves a
+        complete, queryable record instead of looking like an empty success.
 
-        Args:
-            dataset_path: CSV/Excel file to forecast.
-            configuration: Column roles and aggregation rule for this dataset.
-            run_id: Reused when the caller already minted one (the backend
-                does, so its job id and the engine's agree); generated
-                otherwise.
-            selected_models: Model names to evaluate; every registered model
-                when omitted.
-            fallback_model: Overrides the configured baseline used when no
-                candidate survives validation.
-            dataset_name: Display name recorded with the run, defaulting to
-                the file's own name.
-            live_status_path: When set, the stage trail is written here after
-                every transition so a poller can show live progress.
-            started_by_user_id: Stable identity of the user who submitted
-                this run (e.g. an Entra object id), recorded with the MLflow
-                Parent Run so who-started-it survives even a run that fails
-                or is cancelled before finishing.
-            started_by_display_name: Display name for the same user.
+        run_id is reused when the caller already minted one, so the backend's
+        job id and the engine's agree. selected_models defaults to every
+        registered model. live_status_path, when set, receives the stage trail
+        after every transition so a poller can show live progress.
+        started_by_* is recorded on the MLflow run, so who started it survives
+        even a run that fails or is cancelled.
 
-        Returns:
-            The populated `PipelineContext`.
-
-        Raises:
-            ForecastEngineError: Re-raised after the failure is recorded.
+        Raises ForecastEngineError after recording the failure.
         """
         # On failure, the failing stage is
         # recorded on the context before the error propagates, so the
@@ -334,21 +306,17 @@ class ForecastEnginePipeline:
         started_by_display_name: str | None = None,
         derived_features: list[str] | None = None,
     ) -> PipelineContext:
-        """Run ONE stage group as an independent Databricks task.
+        """Run one stage group as an independent Databricks task.
 
-        The multi-task Serverless workflow (see
-        `forecast_job_serverless.yml`) calls this once per task instead of
-        `run()`'s single in-process pass — every stage method it invokes is
-        the exact same one `run()` calls, in the exact same order; this
-        only adds checkpointing at the task boundary.
+        The multi-task workflow calls this once per task instead of run()'s
+        single pass. Every stage method invoked is the same one run() calls,
+        in the same order — this only adds checkpointing at task boundaries.
 
-        `load_prepare` (no predecessor) starts a fresh context and opens
-        the MLflow Parent Run, exactly as `run()` does. Every later stage
-        group loads its predecessor's checkpoint(s) — two, only for
-        `business_insights`, which is the DAG's join after Persist Winning
-        Models and Export Forecasts run in parallel — and resumes that
-        same MLflow run in this new process, so a failure at any stage
-        still closes the run with an accurate status.
+        load_prepare starts fresh and opens the MLflow run. Every later group
+        loads its predecessor's checkpoint — two only for business_insights,
+        the DAG's join after the parallel persist/export branches — and
+        resumes the same MLflow run, so a failure anywhere still closes it
+        with an accurate status.
         """
         if stage_group not in self.STAGE_GROUPS:
             raise ConfigurationError(
@@ -804,10 +772,10 @@ class ForecastEnginePipeline:
 
 
 def _summary_with_stage_completed(summary: dict[str, Any], stage_name: str) -> dict[str, Any]:
-    """Return `summary` with `stage_name` shown as Completed.
+    """A copy of the summary with this stage marked Completed.
 
-    Only the copy handed to MLflow is altered; the live context is left alone
-    so the stage can finish honestly after tracking returns.
+    Only the copy given to MLflow changes; the live context finishes
+    honestly after tracking returns.
     """
     stages = []
     for stage in summary.get("stages") or []:
@@ -838,19 +806,15 @@ def load_config_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 # Apply the run-level keys a config file may carry, without overriding flags
 def apply_config_run_options(args: argparse.Namespace, payload: dict[str, Any]) -> None:
-    """Let `--config` supply `run_id`, `dataset_name`, `models`,
-    `fallback_model` and `horizon` in addition to the column mapping.
+    """Let --config carry run_id, dataset_name, models, fallback_model and
+    horizon as well as the column mapping.
 
-    This exists for cloud execution. A Databricks `python_wheel_task`'s
-    argument list is fixed in the asset bundle, so per-run values would
-    have to arrive as job parameters that are always passed — including
-    when empty, which argparse cannot survive (`--horizon ""` raises,
-    `--models ""` yields a model named ""). It is also the only way to
-    express multi-valued key/feature columns, which a single flat job
-    parameter cannot represent.
+    Exists for cloud runs: a wheel task's argument list is fixed in the
+    bundle, so per-run values would arrive as always-passed job parameters,
+    which argparse cannot survive when empty. It is also the only way to
+    express multi-valued key/feature columns.
 
-    An explicit CLI flag always wins: the file supplies a value only where
-    the command line did not, so local invocations behave exactly as before.
+    An explicit CLI flag always wins, so local runs are unaffected.
     """
     if args.run_id is None and payload.get("run_id"):
         args.run_id = str(payload["run_id"])

@@ -1,17 +1,11 @@
-"""LLM trace store (Section 13.4, "Observability").
+"""One record per LLM call, detailed enough to debug any explanation.
 
-Section 13.4 is explicit that MLflow's general-purpose artifact logging is
-not built for this level of granularity, and that a dedicated tracing layer
-is needed instead — one record per LLM call, detailed enough that any
-individual explanation can be debugged by replaying exactly what produced
-it. This module is that dedicated record and store.
+MLflow's general-purpose artifact logging is not built for this granularity,
+so this is a dedicated store.
 
-It is deliberately in-process and JSON-serializable rather than a new
-persistence system: the run summary/MLflow artifact pipeline
-(`s12_tracking`) already exists and already logs arbitrary JSON artifacts,
-so a trace store that produces a plain dict slots into that pipeline
-directly instead of standing up a second store this platform would have to
-operate.
+In-process and JSON-serializable rather than a new persistence system: the
+existing artifact pipeline already logs arbitrary JSON, so a store that
+produces a plain dict slots straight into it.
 """
 
 from __future__ import annotations

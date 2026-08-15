@@ -1,15 +1,11 @@
-"""Forecast Configuration — the engine's single input contract.
+"""The engine's single input contract.
 
-This is the object the backend's Metadata Interpreter produces and the
-Forecast Engine consumes. It is the *only* place column identities live:
-every stage downstream asks this object which column is the date, the
-target, a key or a feature, and never assumes a name like "Store",
-"Sales" or "SKU". That indirection is what makes the same engine run
-against completely different datasets with zero code changes — the
-portability bar set in Section 14.1.
+The only place column identities live: every stage asks this which column is
+the date, target, key or feature, and never assumes a name like "Store".
+That is what lets one engine run against completely different datasets.
 
-The object is immutable: it travels through every pipeline stage, and a
-stage silently rewriting it would make a run impossible to audit.
+Immutable — it travels through every stage, and a stage rewriting it would
+make a run impossible to audit.
 """
 
 from __future__ import annotations
@@ -33,13 +29,10 @@ class ForecastMode(str, Enum):
 
 
 class AggregationMethod(str, Enum):
-    """How a sub-monthly target is rolled up to the monthly grain.
+    """How a sub-monthly target is rolled up to monthly.
 
-    Forecasting runs at month level, so Daily/Weekly datasets are
-    aggregated during preprocessing. Which method is correct depends on
-    what the target measures — SUM for flow quantities, MEAN or LAST for
-    stock-type levels — so the user selects it rather than the platform
-    guessing.
+    SUM for flows, MEAN or LAST for levels — the user selects it rather than
+    the platform guessing.
     """
 
     SUM = "sum"
@@ -49,15 +42,11 @@ class AggregationMethod(str, Enum):
 
 @dataclass(frozen=True)
 class ForecastConfiguration:
-    """Normalized metadata describing how to forecast a dataset.
+    """How to forecast one dataset.
 
-    Attributes:
-        date_column: Column holding each observation's timestamp.
-        target_column: Numeric column to be forecast.
-        key_columns: Columns that together identify one forecasting
-            entity. Empty means the dataset is a single series.
-        feature_columns: Optional exogenous regressors to carry into
-            training alongside the target.
+    key_columns together identify one forecasting entity; empty means the
+    dataset is a single series. feature_columns are optional exogenous
+    regressors carried into training alongside the target.
     """
 
     date_column: str

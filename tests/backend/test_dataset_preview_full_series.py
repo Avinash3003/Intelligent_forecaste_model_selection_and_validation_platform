@@ -5,9 +5,8 @@ tail, filtered to one business key.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-import pytest
 
 from app.orchestration.schemas import ExecutionBackend, JobStatus, PipelineExecutionResult
 from app.services.dataset_preview_service import DatasetPreviewService

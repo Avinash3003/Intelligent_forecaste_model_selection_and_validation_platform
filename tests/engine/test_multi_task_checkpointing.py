@@ -14,7 +14,7 @@ same result as running it in one process.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pandas as pd
 import pytest

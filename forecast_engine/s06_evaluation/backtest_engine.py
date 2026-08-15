@@ -1,23 +1,16 @@
-"""Rolling / expanding backtesting (Section 6.4).
+"""Scores a model by replaying history.
 
-Scores a model by replaying history: fit on data up to a point, forecast
-the window that follows, compare against what actually happened, then
-advance and repeat. Two window strategies are supported and chosen by
-configuration — ROLLING keeps a fixed-length training window, EXPANDING
-grows it from a fixed origin.
+Fit on data up to a point, forecast the window that follows, compare against
+what happened, advance and repeat. ROLLING keeps a fixed-length training
+window; EXPANDING grows it from a fixed origin.
 
 Three properties matter:
-
-  * Group isolation. Every fold is fit on one forecasting group's series
-    alone. Nothing is pooled across business keys, so one key's behaviour
-    can never leak into another's score.
-  * Honest refitting. Each fold constructs a *fresh* model from the
-    registry using the parameters Phase 6 selected, and fits it only on
-    that fold's training window. Reusing the already-fitted model would
-    score it on data it had already seen.
-  * No ranking. This produces evidence, not a verdict — Section 6.4 is
-    explicit that the absolute accuracy value is one structured input to
-    the later ranking stage, never the selection criterion itself.
+  - Group isolation: every fold is fit on one group's series alone, so one
+    key's behaviour can never leak into another's score.
+  - Honest refitting: each fold builds a fresh model and fits only on that
+    fold's window; reusing the fitted model would score it on data it had
+    already seen.
+  - No ranking: this produces evidence, not a verdict.
 """
 
 from __future__ import annotations

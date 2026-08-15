@@ -1,21 +1,16 @@
-"""Drift Validation (Sections 6.7–6.9) — the gate a ranked candidate must
-clear to become eligible for production.
+"""The gate a ranked candidate must clear to reach production.
 
-Runs as three explicitly named, separately reported sub-stages, in this
-order:
+Three separately reported sub-stages, in order:
 
-    Dynamic Drift Selection   -> which statistic suits this group's data
-    Threshold Validation      -> estimate + validate the cut-off for it
-    Drift Validation          -> statistic vs. that threshold
+    select algorithm  -> which statistic suits this group's data
+    estimate threshold -> the cut-off for that statistic
+    validate          -> statistic vs. threshold
 
-Selection necessarily precedes Threshold Validation: a threshold is a
-percentile of the *selected* statistic's null distribution, so it only has
-meaning once the statistic is known (KS is bounded in [0, 1], Wasserstein
-is in the data's own units). Each sub-stage appends to `stage_trail`, so
-the executed order is visible in the result, not just in this file.
+Selection must precede the threshold: a threshold is a percentile of the
+selected statistic's null distribution, so it only means anything once the
+statistic is known. Each sub-stage appends to stage_trail.
 
-Failing rejects that one candidate — Section 6.9 is explicit that this
-never terminates the pipeline, only the candidate's eligibility.
+Failing rejects that one candidate; it never terminates the run.
 """
 
 from __future__ import annotations

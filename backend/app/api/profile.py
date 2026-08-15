@@ -1,9 +1,7 @@
-"""Profile API — generates the Basic Dataset Inspection summary shown right
-after upload, before any metadata mapping happens (Section 5.1.1).
+"""The dataset inspection summary shown right after upload.
 
-Mirrors the same resolve -> load -> analyze structure as api/metadata.py,
-reusing UploadService and DatasetLoader rather than duplicating file
-resolution/parsing logic.
+Same resolve -> load -> analyze structure as api/metadata.py, reusing
+UploadService and DatasetLoader rather than duplicating file handling.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -48,18 +46,11 @@ def get_date_range(
     request: DateRangeRequest,
     principal: Principal = Depends(require(Permission.DATASET_READ)),
 ) -> DateRangeResponse:
-    """The dataset's real date coverage for whichever column the user has
-    tentatively assigned as the date column in Metadata Mapping (Priority
-    B) — called as that selection changes, ahead of full "/metadata/validate".
+    """The dataset's real date coverage for the column being considered.
 
-    Mirrors the same parse-then-min/max rule a real run's Assess Data
-    Quality stage uses (`forecast_engine.s02_quality.quality_assessor.
-    parse_date_column` / `date_range_from_parsed`) — deliberately not a
-    cross-process import of it: the backend and forecast_engine are two
-    separate deployable processes with separate dependencies (the backend
-    invokes forecast_engine only as an external subprocess/job, never
-    in-process — see LocalRunner/DatabricksRunner), so this stays a small,
-    self-contained duplicate of that rule rather than a new coupling.
+    Called as the selection changes, ahead of full validation. Uses the same
+    parse-then-min/max rule the engine's quality stage does, duplicated
+    rather than imported since the two are separate processes.
     """
     try:
         file_path, _dataset_name = upload_service.resolve(request.file_id)

@@ -9,25 +9,16 @@ from app.utils.ids import generate_file_id
 
 
 class UploadService:
-    """Stores uploaded datasets to a local temp directory and resolves a
-    `file_id` back to a path on disk. This is the ONLY place that knows the
-    on-disk naming convention (`{file_id}_{original_filename}`) — swap it
-    for Azure Data Lake / Blob Storage in a later phase without touching
-    any other service."""
+    """Saves uploads and resolves a file_id back to a path.
+
+    The only place that knows the {file_id}_{filename} naming convention.
+    """
 
     def __init__(self) -> None:
         self._settings = get_settings()
 
     def save(self, file: UploadFile) -> UploadResponse:
-        """Persist an uploaded file locally and return a reference to it.
-
-        Args:
-            file: The multipart file submitted to POST /upload.
-
-        Returns:
-            An UploadResponse carrying the generated `file_id` the frontend
-            must send back in later requests (e.g. POST /metadata/validate).
-        """
+        """Save an upload and return the file_id later requests refer to it by."""
         file_id = generate_file_id()
         destination = self._settings.upload_path / f"{file_id}_{file.filename}"
 
@@ -43,15 +34,9 @@ class UploadService:
         )
 
     def resolve(self, file_id: str) -> tuple[Path, str]:
-        """Resolve a previously issued `file_id` back to its file path and
-        original filename.
+        """The path and original filename for a file_id.
 
-        Called by the /metadata/validate route before the dataset can be
-        loaded and interpreted.
-
-        Raises:
-            FileResolutionError: if no staged file matches `file_id` (e.g.
-                an invalid id, or local storage was cleared since upload).
+        Raises FileResolutionError if nothing staged matches it.
         """
         matches = list(self._settings.upload_path.glob(f"{file_id}_*"))
         if not matches:

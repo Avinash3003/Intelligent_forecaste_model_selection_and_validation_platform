@@ -1,17 +1,11 @@
-"""Model Ranker — combines the three ranking signals into one composite
-score per surviving model, independently for every forecast group
-(Section 6.6).
+"""Combines the three signals into one composite score per model.
 
-The SHAP/importance signal is generated ahead of this stage by the
-Explainability pipeline (Section 6.10) and consumed here as a finished
-`ExplainabilityReport` — ranking looks the score up, it does not compute
-it. That is the only thing that changed when explainability generation
-moved earlier in the pipeline (Phase 8): the composite-score formula below
-is unchanged from Phase 7B.
+The importance signal is produced by the explainability stage beforehand and
+looked up here, never computed.
 
-Ranking never runs across groups: each group's candidates are normalized
-and scored only against each other, so the ranking of one business key can
-never be influenced by another's data.
+Ranking never runs across groups: each group's candidates are normalized and
+scored only against each other, so one business key's ranking can never be
+influenced by another's data.
 """
 
 from __future__ import annotations

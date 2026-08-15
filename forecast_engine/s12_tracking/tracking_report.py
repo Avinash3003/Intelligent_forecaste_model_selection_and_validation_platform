@@ -1,8 +1,8 @@
-"""MLflow tracking result model — the output contract of Section 6.13.
+"""What the tracking stage produces.
 
-Kept on `PipelineContext` the same way every other phase's report is, so a
-run's tracking outcome (or its absence) is always visible on the audit
-trail, even though nothing here ever affects a forecasting decision.
+Kept on the context like every other stage's report, so a run's tracking
+outcome (or its absence) is visible on the audit trail, even though nothing
+here affects a forecasting decision.
 """
 
 from __future__ import annotations

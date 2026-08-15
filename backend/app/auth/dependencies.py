@@ -1,9 +1,7 @@
-"""FastAPI dependencies that put authentication and RBAC in front of routes.
+"""Puts authentication and RBAC in front of routes.
 
-A route declares what it needs — `Depends(require(Permission.FORECAST_RUN))`
-— and never inspects a token, a role, or a header itself. That is what
-keeps the authorization model in one readable table (`app/auth/rbac.py`)
-instead of scattered across route bodies.
+A route declares what it needs and never inspects a token or header itself,
+which keeps the whole authorization model in one table (rbac.py).
 """
 
 from __future__ import annotations
@@ -35,10 +33,8 @@ def get_current_principal(
 ) -> Principal:
     """The authenticated caller, or 401.
 
-    With `AUTH_ENABLED=false` this returns the local development identity
-    without inspecting any header at all — see
-    `app.auth.entra.development_principal` for why that cannot leak into
-    a real deployment.
+    With AUTH_ENABLED=false it returns the development identity without
+    reading any header.
     """
     if not settings.auth_enabled:
         principal = development_principal(settings)
@@ -66,12 +62,10 @@ def get_current_principal(
 
 
 def require(*permissions: Permission):
-    """Dependency factory: allow the request only if the caller holds
-    *every* listed permission.
+    """Allow the request only if the caller holds every listed permission.
 
-    Returns the `Principal` so a route that needs the caller's identity
-    (to record who submitted a run, say) gets it from the same dependency
-    that authorized the call, with no second lookup that could disagree.
+    Returns the Principal, so a route needing the caller's identity gets it
+    from the same dependency that authorized the call.
     """
 
     def _dependency(principal: Principal = Depends(get_current_principal)) -> Principal:

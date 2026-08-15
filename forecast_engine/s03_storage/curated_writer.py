@@ -1,15 +1,11 @@
-"""Curated dataset persistence.
+"""Where the curated dataset is written.
 
-The curated dataset is the single input every later forecasting stage
-reads, so where it lives is an infrastructure decision that must not leak
-into business logic. This module defines a narrow backend interface plus a
-local-disk implementation; swapping in ADLS Gen2 or Blob Storage later
-means adding one class here and selecting it in configuration — no stage
-that produces or consumes curated data changes.
+A narrow backend interface plus a local-disk implementation, so swapping in
+blob storage means adding one class here — no stage that produces or
+consumes curated data changes.
 
-The raw uploaded dataset is never written to. Curated output always lands
-in a separate location, keyed by run id, so a run's input remains
-reproducible.
+The raw upload is never written to: curated output lands in its own
+location keyed by run id, so a run's input stays reproducible.
 """
 
 from __future__ import annotations
@@ -26,12 +22,8 @@ SUPPORTED_FORMATS: frozenset[str] = frozenset({"csv", "parquet"})
 
 
 class CuratedDatasetBackend(ABC):
-    """Destination for curated datasets.
-
-    Implementations are responsible only for *where* and *how* bytes are
-    persisted. They never inspect or alter the data, which is what keeps
-    storage swappable.
-    """
+    """Where and how bytes are persisted. Implementations never inspect or
+    alter the data, which is what keeps storage swappable."""
 
     # Persist a dataframe and return a URI identifying what was written
     @abstractmethod
@@ -40,13 +32,8 @@ class CuratedDatasetBackend(ABC):
 
 
 class LocalCuratedBackend(CuratedDatasetBackend):
-    """Writes curated datasets to the local filesystem.
-
-    Used for local development and for the pipeline's own tests. The
-    directory layout it creates (`<root>/<run_id>/<name>`) is intentionally
-    the same shape a blob container would use, so moving to cloud storage is
-    a backend swap rather than a rethink.
-    """
+    """Writes to local disk, using the same <root>/<run_id>/<name> layout a
+    blob container would — so moving to the cloud is a backend swap."""
 
     # Store the local root directory
     def __init__(self, root_dir: str | Path) -> None:

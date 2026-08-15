@@ -1,8 +1,7 @@
-"""Schemas for the pre-run cost/time estimate.
+"""Shapes for the pre-run cost/time estimate.
 
-Every number here is derived from the actual uploaded dataset and the
-actual selected configuration — never a fixed "2-7 minutes" placeholder.
-See `app/services/estimation_service.py` for how each field is computed.
+Every number comes from the real dataset and the real configuration — never
+a fixed placeholder. See estimation_service.py for how each is computed.
 """
 
 from __future__ import annotations
@@ -13,12 +12,8 @@ from app.schemas.metadata import MetadataMapping
 
 
 class EstimationRequest(BaseModel):
-    """The same configuration a run would be submitted with.
-
-    Takes the whole shape rather than a few scalars so the estimate is
-    computed from exactly what will execute — an estimate derived from a
-    different set of inputs than the run is worse than none.
-    """
+    """The same configuration a run would be submitted with, so the estimate
+    is computed from exactly what will execute."""
 
     file_id: str
     metadata: MetadataMapping
@@ -90,13 +85,11 @@ class WorkloadEstimate(BaseModel):
 
 
 class CostBreakdown(BaseModel):
-    """Databricks compute and LLM cost, kept and shown separately (Section
-    8.5) since they scale on entirely different axes — one per
-    cluster-minute, the other per key/token.
+    """Compute and LLM cost, kept separate since they scale differently —
+    one per cluster-minute, the other per key/token.
 
-    Every `*_available` flag is false, and the paired low/high fields are
-    null, whenever the underlying rate is not configured — never a
-    fabricated figure on either line.
+    The *_available flags are false and the low/high fields null whenever a
+    rate is unconfigured, rather than showing a fabricated figure.
     """
 
     databricks_cost_low: float | None = None
@@ -115,12 +108,10 @@ class CostBreakdown(BaseModel):
 
 
 class EstimationResponse(BaseModel):
-    """A range, never a single number.
+    """A range, never one number.
 
     Runtime depends on series length, model mix and how many keys clear the
-    minimum-history bar, none of which is knowable before the run. A range
-    with a stated basis is honest; a precise-looking single figure would
-    not be.
+    minimum-history bar — none knowable before the run.
     """
 
     dataset: DatasetMetadataSummary

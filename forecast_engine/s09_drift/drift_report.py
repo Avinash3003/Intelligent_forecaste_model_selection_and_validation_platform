@@ -1,9 +1,7 @@
-"""Drift result models — the output contract of Sections 6.7–6.9.
+"""What drift validation produces.
 
-Mirrors the pattern already established for evaluation and ranking: plain
-dataclasses with a `to_dict()`, no narrative text, and the reason behind
-every automated decision recorded as a short, structured string rather than
-implied by a bare number.
+Plain dataclasses with a to_dict(), no narrative text, and the reason behind
+every automated decision recorded rather than implied by a bare number.
 """
 
 from __future__ import annotations
@@ -60,13 +58,10 @@ class ThresholdEstimate:
 
 @dataclass
 class DriftValidationResult:
-    """Outcome of validating one candidate's forecast against Section 6.9's
-    Drift Validation step.
+    """One candidate's drift verdict.
 
-    `stage_trail` records the ordered sub-stages that produced this verdict
-    — Dynamic Drift Selection, Threshold Validation, Drift Validation — so
-    the execution order is auditable from the result itself rather than
-    only readable in the code.
+    stage_trail records the ordered sub-stages that produced it, so the
+    execution order is auditable from the result rather than only from code.
     """
 
     algorithm_selection: DriftAlgorithmSelection

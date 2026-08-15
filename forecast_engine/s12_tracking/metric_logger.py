@@ -1,16 +1,15 @@
-"""Metric extraction (Section 6.13, "Log Metrics").
+"""Extracts the numeric metrics MLflow records.
 
-MLflow metrics are numeric-only, so every genuinely categorical result
-(Validation Status, Final Selection Status) is logged as an MLflow *tag*
-rather than forced into a metric — alongside a companion 0/1 metric so the
-same information stays queryable/aggregatable in the MLflow UI's metrics
-view. Metric keys are namespaced `<section>.<group>.<model>.<name>` so runs
-spanning many forecasting groups and models never collide.
+MLflow metrics are numeric only, so categorical results (validation status,
+selection status) are logged as tags, with a companion 0/1 metric so they
+stay queryable in the metrics view.
+
+Keys are namespaced <section>.<group>.<model>.<name> so a run spanning many
+groups and models never collides.
 """
 
 from __future__ import annotations
 
-from typing import Any
 
 from forecast_engine.core.pipeline_result import PipelineResult
 

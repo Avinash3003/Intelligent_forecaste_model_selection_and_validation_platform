@@ -1,15 +1,8 @@
-"""Pipeline configuration — the plug-and-play control surface for the
-Forecast Engine (Section 9, "Plug-and-Play / Configuration Architecture").
+"""Every preprocessing behaviour, expressed as a value rather than code.
 
-Every behavioural choice the preprocessing pipeline makes is expressed here
-as a value rather than baked into the code, so a deployment can change
-imputation strategy, minimum history, or parallelism without touching the
-engine. Later phases extend these blocks (backtesting windows, drift
-thresholds, ranking weights) rather than introducing parallel config
-mechanisms.
-
-Defaults are deliberately conservative: the engine preserves raw data
-characteristics unless a deployment explicitly opts into altering them.
+A deployment can change imputation, minimum history or parallelism without
+touching the engine. Defaults are conservative: raw data characteristics are
+preserved unless a deployment opts into altering them.
 """
 
 from __future__ import annotations
@@ -20,12 +13,10 @@ from typing import Any
 
 
 class MissingValueStrategy(str, Enum):
-    """How a column's missing values should be treated during preparation.
+    """How missing values are treated.
 
-    NONE is the default because Section 6.2 requires imputation to be
-    "disabled by default so raw data characteristics are preserved for
-    validation stages" — later forward-validation stages need to see the
-    real gaps in a series to judge a model honestly.
+    NONE by default: forward validation needs to see the real gaps in a
+    series to judge a model honestly.
     """
 
     NONE = "none"
@@ -39,13 +30,11 @@ class MissingValueStrategy(str, Enum):
 
 
 class DuplicateScope(str, Enum):
-    """Which columns define a "duplicate" row.
+    """What counts as a duplicate row.
 
-    FULL_ROW only removes rows that are identical everywhere. KEY_AND_DATE
-    is stricter: it treats two rows sharing the same business key and
-    timestamp as duplicates even if their target values differ, which is
-    the correct reading for a time series (one observation per key, per
-    period) but discards data, so it is not the default.
+    FULL_ROW removes only identical rows. KEY_AND_DATE also treats same
+    key + same timestamp as duplicate even when targets differ — correct for
+    a time series, but it discards data, so it is not the default.
     """
 
     FULL_ROW = "full_row"
@@ -110,12 +99,11 @@ class PreprocessingConfig:
 
 @dataclass(frozen=True)
 class ConversionConfig:
-    """Controls the type standardization applied to the curated dataset.
+    """Type standardization for the curated dataset.
 
-    Conversion is attempted rather than assumed: a column that survives at
-    least `minimum_success_ratio` of its values is converted, and one that
-    does not is rejected outright. Rejecting is deliberate — a target that is
-    really categorical ("Apple", "High") must never reach forecasting.
+    A column converts only if at least minimum_success_ratio of its values
+    survive; otherwise it is rejected, so a target that is really categorical
+    never reaches forecasting.
     """
 
     convert_date_column: bool = True
@@ -132,12 +120,10 @@ class ConversionConfig:
 
 @dataclass(frozen=True)
 class AggregationConfig:
-    """Controls the roll-up of sub-monthly data to the monthly grain.
+    """Roll-up of sub-monthly data to monthly.
 
-    The *target's* method is not configured here — it is the user's choice,
-    carried on the ForecastConfiguration. These settings govern how feature
-    columns come along for the ride, which the design describes as a
-    column-level rule rather than one global default (Section 6.2).
+    The target's method is the user's choice and lives on
+    ForecastConfiguration; these settings only govern the feature columns.
     """
 
     enabled: bool = True
@@ -171,12 +157,10 @@ class QualityConfig:
 
 @dataclass(frozen=True)
 class CuratedStorageConfig:
-    """Where the curated dataset is written.
+    """Where the curated dataset is written — location and format only.
 
-    Only the location and format live here. The storage *mechanism* is a
-    swappable backend (see forecast_engine/storage), so moving from local
-    disk to ADLS/Blob later changes the backend, never this config's meaning
-    or any business logic that depends on it.
+    The storage mechanism is a swappable backend, so moving to blob storage
+    changes that, never this config's meaning.
     """
 
     enabled: bool = True
@@ -186,13 +170,10 @@ class CuratedStorageConfig:
 
 @dataclass(frozen=True)
 class ModelStorageConfig:
-    """Where each forecast key's winning fitted model is written.
+    """Where each key's winning model is written.
 
-    Same shape and the same reasoning as `CuratedStorageConfig`: only the
-    location lives here, and a caller running in the cloud passes an
-    already-resolved absolute path so no storage decision reaches the
-    engine. Only the model that won Final Production Model Selection is
-    persisted — candidates that lost are not.
+    Location only; a cloud caller passes an already-resolved path. Only the
+    winner is persisted, never the losing candidates.
     """
 
     enabled: bool = True
@@ -201,13 +182,10 @@ class ModelStorageConfig:
 
 @dataclass(frozen=True)
 class ForecastExportConfig:
-    """Where the run's exported forecast values are written.
+    """Where the exported forecast values are written.
 
-    A business-facing export — the actual forecast values every group
-    produced (dates, point forecast, bounds) — separate from the curated
-    dataset (the *input* the models trained on) and from the winning
-    `.pkl` (the *model*, not its output). Same shape as the other storage
-    configs: only the location lives here.
+    The business-facing output — dates, point forecast, bounds — distinct
+    from the curated dataset (the input) and the winning model file.
     """
 
     enabled: bool = True
@@ -216,13 +194,10 @@ class ForecastExportConfig:
 
 @dataclass(frozen=True)
 class ArtifactsMirrorConfig:
-    """Where a copy of this run's business insights and LLM trace is
-    written outside MLflow.
+    """Where a copy of the insights and LLM trace is written outside MLflow.
 
-    MLflow remains the primary, authoritative record (Section 6.13) —
-    this is a duplicate for direct blob access, not a replacement. Only
-    already-serialized JSON already produced for the run summary is
-    copied here; nothing is recomputed or re-rendered.
+    MLflow stays authoritative; this is a duplicate for direct blob access.
+    Only already-serialized JSON is copied — nothing is recomputed.
     """
 
     enabled: bool = True
@@ -249,12 +224,10 @@ class GroupingConfig:
 
 @dataclass(frozen=True)
 class ExecutionConfig:
-    """Controls how work is distributed across forecasting groups.
+    """How work is distributed across forecasting groups.
 
-    Parallelism is off by default: this phase performs no model training,
-    so the per-group work is cheap and the coordination overhead would
-    dominate. The knobs exist because the Model Training Engine in the
-    next phase will fan out across thousands of keys (Section 8.4).
+    Parallelism is off by default; the knobs exist for fanning out across
+    many keys.
     """
 
     parallel_enabled: bool = False

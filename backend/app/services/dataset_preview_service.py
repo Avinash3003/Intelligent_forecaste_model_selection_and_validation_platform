@@ -1,24 +1,13 @@
-"""Dataset preview for the Results page.
+"""Shows the curated dataset — what the models actually trained on.
 
-Shows the *curated* dataset — the cleaned, deduplicated, monthly-aggregated
-data every model actually trained on — rather than the raw upload. This is a
-deliberate choice, not just a convenience:
+Deliberately not the raw upload: the curated file is post-preprocessing, so
+it is the same data the decision on this page was made from, and it is far
+smaller (one row per key per month) so pagination stays cheap.
 
-  * It is what a "does this look right" check should be judging. The raw
-    upload can carry duplicates, bad rows and a finer grain than the platform
-    forecasts at; the curated file is post-preprocessing, so it is the same
-    data the decision on this page was actually made from.
-  * It is far smaller. A daily upload across many keys aggregates down to one
-    row per key per month, so pagination cost stays low without needing the
-    raw file's byte-range machinery.
-
-The curated file lives wherever the run that produced it wrote it: on the
-local filesystem for local execution, and in the curated Unity Catalog
-Volume for cloud execution. Both are plain POSIX paths in the run's own
-summary; only *this* process's ability to open them differs, since a UC
-Volume path means nothing on the API host. So a path that is not readable
-locally is fetched through the same workspace client the runner already
-uses for the run's other files.
+The file sits on local disk for local runs and in a UC volume for cloud
+runs. Both are POSIX paths; only this process's ability to open them
+differs, so an unreadable local path is fetched through the runner's
+workspace client instead.
 """
 
 from __future__ import annotations
@@ -114,13 +103,7 @@ class DatasetPreviewService:
         return columns, rows
 
     def _read(self, uri: str) -> str | None:
-        """The curated file's contents, from wherever the run wrote it.
-
-        Tries the local filesystem first, which is both the local-execution
-        case and the cheaper one. A UC Volume path simply is not a local
-        file, so that check fails and the runner's own workspace client
-        fetches it instead.
-        """
+        """The curated file, local disk first, then the workspace client."""
         path = Path(uri)
         if path.is_file():
             return path.read_text(encoding="utf-8", errors="replace")
@@ -142,16 +125,11 @@ class DatasetPreviewService:
     def get_full_series(
         self, run_id: str, date_column: str, target_column: str, key_values: dict[str, object] | None = None
     ) -> list[tuple[str, float]] | None:
-        """Every (date, target) observation for one business key, in this
-        run's curated dataset — the complete history, never a bounded tail.
+        """Every (date, target) observation for one business key.
 
-        Reuses the exact same cached curated-file parse `get_preview()`
-        already uses (Priority A: the Results chart's "actual" line reads
-        this instead of `PipelineContext.summary()`'s bounded
-        `recent_history`, which exists only as a lightweight fallback).
-        Returns None (not an empty list) when the curated file itself is
-        unavailable, so a caller can distinguish "no curated data" from
-        "no observations for this key".
+        Reuses the cached curated-file parse get_preview() already does.
+        Returns None (not []) when the curated file is unavailable, so a
+        caller can tell "no curated data" from "no rows for this key".
         """
         parsed = self._load(run_id)
         if parsed is None:
@@ -216,20 +194,14 @@ class DatasetPreviewService:
     def _with_derived_feature_columns(
         self, run_id: str, columns: list[str], rows: list[list[str]]
     ) -> tuple[list[str], list[list[str]]]:
-        """Append this run's actual derived feature columns to the curated
-        preview — computed with the same formulas `SupervisedTreeModel`
-        uses (lag = shift, rolling mean = trailing rolling().mean(), month/
-        quarter = date parts), grouped by business key so a lag or rolling
-        mean is never computed across two different keys' rows.
+        """Append this run's derived feature columns to the preview.
 
-        Reflects the run's own actual selection — read back from
-        `run_metadata["derived_features"]`, never guessed — so two runs
-        with different selections show different preview columns, and a
-        run with none selected shows none added. `columns`/`rows` are
-        returned unchanged (not even copied) whenever there is nothing to
-        add, which is the common case (most runs, and every call after the
-        underlying data has already been augmented once is avoided by the
-        caller never re-augmenting a returned pair).
+        Uses the same formulas the tree models do (lag = shift, rolling mean
+        = trailing mean, month/quarter = date parts), grouped by business key
+        so a lag never spans two keys.
+
+        Reads the run's real selection from run_metadata, never a guess, so
+        two runs with different selections preview different columns.
         """
         plan = self._derived_feature_plan(run_id, columns)
         if plan is None:

@@ -1,7 +1,6 @@
-"""Forecast Insights Dashboard (Sections 5.4–5.7).
+"""Serves a completed run's real results.
 
-Serves the real result of a completed run. A run that does not exist, or
-has not finished, returns an explicit error rather than a placeholder
+A missing or unfinished run returns an explicit error, never a placeholder
 dashboard — there is no dummy payload behind this route.
 """
 
@@ -119,13 +118,8 @@ def get_dataset_preview(
 ) -> DatasetPreview:
     """One page of the curated dataset this run trained on.
 
-    Page 1 is rows 1-`page_size`, page 2 is the next `page_size`, and so on —
-    plain offset paging rather than a byte-range cursor, since the curated
-    file (post-preprocessing, one row per key per period) is small enough to
-    parse once and slice per page.
-
-    Never raises for a missing file: no curated dataset for this run makes
-    the preview unavailable, not the whole Results page, so this returns
-    `available=False` with the reason instead of an error status.
+    Plain offset paging — the curated file is small enough to parse once and
+    slice. A missing file returns available=False rather than raising, so it
+    cannot take down the whole Results page.
     """
     return service.get_preview(run_id, page=page, page_size=page_size)

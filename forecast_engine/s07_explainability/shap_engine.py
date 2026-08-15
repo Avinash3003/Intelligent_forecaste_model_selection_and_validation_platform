@@ -1,36 +1,26 @@
-"""SHAP / native-importance explainability engine (Section 6.10).
+"""Computes feature importance for every surviving model.
 
-For models supporting SHAP directly (the tree-based adapters, when the
-optional `shap` package is installed) this computes real SHAP values, both
-global (mean absolute contribution per feature) and local (per-observation
-attributions). Every other model — ARIMA, Prophet, TFT, or a tree model when
-`shap` is not installed — is scored through a model-agnostic
-permutation-importance path built on the shared `predict()` interface, so no
-surviving model is ever skipped.
+Tree models with the optional shap package installed get real SHAP values,
+global and local. Everything else — ARIMA, Prophet, TFT, or a tree model
+without shap — goes through a model-agnostic permutation path built on the
+shared predict() interface, so no surviving model is skipped.
 
-Four structured signals are produced either way, sharing the same
-combination logic regardless of which path produced the underlying
-importance vectors:
+Either path produces the same four signals:
+  - window stability: how much the ranking moves across chronological
+    segments of history.
+  - horizon stability: how much it moves across different horizon lengths.
+  - plausibility: whether importance sits on features that actually
+    correlate with the target.
+  - dominant-feature consistency: how often the top feature stays the same.
 
-  * window stability — how much the importance ranking moves across
-    independent chronological segments of history.
-  * horizon stability — how much it moves across different forecast-horizon
-    lengths (a short holdout vs. the full configured holdout).
-  * plausibility — whether importance is concentrated on features that
-    actually correlate with the target.
-  * dominant-feature consistency — how often the single most important
-    feature stays the same across every perturbation above.
-
-A model with no permutable/explainable feature at all (a purely univariate
-statistical fit, most commonly ARIMA) has nothing to be inconsistent about,
-so it receives the configured neutral fallback instead of being penalized
-for a capability it was never given data to exercise.
+A purely univariate fit (usually ARIMA) has no permutable feature and so
+nothing to be inconsistent about; it gets the neutral fallback rather than
+being penalized for a capability it was never given data to exercise.
 """
 
 from __future__ import annotations
 
 import importlib.util
-import time
 from dataclasses import replace as dataclass_replace
 from typing import Any, Callable
 

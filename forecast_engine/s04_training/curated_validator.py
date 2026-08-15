@@ -1,18 +1,12 @@
-"""Internal curated-dataset integrity check.
+"""A last guard before training that the curated dataset is what
+preprocessing promised.
 
-A last guard immediately before training that confirms the curated dataset
-is what the preprocessing phase promised: a non-empty frame with a real
-datetime column, a numeric target, one observation per key per period, and
-enough history to fit anything.
+Checks for a non-empty frame, a real datetime column, a numeric target, one
+observation per key per period, and enough history to fit anything.
 
-Deliberately INTERNAL. It produces no report, surfaces nothing to the
-frontend, and is not part of the user-facing validation story — the
-Metadata Validation Report and the Data Quality Assessment already own
-that. This exists to fail fast and loudly if a curated dataset ever
-reaches training in a state preprocessing should have prevented, which
-would otherwise show up as a confusing library error deep inside a model.
-
-It only stops execution when training genuinely cannot continue.
+Internal only — it produces no report and surfaces nothing to the frontend.
+It exists to fail loudly if a bad curated dataset ever reaches training,
+which would otherwise appear as a confusing library error inside a model.
 """
 
 from __future__ import annotations

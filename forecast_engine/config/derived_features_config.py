@@ -1,23 +1,13 @@
-"""Derived (engineered) feature selection — Priority C.
+"""The derived feature columns a user can select, and how they resolve.
 
-The single authoritative list of the derived feature columns a user can
-choose to include, and how a chosen selection resolves into the model
-parameters `SupervisedTreeModel` (`s05_models/base_model.py`) already reads
-(`lags`, `rolling_windows`, `calendar_features`) — no parallel
-feature-engineering system, this is the existing one, made user-selectable.
+Exposes only the lag / rolling-mean / calendar features the tree models
+(XGBoost, LightGBM) already build for themselves — every other family
+handles trend and seasonality natively and ignores these entirely.
 
-Scope, deliberately: only the lag / rolling-mean / calendar features the
-gradient-boosted tree models (XGBoost, LightGBM) already generate
-internally for themselves are exposed here. Every other model family
-(Prophet, ARIMA, TFT, seasonal_naive) has its own native handling of trend
-and seasonality and never reads `lags`/`rolling_windows`/`calendar_features`
-at all — see `SupervisedTreeModel`'s own docstring. Nothing here is
-written into the shared curated dataset every model trains from: these
-features are computed per-model, at train *and* predict time, from the
-same `_feature_row` builder, which is what keeps them leak-free (a lag or
-rolling mean is only ever built from values strictly before the row it
-describes) and valid for forward forecasting (nothing here depends on a
-value the model would not also have available at inference time).
+Nothing here is written into the shared curated dataset: the features are
+computed per model at both train and predict time from one builder, which
+is what keeps them leak-free (a lag only ever uses values strictly before
+its own row) and valid for forward forecasting.
 """
 
 from __future__ import annotations
@@ -75,27 +65,20 @@ DEFAULT_SELECTED_FEATURE_IDS: frozenset[str] = SUPPORTED_FEATURE_IDS
 
 
 def validate_feature_ids(requested: list[str]) -> tuple[list[str], list[str]]:
-    """Split a requested feature-id list into (valid, rejected).
-
-    Never trusts the caller: an unsupported name is reported back, never
-    silently substituted or allowed through.
-    """
+    """Split requested ids into (valid, rejected) — an unsupported name is
+    reported back, never silently allowed through."""
     valid = [feature_id for feature_id in requested if feature_id in SUPPORTED_FEATURE_IDS]
     rejected = [feature_id for feature_id in requested if feature_id not in SUPPORTED_FEATURE_IDS]
     return valid, rejected
 
 
 def resolve_derived_feature_params(selected: list[str] | None) -> dict[str, object]:
-    """Turn a selected feature-id list into the `lags` / `rolling_windows`
-    / `calendar_features` params `SupervisedTreeModel` already reads.
+    """Turn selected ids into the lags/rolling_windows/calendar_features the
+    tree models already read.
 
-    `None` (never selected — every run before this feature existed, or a
-    caller that simply omits the field) resolves to exactly today's
-    default behavior, unchanged. Unsupported ids are dropped rather than
-    raised here — the API layer is where an unsupported name is rejected
-    with a clear error; by the time a selection reaches the engine it has
-    already been validated, and the engine stays defensive rather than
-    trusting that.
+    None means "not selected" and resolves to the existing defaults.
+    Unsupported ids are dropped here rather than raised — the API rejects
+    them with a clear error, and this stays defensive.
     """
     if selected is None:
         selected_ids = DEFAULT_SELECTED_FEATURE_IDS
@@ -125,17 +108,12 @@ _DERIVED_FEATURE_AWARE_MODELS = frozenset({"xgboost", "lightgbm"})
 
 
 def apply_to_model_config(model_config: ModelConfig, selected: list[str] | None) -> ModelConfig:
-    """Return a new `ModelConfig` with the resolved derived-feature params
-    merged into the tree-based models' `default_params`, every other model
-    spec untouched.
+    """A new ModelConfig with these features merged into the tree models'
+    defaults, every other spec untouched.
 
-    Applied once, before any collaborator (trainer, evaluator, SHAP engine,
-    production selector) is constructed from `ModelConfig` — each of those
-    builds its own `ModelRegistry` snapshot at construction time, so this
-    must happen upstream of all of them rather than mutating specs after
-    the fact. `selected=None` (a run that never mentions derived features)
-    returns `model_config` completely unchanged — no new ModelConfig
-    object, no behavior change, for every run before this feature existed.
+    Must run before any collaborator is built from the config, since each
+    takes its own registry snapshot at construction. selected=None returns
+    the original object unchanged.
     """
     if selected is None:
         return model_config

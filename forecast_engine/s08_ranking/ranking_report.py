@@ -1,9 +1,8 @@
-"""Model Ranking result models — the output contract of Section 6.6.
+"""What ranking produces.
 
-One `RankedModel` per surviving (forecast group, model) pair, carrying the
-composite score plus every component that fed it, so the score is never a
-black box. `RankingReport.top_ranked_by_group()` is Section 6.7's direct
-input — the model each group's Drift Validation is run against first.
+One RankedModel per surviving pair, carrying the composite score plus every
+component that fed it, so the score is never a black box.
+top_ranked_by_group() is what drift validation is run against first.
 """
 
 from __future__ import annotations
@@ -14,11 +13,10 @@ from typing import Any
 
 @dataclass
 class BacktestScoreBreakdown:
-    """Normalized, weighted view of one model's backtesting metrics.
+    """One model's backtest metrics, normalized and weighted.
 
-    `normalized` values are in [0, 1], min-max scaled *within the group's
-    candidate set* so a metric's native units never leak into the score —
-    1.0 always means "best of this group's survivors" on that metric.
+    Values are min-max scaled within the group's candidates, so native units
+    never leak into the score: 1.0 always means best of this group.
     """
 
     normalized: dict[str, float] = field(default_factory=dict)
@@ -50,11 +48,11 @@ class StabilityScoreBreakdown:
 
 @dataclass
 class ShapScoreBreakdown:
-    """SHAP (or native/permutation-importance) consistency signal.
+    """The importance-consistency signal.
 
-    `method` records which path produced this score — `shap`, `permutation`
-    or `univariate_fallback` — so the ranking output is transparent about
-    how a model that does not support SHAP directly was still evaluated.
+    method records which path produced it (shap, permutation or
+    univariate_fallback), so the output stays transparent about how a model
+    without direct SHAP support was still evaluated.
     """
 
     method: str = "univariate_fallback"

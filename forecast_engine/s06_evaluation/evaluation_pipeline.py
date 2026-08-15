@@ -1,18 +1,13 @@
-"""Evaluation orchestration — Phase 7A end to end.
+"""Sequences evaluation for every trained model.
 
-Sequences the four stages this phase owns for every trained model:
+    backtest -> metrics -> forward forecast -> forward validation
 
-    Rolling Backtesting -> Metrics -> Forward Forecast -> Forward Validation
+and returns the survivors. It decides nothing about which model is best —
+that is ranking's job; this only produces the eligible candidates.
 
-and returns the surviving models. It decides nothing about which model is
-*best*: Section 6.5's output is the set of candidates eligible for ranking,
-and ranking itself is the next phase's work.
-
-Failure isolation is the defining behaviour. Every (group, model) pair is
-guarded independently, so a model that cannot be backtested, cannot
-forecast, or produces an implausible forecast is recorded and skipped while
-every other pair proceeds — Section 5.3 requires failed keys to be flagged
-without blocking the rest of the run.
+Every (group, model) pair is guarded independently, so a model that cannot
+be backtested or produces an implausible forecast is recorded and skipped
+while the rest proceed.
 """
 
 from __future__ import annotations

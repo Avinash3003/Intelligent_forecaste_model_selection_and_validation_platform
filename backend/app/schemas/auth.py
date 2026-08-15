@@ -8,13 +8,10 @@ from app.auth.models import Permission, Role
 
 
 class AuthConfigResponse(BaseModel):
-    """What the frontend needs to start an Entra sign-in.
+    """What the frontend needs to start a sign-in.
 
-    Every field here is a public identifier — a SPA client id, a tenant
-    id and an authority URL are all visible in any browser that completes
-    a sign-in. No secret is served from this endpoint, and it is the only
-    unauthenticated route in the application: the frontend must be able to
-    read it *before* it has a token.
+    Public identifiers only — all visible in any browser that signs in. No
+    secret is served here, and this is the app's only unauthenticated route.
     """
 
     auth_enabled: bool
@@ -27,11 +24,10 @@ class AuthConfigResponse(BaseModel):
 
 
 class CurrentUserResponse(BaseModel):
-    """The signed-in caller, as the application understands them.
+    """The signed-in caller.
 
-    Returns `permissions` rather than only roles so the UI can hide
-    actions it would be refused, without duplicating the role -> permission
-    table client-side.
+    Carries permissions, not just roles, so the UI can hide actions it would
+    be refused without duplicating the mapping table.
     """
 
     subject: str

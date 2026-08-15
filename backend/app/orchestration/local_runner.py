@@ -1,32 +1,15 @@
-"""Local Runner (Section 6.14).
+"""Runs the forecast engine as a local subprocess.
 
-Executes the unmodified `forecast_engine` pipeline as a subprocess of its
-own interpreter — `forecast_engine` carries heavy, potentially conflicting
-dependencies (xgboost, statsmodels, mlflow, openai) and lives in its own
-venv, so it is invoked as a separate process rather than imported into the
-backend's. This is the same CLI entry point (`python -m
-forecast_engine.run_pipeline`) used throughout local development and
-verification — nothing about how the engine runs is different here, only
-who is driving it.
+The engine has its own venv and heavy dependencies (xgboost, statsmodels,
+mlflow), so it is launched as a separate process rather than imported.
+Submit returns immediately and the run happens on a background thread.
 
-Submission returns immediately; the actual run happens on a background
-thread so a slow forecast (training + evaluation + explainability + MLflow
-logging can take minutes) never blocks the FastAPI request that submitted
-it.
+Job state is split by lifetime:
+  - in memory: only active PENDING/RUNNING jobs and the subprocess handle.
+  - in MLflow: every finished run, which is what survives a restart.
 
-Job state is split by lifetime, not stored in one place:
-
-  * **In memory** — only *active* execution: PENDING/RUNNING jobs, the
-    subprocess handle, and cancellation state. None of it is meaningful
-    after this process exits, so none of it is treated as history.
-  * **In MLflow** — every *finished* run. The engine opens its Parent Run
-    before the first stage and closes it with a terminal status, so both
-    completed and failed runs persist, and `MLflowHistoryStore` reads them
-    back. This is what makes run history survive a backend restart.
-
-A terminal job is dropped from memory once it is confirmed present in
-MLflow; if tracking was disabled or unreachable it is retained instead, so
-a run is never silently lost just because it could not be persisted.
+A finished job leaves memory only once MLflow confirms it, so a run is never
+lost because tracking was unreachable.
 """
 
 from __future__ import annotations
@@ -37,7 +20,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -59,11 +42,7 @@ from app.orchestration.schemas import (
 
 @dataclass
 class _JobRecord:
-    """Mutable, in-memory state for one submitted run.
-
-    Guarded entirely by `LocalRunner._lock` — the background execution
-    thread and any request thread reading status/result share this object.
-    """
+    """In-memory state for one run, guarded by LocalRunner._lock."""
 
     run_id: str
     status: JobStatus
@@ -173,11 +152,8 @@ class LocalRunner(PipelineRunner):
     def _restore_result(self, run_id: str) -> PipelineExecutionResult:
         """Rebuild a finished run from MLflow.
 
-        The consolidated summary artifact is the same `PipelineContext.
-        summary()` payload the live path receives, so it goes through the
-        identical `map_summary_to_result` — a restored run and a live one
-        are the same object built by the same code, not two shapes that
-        have to be kept in agreement.
+        Uses the same summary payload and the same mapper as a live run, so
+        both produce one identical object.
         """
         listing = self._history.get_listing(run_id)
         if listing is None:
@@ -246,13 +222,10 @@ class LocalRunner(PipelineRunner):
         )
 
     def _current_stages(self, record: _JobRecord) -> list[dict[str, Any]]:
-        """This job's stage trail right now — real, not fabricated.
+        """The job's real stage trail.
 
-        A finished job's trail comes from its final summary. A still-active
-        job's comes from the engine's live-status file, read fresh on every
-        call: the engine subprocess writes it after every stage transition
-        (`forecast_engine/core/live_status.py`), so this reflects genuine
-        interim progress rather than a static "all Pending" placeholder.
+        Finished jobs read from the final summary; active ones from the
+        engine's live-status file, rewritten after every stage transition.
         """
         if record.summary is not None:
             return record.summary.get("stages") or []
@@ -321,18 +294,11 @@ class LocalRunner(PipelineRunner):
         return CancellationOutcome(cancelled=True, cleanup_errors=cleanup_errors)
 
     def _cleanup_run_storage(self, run_id: str, work_dir: Path | None) -> list[str]:
-        """Delete every local path this run could have written, strictly
-        scoped to `run_id`. Safe to call on a run that wrote nothing yet
-        (PENDING) or that was already cleaned up (idempotent) — a missing
-        path is treated as already-clean, not an error.
+        """Delete everything this run wrote, scoped strictly to its run_id.
 
-        Never touches `backend/uploads/` — the originally uploaded file is
-        keyed by `file_id`, not `run_id`, and may be staged for more than
-        one run (e.g. a re-deploy after tweaking configuration), so it is
-        not safely attributable to this run alone.
-
-        Returns a list of human-readable failures — empty means every
-        location was successfully emptied (or was already empty).
+        Idempotent — a missing path counts as already clean. Never touches
+        uploads/, which is keyed by file_id and may serve several runs.
+        Returns the locations that could not be removed; empty means all clean.
         """
         errors: list[str] = []
 
@@ -382,23 +348,13 @@ class LocalRunner(PipelineRunner):
         return record
 
     def _hand_over_to_history(self, run_id: str) -> None:
-        """Drop a finished job from memory once MLflow has its outcome.
+        """Drop a finished job from memory once MLflow holds its outcome.
 
-        Memory is for active execution only, so a terminal job should not
-        linger there. It is only released once the tracking store actually
-        confirms the *outcome* — not merely that a row exists. MLflow's
-        parent run is opened at pipeline start, before Stage 1 even runs,
-        so a row exists under this run_id the instant the subprocess
-        starts, regardless of how it ends. If the engine is killed
-        uncatchably (OOM, a native segfault) partway through, it never
-        reaches `tracking_pipeline.fail()` to close that run — MLflow's
-        `end_time` stays unset. Handing over on row-existence alone would
-        evict the in-memory record (real error, real stage trail, taken
-        from the subprocess's own exit code and the live-status file)
-        in favour of history's generic "did not finish" fallback, which
-        has neither. `completed_at` is only set once MLflow's `end_time`
-        is populated, i.e. once the run was actually closed — exactly the
-        condition that means history now holds everything memory did.
+        Waits for MLflow's end_time, not merely for a row to exist. The
+        parent run is opened before stage 1, so a row appears immediately;
+        a job killed uncatchably (OOM, segfault) never closes it. Handing
+        over on row-existence alone would replace the real in-memory error
+        and stage trail with history's generic "did not finish".
         """
         try:
             listing = self._history.get_listing(run_id)

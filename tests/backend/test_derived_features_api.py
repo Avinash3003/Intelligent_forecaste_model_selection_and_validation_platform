@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.auth.dependencies import get_current_principal
-from app.auth.models import Permission, Principal, Role
+from app.auth.models import Principal, Role
 from app.auth.rbac import permissions_for
 from app.main import app
 from app.services.derived_feature_registry import (

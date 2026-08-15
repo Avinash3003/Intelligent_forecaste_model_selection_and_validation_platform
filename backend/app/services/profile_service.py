@@ -1,14 +1,8 @@
-"""Dataset Profiling Service — the "Basic Dataset Inspection" summary shown
-immediately after upload (Section 5.1.1), before any metadata is mapped.
+"""The dataset summary shown right after upload, before any mapping.
 
-`ProfileService.profile()` is strictly descriptive: it reports what the
-file physically contains — raw pandas dtypes, sample values, null ratios,
-cardinality — and makes no forecasting judgement whatsoever, referencing no
-column name. `compute_date_range()` below is the one exception, and
-deliberately a separate function rather than folded into `profile()`: it
-exists for Metadata Mapping (Priority B), one step later, once the user
-has tentatively named a date column, not for the column-agnostic
-inspection step.
+profile() is purely descriptive — dtypes, samples, null ratios, cardinality
+— and never judges a column by name. compute_date_range() is separate
+because it runs one step later, once the user has named a date column.
 """
 
 import pandas as pd
@@ -17,14 +11,7 @@ from app.schemas.profile import ColumnProfile, ProfileResponse
 
 
 def format_file_size(size_bytes: int) -> str:
-    """Render a byte count as a human-readable size.
-
-    Args:
-        size_bytes: File size in bytes.
-
-    Returns:
-        A short string such as "2.1 MB", for display on the inspection card.
-    """
+    """Render a byte count as a short size string such as "2.1 MB"."""
     size = float(size_bytes)
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024 or unit == "GB":
@@ -38,17 +25,7 @@ class ProfileService:
     """Builds a ProfileResponse from a DataFrame."""
 
     def profile(self, dataframe: pd.DataFrame, dataset_name: str, file_size_bytes: int) -> ProfileResponse:
-        """Profile every column in `dataframe`.
-
-        Args:
-            dataframe: The uploaded dataset, already loaded by DatasetLoader.
-            dataset_name: Original filename, for display.
-            file_size_bytes: Size of the staged file on disk.
-
-        Returns:
-            A ProfileResponse with one ColumnProfile per column. Called by
-            the /profile route immediately after a successful upload.
-        """
+        """One ColumnProfile per column, for the /profile route after upload."""
         columns = [self._profile_column(dataframe[column]) for column in dataframe.columns]
 
         return ProfileResponse(
@@ -61,12 +38,10 @@ class ProfileService:
         )
 
     def _profile_column(self, series: pd.Series) -> ColumnProfile:
-        """Describe a single column without interpreting it.
+        """Describe one column without interpreting it.
 
-        The dtype is reported exactly as pandas inferred it on read, so the
-        user sees the real storage type ("object" for text-encoded dates,
-        for instance) rather than a guess that might disagree with what the
-        Validation Engine later concludes.
+        The dtype is exactly what pandas inferred, so the user sees the real
+        storage type rather than a guess validation might later contradict.
         """
         non_null = series.dropna()
 
@@ -80,17 +55,12 @@ class ProfileService:
 
 
 def compute_date_range(series: pd.Series) -> tuple[str | None, str | None]:
-    """A column's observed date coverage — (None, None) when nothing in it
-    parses as a date, never a guessed/fabricated range.
+    """A column's real date coverage, or (None, None) if nothing parses.
 
-    Mirrors `forecast_engine.s02_quality.quality_assessor`'s
-    `parse_date_column` / `date_range_from_parsed` (same rule: a numeric or
-    boolean column is refused rather than parsed, since pandas would read
-    integers as nanosecond epochs and report a meaningless range). Kept as
-    a small, separate duplicate rather than an import of that module — the
-    backend and forecast_engine are two independently deployable processes
-    with separate dependencies; the backend only ever invokes
-    forecast_engine as an external subprocess/job, never in-process.
+    Numeric and boolean columns are refused rather than parsed, since pandas
+    would read integers as nanosecond epochs and report nonsense. Duplicated
+    from the engine's quality assessor on purpose: the two are separately
+    deployed processes, and the backend never imports engine code.
     """
     if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
         parsed = pd.Series(pd.NaT, index=series.index)

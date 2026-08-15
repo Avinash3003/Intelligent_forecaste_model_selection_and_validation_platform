@@ -1,20 +1,11 @@
-"""Entra ID (Microsoft identity platform) access-token validation.
+"""Validates the Entra ID access tokens the frontend sends.
 
-The frontend signs the user in against Entra directly and sends the
-resulting access token as `Authorization: Bearer <token>`. This module is
-the only place that token is trusted or rejected. It validates, in order:
+The only place a bearer token is trusted or rejected. Checks, in order:
+the RS256 signature against the tenant's published keys, aud (issued for
+this API, not Graph), iss (the configured tenant), and exp/nbf.
 
-  * RS256 signature against the tenant's published JWKS (keys fetched from
-    the OpenID discovery document and cached),
-  * `aud` — the token was issued *for this API*, not for Graph or another
-    app that happens to live in the same tenant,
-  * `iss` — issued by the configured tenant,
-  * `exp` / `nbf`.
-
-No client secret is involved and none is needed: validating a token
-requires only public signing keys. The API therefore holds no Entra
-credential at all, which is the least-privilege position — a leak of this
-service's configuration grants an attacker nothing.
+No client secret is involved — validation needs only public keys — so this
+service holds no Entra credential at all.
 """
 
 from __future__ import annotations
@@ -36,19 +27,15 @@ class AuthConfigurationError(RuntimeError):
 
 
 class TokenValidationError(Exception):
-    """The presented token is missing, malformed, expired, or not ours.
-
-    Carries a message safe to return to the caller — it never embeds the
-    token, the signing key, or the underlying library's internals.
-    """
+    """Token missing, malformed, expired or not ours. The message is safe to
+    return: it never embeds the token, the key, or library internals."""
 
 
 class EntraTokenValidator:
-    """Validates Entra ID access tokens and maps them onto a `Principal`.
+    """Validates tokens and maps them to a Principal.
 
-    One instance per process. `PyJWKClient` keeps its own key cache, and
-    the discovery document is re-read only after `_DISCOVERY_TTL_SECONDS`,
-    so a request in the steady state does no network I/O.
+    One instance per process. Keys and the discovery document are cached, so
+    a steady-state request does no network I/O.
     """
 
     _DISCOVERY_TTL_SECONDS = 3600.0
@@ -65,13 +52,8 @@ class EntraTokenValidator:
     # ------------------------------------------------------------------
 
     def require_configuration(self) -> None:
-        """Fail loudly at startup rather than per request.
-
-        A deployment with `AUTH_ENABLED=true` and no tenant/audience is
-        misconfigured in a way that would otherwise surface as every
-        single request returning 401 — an unhelpful symptom for a
-        completely avoidable cause.
-        """
+        """Fail at startup, not as a 401 on every request, when auth is on but
+        no tenant/audience is configured."""
         missing = [
             name
             for name, value in (
@@ -131,12 +113,8 @@ class EntraTokenValidator:
     # ------------------------------------------------------------------
 
     def validate(self, token: str) -> Principal:
-        """Validate `token` and return the caller it identifies.
-
-        Raises:
-            TokenValidationError: for any reason the token is not
-                acceptable. The message is safe to show a user.
-        """
+        """The caller a token identifies. Raises TokenValidationError if not
+        acceptable, with a message safe to show a user."""
         self.require_configuration()
         jwks_client, issuers = self._ensure_discovery()
 
@@ -194,12 +172,10 @@ class EntraTokenValidator:
         )
 
     def _roles_from_claims(self, claims: dict) -> list[Role]:
-        """Resolve app roles first, then fall back to group mapping.
+        """App roles first, then group mapping.
 
-        App roles are the supported mechanism (they arrive as plain names
-        this application already understands). Group object ids are
-        offered as a fallback because many tenants manage access through
-        existing security groups and cannot add app-role assignments.
+        App roles are the supported mechanism; group ids are a fallback for
+        tenants that manage access through existing security groups.
         """
         found: list[Role] = []
 
@@ -219,11 +195,10 @@ class EntraTokenValidator:
 
 
 def _parse_role(value: str) -> Role | None:
-    """Match a claim value to a `Role`, case-insensitively.
+    """Match a claim to a Role, case-insensitively.
 
-    Tolerant of case only — an unrecognised value is dropped rather than
-    guessed at, so a typo in an Azure app-role definition denies access
-    instead of silently granting the nearest match.
+    An unrecognised value is dropped, never guessed, so a typo in an app-role
+    definition denies access rather than granting the nearest match.
     """
     candidate = (value or "").strip().lower()
     for role in Role:
@@ -233,14 +208,11 @@ def _parse_role(value: str) -> Role | None:
 
 
 def development_principal(settings: Settings) -> Principal:
-    """The identity used when `AUTH_ENABLED=false` (local development).
+    """The identity used when AUTH_ENABLED=false, so the app runs with no tenant.
 
-    Exists so the application is runnable end to end on a laptop with no
-    Azure tenant. It is reachable *only* through that explicit flag, it
-    marks itself as a development identity in every response, and
-    `main.py` refuses to start if it is combined with a production
-    `APP_ENV` — so it cannot become a production authentication bypass by
-    accident.
+    Reachable only through that flag, marked as a development identity in
+    every response, and main.py refuses to start if it is combined with a
+    production APP_ENV — so it cannot become an accidental auth bypass.
     """
     role = _parse_role(settings.dev_identity_role) or Role.ADMIN
     return Principal(

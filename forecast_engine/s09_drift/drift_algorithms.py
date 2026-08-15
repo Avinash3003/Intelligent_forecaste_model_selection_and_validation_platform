@@ -1,10 +1,9 @@
-"""Drift statistic implementations (Section 6.7).
+"""The drift statistics themselves.
 
-Each function compares a `reference` distribution (history) against a
-`current` one (the forward forecast) and returns a single non-negative
-statistic — larger means more drift. Registered in `DRIFT_ALGORITHMS` so the
-selector and threshold estimator never need an if/elif chain to dispatch on
-the chosen algorithm; adding a fifth algorithm later is one registry entry.
+Each compares a reference distribution (history) against a current one (the
+forward forecast) and returns one non-negative number — larger means more
+drift. Registered in DRIFT_ALGORITHMS so nothing needs an if/elif chain to
+dispatch, and adding a fifth is one registry entry.
 """
 
 from __future__ import annotations

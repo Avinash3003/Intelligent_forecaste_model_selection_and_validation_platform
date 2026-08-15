@@ -1,12 +1,8 @@
-"""Renders a `PipelineResult` into the plain-text context block every
-prompt shares (Section 6.12 — "the LLM should receive the complete
-pipeline context... understand the complete execution instead of isolated
-metrics").
+"""Renders a finished run into the plain-text block every prompt shares.
 
-Kept separate from `PipelineResult` itself (a pure data object) and from
-`PromptLibrary` (which only knows how to load/fill template files) so each
-piece has exactly one job: this one turns structured data into the bounded
-text every prompt is built around.
+Kept separate from the result object (pure data) and the prompt library
+(which only loads and fills templates), so this has exactly one job: turning
+structured data into the bounded text a prompt is built around.
 """
 
 from __future__ import annotations

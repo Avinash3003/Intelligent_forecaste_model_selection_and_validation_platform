@@ -12,14 +12,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.dependencies import get_current_principal
-from app.auth.models import Permission, Principal, Role
+from app.auth.models import Principal, Role
 from app.auth.rbac import permissions_for
 from app.main import app
 from app.orchestration.exceptions import UnknownRunError
 from app.orchestration.schemas import CancellationOutcome
 from app.services.deployment_service import build_execution_request
 from app.schemas.deployment import DeploymentRequest
-from app.schemas.metadata import MetadataMapping
 
 
 def _principal(role: Role, subject: str = "user-1", display_name: str = "Avinash Reddy") -> Principal:

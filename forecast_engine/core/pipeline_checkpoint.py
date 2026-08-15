@@ -1,17 +1,11 @@
-"""Cross-task checkpointing for `PipelineContext` — what makes the
-multi-task Databricks Serverless workflow possible (see
-`databricks/resources/forecast_job_serverless.yml`).
+"""Lets the multi-task Databricks workflow hand a PipelineContext between tasks.
 
-Each task in that job is a separate process; nothing about a
-`PipelineContext` survives between them except what is written to
-storage. Rather than inventing a new artifact type per stage boundary,
-this module pickles the *same* `PipelineContext` object that already
-flows between stages in-process today — the minimum change needed to make
-two adjacent stages independent Databricks tasks.
+Each task is a separate process, so nothing survives between them but what
+is written to storage. This pickles the same context object that already
+flows between stages in-process, rather than inventing a per-boundary
+artifact type.
 
-Local execution and the DCS job never call this: both still run the whole
-pipeline as a single process via `ForecastEnginePipeline.run()`, exactly
-as before this module existed.
+Single-process runs never call this.
 """
 
 from __future__ import annotations
@@ -23,11 +17,10 @@ from forecast_engine.core.pipeline_context import PipelineContext
 
 
 def save_checkpoint(context: PipelineContext, path: str | Path) -> None:
-    """Persist `context` for a later task to resume from.
+    """Persist the context for a later task.
 
-    `on_stage_change` (a live-status callback bound to this process) is
-    dropped before pickling — it is never valid in another process, and
-    the task that loads this checkpoint re-attaches its own.
+    The live-status callback is dropped first — it is bound to this process,
+    and the loading task attaches its own.
     """
     context.on_stage_change = None
     destination = Path(path)
@@ -43,15 +36,11 @@ def load_checkpoint(path: str | Path) -> PipelineContext:
 
 
 def merge_checkpoints(base: PipelineContext, other: PipelineContext) -> None:
-    """Fold a second parallel branch's contribution into `base`, in place.
+    """Fold a parallel branch's contribution into base, in place.
 
-    Used only where the DAG forks and rejoins: Persist Winning Models and
-    Export Forecasts both descend from Rank & Select and each write to a
-    disjoint slice of the context (`model_storage_results` and
-    `forecast_export_result` respectively), so this only needs to copy
-    over what `other` uniquely added — its own field(s), its stage
-    record(s) (so the run's stage trail shows both branches), and any
-    metadata key `base` does not already have.
+    Used only where the DAG forks and rejoins. The two branches write to
+    disjoint slices of the context, so this copies only what the other side
+    uniquely added: its fields, its stage records, and any new metadata.
     """
     if other.model_storage_results:
         base.model_storage_results = other.model_storage_results

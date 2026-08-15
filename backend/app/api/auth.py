@@ -16,11 +16,9 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 def get_auth_config(settings: Settings = Depends(get_settings)) -> AuthConfigResponse:
     """Public sign-in parameters.
 
-    Intentionally unauthenticated — the frontend has to read this before
-    it can obtain a token. It carries only public identifiers (see
-    `AuthConfigResponse`), which is what lets the SPA hold no build-time
-    Azure configuration of its own: one deployed frontend bundle can point
-    at any tenant its backend names.
+    Unauthenticated by necessity — the frontend reads this before it can get
+    a token. Public identifiers only, so one frontend bundle can point at
+    whichever tenant its backend names.
     """
     if not settings.auth_enabled:
         return AuthConfigResponse(auth_enabled=False)

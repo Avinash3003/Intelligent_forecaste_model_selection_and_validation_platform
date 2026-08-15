@@ -1,14 +1,11 @@
-"""The structured output contract every LLM insight call must satisfy
-(Section 13.1, "Structured output validation").
+"""The JSON contract every LLM insight must satisfy, plus its validator.
 
-A free-text narrative is fragile and difficult to grade or audit — Section
-13.1 is explicit that the LLM must return JSON against a fixed schema, not
-prose the platform then has to parse apologetically. This module is that
-schema, plus the validator that checks a raw LLM response against it before
-anything reaches the dashboard.
+Free-text prose is fragile to grade and audit, so the model returns JSON
+against a fixed schema and this checks it before anything reaches the
+dashboard.
 
-Kept dependency-free (plain dataclasses, not pydantic) to match the rest of
-`forecast_engine`, which has no pydantic dependency anywhere else.
+Plain dataclasses rather than pydantic, matching the rest of the engine,
+which has no pydantic dependency.
 """
 
 from __future__ import annotations

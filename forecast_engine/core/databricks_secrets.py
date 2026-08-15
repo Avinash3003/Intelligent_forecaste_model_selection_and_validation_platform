@@ -1,22 +1,11 @@
-"""Databricks Serverless secret resolution for the AZURE_OPENAI_* CLI flags
-(see `databricks/resources/forecast_job_serverless.yml`'s `business_insights`
-task).
+"""Resolves {{secrets/scope/key}} in the --azure-openai-* flags on Serverless.
 
-Databricks resolves `{{secrets/scope/key}}` template syntax in a handful of
-fields — a cluster's `spark_env_vars` among them — but NOT in job
-parameters, which is how the three Azure OpenAI values reach
-`run_pipeline.py`'s `--azure-openai-*` flags on Serverless (a
-`python_wheel_task` has no `spark_env_vars` equivalent to set these as real
-environment variables directly). A value sourced that way arrives at the
-CLI still in literal template form, and `dbutils.secrets.get()` — the only
-Databricks-supported way to read an actual secret value from arbitrary
-running code, since the plain Secrets REST API deliberately refuses to
-return values — is what resolves it.
+Databricks expands that template in cluster env vars but not in job
+parameters, and a wheel task has no cluster env vars to use — so the value
+arrives at the CLI still in template form. dbutils.secrets.get() is the only
+supported way to read the real value from running code.
 
-Local runs and the DCS job never hit this: DCS sets the real environment
-variables directly via `spark_env_vars`, and a local `.env` sets them
-directly too, so neither ever passes a `--azure-openai-*` flag shaped like
-`{{secrets/...}}` in the first place.
+Only Serverless hits this; local runs and DCS set real environment variables.
 """
 
 from __future__ import annotations
@@ -37,12 +26,8 @@ _SECRET_TEMPLATE_RE = re.compile(r"^\{\{secrets/([^/}]+)/([^}]+)\}\}$")
 
 
 def _resolve_databricks_secret_template(value: str) -> str:
-    """Resolve one `{{secrets/scope/key}}` literal via dbutils.secrets.get().
-
-    Available only on real Databricks compute; anything that is not this
-    literal template shape (a real value, or unset) is returned/left
-    untouched.
-    """
+    """Resolve one {{secrets/scope/key}} literal. Anything not in that exact
+    shape is returned untouched."""
     match = _SECRET_TEMPLATE_RE.match(value)
     if not match:
         return value
@@ -57,12 +42,11 @@ def _resolve_databricks_secret_template(value: str) -> str:
 
 
 def apply_azure_openai_cli_overrides(args: argparse.Namespace) -> None:
-    """Copy any --azure-openai-* flags into the process environment, before
-    anything else runs, so `LLMConfig.from_env()` (read later, inside
-    `ForecastEnginePipeline`) sees them exactly as it would a real
-    environment variable. A deployment that already sets these as real
-    environment variables passes no flags here and this is a no-op.
-    Values are resolved and copied, never logged or printed.
+    """Copy the --azure-openai-* flags into the environment before anything
+    else runs, so LLMConfig.from_env() sees them as ordinary variables.
+
+    A no-op when real environment variables are already set. Values are
+    never logged.
     """
     if args.azure_openai_endpoint:
         os.environ[AZURE_OPENAI_ENDPOINT_ENV_VAR] = _resolve_databricks_secret_template(args.azure_openai_endpoint)

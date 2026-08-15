@@ -1,12 +1,8 @@
-"""MLflow Experiment Tracking & Model Registry configuration (Section 6.13).
+"""Every MLflow setting, read from the environment.
 
-The only thing that should ever change between Local Development and
-Databricks is the *tracking URI* — every other MLflow behaviour (what gets
-logged, when, and how) is identical in both environments. Centralizing
-every MLflow-facing setting here, read from environment variables, is what
-makes that true: `forecast_engine/tracking/` never hardcodes a path or a
-URI, so pointing it at Databricks later is a deployment change, not a code
-change.
+Only the tracking URI should differ between local and Databricks — what
+gets logged, when and how is identical. Keeping the settings here is what
+makes retargeting a deployment change rather than a code change.
 """
 
 from __future__ import annotations

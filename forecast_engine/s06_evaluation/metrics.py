@@ -1,20 +1,15 @@
-"""Forecast accuracy metrics (Section 6.4 / 12.2).
+"""The five accuracy metrics: MAPE, WMAPE, RMSE, MAE, SMAPE.
 
-Computes the five metrics the platform reports — MAPE, WMAPE, RMSE, MAE,
-SMAPE — over any actual/predicted pair. Pure functions with no knowledge of
-models, groups or backtesting, so the same code scores a backtest fold and
-anything a later phase needs.
+Pure functions that know nothing about models, groups or backtesting, so the
+same code scores a fold and anything else.
 
-The percentage metrics need care rather than a textbook formula:
-
-  * MAPE divides by the actual value and is undefined wherever that value
-    is zero. Those observations are excluded (configurably) instead of
-    producing an infinity that would poison every aggregate downstream.
-  * WMAPE is a ratio of sums, so a single zero cannot destabilise it. That
-    robustness is why Section 10 defines platform accuracy as
-    100% − WMAPE rather than using MAPE.
-  * SMAPE is undefined only where actual and predicted are both zero, which
-    is treated as perfect agreement (zero error) rather than dropped.
+The percentage metrics need care:
+  - MAPE divides by the actual and is undefined at zero; those observations
+    are excluded rather than producing an infinity that poisons aggregates.
+  - WMAPE is a ratio of sums, so one zero cannot destabilise it — which is
+    why platform accuracy is defined as 100% - WMAPE.
+  - SMAPE is undefined only when both sides are zero, treated as perfect
+    agreement rather than dropped.
 """
 
 from __future__ import annotations
@@ -30,12 +25,10 @@ from forecast_engine.config.evaluation_config import MetricsConfig
 
 @dataclass
 class ForecastMetrics:
-    """The five accuracy metrics for one actual/predicted comparison.
+    """The five metrics for one actual/predicted comparison.
 
-    A metric is None when it could not be computed for this sample — for
-    example MAPE on a window whose actuals are all zero. None is deliberate:
-    it says "not measurable here", which a caller must handle differently
-    from a genuine zero error.
+    None means "not measurable here" (MAPE on all-zero actuals, say), which
+    a caller must handle differently from a genuine zero error.
     """
 
     mape: float | None = None

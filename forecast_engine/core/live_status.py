@@ -1,19 +1,12 @@
-"""Live execution status — the engine's *interim* progress report.
+"""Interim progress, written after every stage transition.
 
-`PipelineContext.summary()` is the run's complete record, but it is only
-ever read once, at the very end (`run_pipeline.py`'s `--summary-out`). A
-caller polling a still-executing run has nothing to read until then, which
-is why status pages used to show every stage as "Pending" right up until
-the moment the whole run finished.
+The run summary is complete but only readable at the very end, so a caller
+polling a live run would otherwise see every stage as Pending until the
+whole thing finished. This writes the current stage trail to a small JSON
+file instead, readable at any time.
 
-`LiveStatusWriter` closes that gap: `PipelineContext.on_stage_change`
-(core/pipeline_context.py) calls it after every stage transition, and it
-writes the current stage trail to a small JSON file a caller can read at
-any time — including mid-stage, which is what lets "Load Dataset" show as
-Running instead of Pending while it is actually running.
-
-Writes are atomic (write to a temp file, then `os.replace`) so a reader
-polling the file mid-write never sees a half-written JSON document.
+Writes are atomic (temp file then replace), so a reader polling mid-write
+never sees half a document.
 """
 
 from __future__ import annotations
@@ -29,10 +22,9 @@ if TYPE_CHECKING:
 
 
 class LiveStatusWriter:
-    """Writes `PipelineContext`'s current stage trail to `path` on every
-    stage transition. Never raises — a broken writer (e.g. a deleted
-    parent directory) must not interrupt the forecasting run it is only
-    reporting on.
+    """Writes the stage trail on every transition.
+
+    Never raises: a broken writer must not interrupt the run it reports on.
     """
 
     def __init__(self, path: str | Path) -> None:

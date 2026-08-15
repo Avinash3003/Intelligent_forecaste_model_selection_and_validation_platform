@@ -1,33 +1,20 @@
-"""Databricks Runner (Section 6.14) — real execution against Azure Databricks.
+"""Runs the forecast engine as a Databricks job.
 
-Implements the same `PipelineRunner` interface `LocalRunner` does, so
-switching between them is `EXECUTION_MODE` changing and nothing else. What
-it does is submit the *existing* bundle-deployed Job — it never reimplements
-any part of the forecasting pipeline, and it never runs engine code in this
-process:
+Same PipelineRunner interface as LocalRunner, so switching is EXECUTION_MODE
+and nothing else. It only submits the already-deployed job — no engine code
+runs in this process:
 
-    submit()
-        -> _upload_data_to_storage()    dataset + config -> UC Volume (ADLS)
-        -> _trigger_databricks_job()    volume paths -> Databricks run id
-    get_status()
-        -> _monitor_job_status()        Databricks run state -> JobStatus
-    get_result()
-        -> _retrieve_pipeline_results() summary.json -> PipelineExecutionResult
+    submit()      stage dataset + config to the UC Volume, start the job
+    get_status()  Databricks run state -> JobStatus
+    get_result()  summary.json -> PipelineExecutionResult
 
-Two deliberate choices worth stating:
-
-* **Staging goes through the existing Unity Catalog external volume**, not a
-  new storage account or a second container. The volume is already backed by
-  the deployment's ADLS `uploads` container, the job already reads POSIX
-  paths from it, and the workspace credential the API already holds is
-  enough — so no additional secret, and no duplicated storage, is introduced.
-
-* **Every run parameter travels in one JSON config file**, not as individual
-  job parameters. A `python_wheel_task`'s argument list is static in the
-  bundle, so an unset parameter would reach the engine's argparse as an
-  empty string — `--horizon ""` is a hard crash, `--models ""` silently
-  trains a model named "". A config file has no such failure mode and is
-  also the only way to express multi-valued key/feature columns.
+Two choices worth knowing:
+  - Staging reuses the existing UC volume over ADLS, so no new storage or
+    secret is introduced.
+  - Every run parameter travels in one JSON config file. A wheel task's
+    argument list is fixed in the bundle, so an unset parameter would arrive
+    as an empty string ("--horizon ''" crashes; "--models ''" trains a model
+    named ""). A config file also carries multi-valued columns.
 """
 
 from __future__ import annotations
@@ -86,12 +73,11 @@ _LIFE_CYCLE_MAP: dict[str, JobStatus] = {
 
 
 def map_run_state(life_cycle_state: str | None, result_state: str | None) -> JobStatus:
-    """Translate a Databricks run state pair into this platform's `JobStatus`.
+    """Map a Databricks run state to JobStatus.
 
-    A terminal run is judged by `result_state` — `TERMINATED` alone says
-    only that the run stopped, not whether it succeeded. Anything
-    unrecognised is reported as RUNNING rather than COMPLETED: claiming
-    success for a state we do not understand is the one wrong answer.
+    Terminal runs are judged by result_state, since TERMINATED alone only
+    means "stopped". Unknown states report RUNNING — claiming success for a
+    state we do not understand is the one wrong answer.
     """
     life_cycle = (life_cycle_state or "").upper()
     result = (result_state or "").upper()
@@ -103,12 +89,9 @@ def map_run_state(life_cycle_state: str | None, result_state: str | None) -> Job
 
 @dataclass
 class _DatabricksJobRecord:
-    """In-memory record of one submission.
+    """One submission, holding only what Databricks and MLflow cannot supply.
 
-    Holds only what cannot be re-read from Databricks or MLflow. Like
-    `LocalRunner`'s registry this does not survive a backend restart;
-    finished runs are recoverable from MLflow, which is what
-    `_restore_result` uses.
+    Does not survive a restart; finished runs come back from MLflow.
     """
 
     run_id: str
@@ -187,12 +170,8 @@ class DatabricksRunner(PipelineRunner):
 
     @property
     def _workspace(self) -> Any:
-        """The Databricks SDK client, built on first use.
-
-        Constructed lazily so importing this module — which happens on
-        every backend start, whatever the execution mode — never requires
-        Databricks credentials to be present.
-        """
+        """The SDK client, built lazily so importing this module never
+        requires Databricks credentials to be configured."""
         if self._client is not None:
             return self._client
 
@@ -329,9 +308,8 @@ class DatabricksRunner(PipelineRunner):
     def _restore_result(self, run_id: str) -> PipelineExecutionResult:
         """Rebuild a finished run from MLflow, exactly as LocalRunner does.
 
-        The Databricks job logs through the same engine code, so its
-        consolidated summary artifact is byte-for-byte the same shape a
-        local run produces and goes through the identical mapper.
+        The job logs through the same engine code, so the summary is the
+        same shape and uses the same mapper.
         """
         listing = self._history.get_listing(run_id)
         if listing is None:
@@ -428,20 +406,11 @@ class DatabricksRunner(PipelineRunner):
         return CancellationOutcome(cancelled=True, cleanup_errors=cleanup_errors)
 
     def _cleanup_run_storage(self, run_id: str) -> list[str]:
-        """Delete every UC Volume path this run could have written, strictly
-        scoped to `run_id` via the same `runs/{run_id}` structure every
-        writer already uses (see `_run_root`/`_curated_root`/etc.). Safe to
-        call on a run that wrote nothing yet (PENDING) or that was already
-        cleaned up (idempotent) — a missing path is treated as already
-        clean, not an error.
+        """Delete every volume path this run wrote, scoped to runs/{run_id}.
 
-        Never touches the raw upload the dataset was staged from
-        (`request.dataset_path`, keyed by `file_id` on the API host) — only
-        the run-scoped *copy* this run uploaded to its own `runs/{run_id}`
-        directory, which nothing else can be depending on.
-
-        Returns a list of human-readable failures — empty means every
-        location was successfully emptied (or was already empty).
+        Idempotent — a missing path counts as already clean. Only the
+        run-scoped copy is removed, never the original upload.
+        Returns the locations that could not be removed; empty means all clean.
         """
         errors: list[str] = []
         for label, path in (
@@ -465,15 +434,11 @@ class DatabricksRunner(PipelineRunner):
         return errors
 
     def _delete_volume_directory(self, path: str) -> None:
-        """Recursively empty and remove one UC Volume directory.
+        """Recursively empty and remove one volume directory.
 
-        The Files API only deletes an empty directory in one call — see
-        `FilesAPI.delete_directory`'s own docstring — so this walks the
-        tree depth-first, deleting every file, then every now-empty
-        subdirectory, then `path` itself. A directory that does not exist
-        at all is treated as already clean, not an error, which is what
-        makes a repeated cancel (or cleanup racing a job that never wrote
-        anything here) safe.
+        The Files API only deletes empty directories, so this walks
+        depth-first. A missing directory counts as already clean, which is
+        what makes a repeated cancel safe.
         """
         try:
             entries = list(self._workspace.files.list_directory_contents(path))
@@ -500,15 +465,10 @@ class DatabricksRunner(PipelineRunner):
     # ------------------------------------------------------------------
 
     def _upload_data_to_storage(self, run_id: str, request: PipelineExecutionRequest) -> str:
-        """Stage the dataset and its run configuration in the UC Volume.
+        """Stage the dataset and run config in the volume, under one per-run
+        directory so cleanup is a single delete.
 
-        Both land under one per-run directory, so a run's inputs and
-        outputs are one path prefix — which is what makes retention or
-        cleanup a single delete rather than a hunt across locations.
-
-        Returns:
-            The POSIX volume path of the staged dataset, which is what the
-            Databricks job passes to `--dataset`.
+        Returns the staged dataset's volume path, which the job passes to --dataset.
         """
         source = Path(request.dataset_path)
         if not source.is_file():
@@ -541,13 +501,8 @@ class DatabricksRunner(PipelineRunner):
         return dataset_uri
 
     def _job_configuration(self, run_id: str, request: PipelineExecutionRequest) -> dict[str, Any]:
-        """The single JSON payload the job hands the engine via `--config`.
-
-        Carries the column mapping the engine has always accepted, plus the
-        per-run keys it now also reads from this file (`run_id`, `models`,
-        `fallback_model`, `horizon`, `dataset_name`). See this module's
-        docstring for why these travel here rather than as job parameters.
-        """
+        """The JSON the job hands the engine via --config: column mapping plus
+        the per-run keys (run_id, models, fallback_model, horizon, dataset_name)."""
         payload: dict[str, Any] = dict(request.forecast_configuration)
         payload["run_id"] = run_id
         if request.dataset_name:
@@ -582,36 +537,19 @@ class DatabricksRunner(PipelineRunner):
         return payload
 
     def _forecasts_root(self) -> str:
-        """The forecasts volume's run directory — *without* the run id.
-
-        Like the curated writer, the forecast export writer appends the
-        run id itself into the file name it constructs.
-        """
+        """Forecasts volume run directory, without the run id — the writer adds it."""
         return f"{self._settings.databricks_forecasts_volumes_root.rstrip('/')}/runs"
 
     def _artifacts_root(self) -> str:
-        """The artifacts volume's run directory — *without* the run id.
-
-        Like the models writer, the artifacts mirror writer appends the
-        run id itself, which is also what keeps one run's mirrored
-        artifacts from overwriting another's.
-        """
+        """Artifacts volume run directory, without the run id — the writer adds it."""
         return f"{self._settings.databricks_artifacts_volumes_root.rstrip('/')}/runs"
 
     def _curated_root(self, run_id: str) -> str:
-        """The curated volume's run directory — *without* the run id.
-
-        The engine's curated writer appends the run id itself, so adding it
-        here too would nest it twice.
-        """
+        """Curated volume run directory, without the run id — the writer adds it."""
         return f"{self._settings.databricks_curated_volumes_root.rstrip('/')}/runs"
 
     def _models_root(self) -> str:
-        """The models volume's run directory — *without* the run id.
-
-        Like the curated writer, the model writer appends the run id itself,
-        which is also what keeps one run from overwriting another's models.
-        """
+        """Models volume run directory, without the run id — the writer adds it."""
         return f"{self._settings.databricks_models_volumes_root.rstrip('/')}/runs"
 
     def _trigger_databricks_job(
@@ -637,11 +575,10 @@ class DatabricksRunner(PipelineRunner):
             ) from exc
 
     def _resolve_job_id(self) -> int:
-        """The job id to run, by configured id or by name.
+        """The job id, from configuration or resolved by name and cached.
 
-        Resolving by name is the default because redeploying the asset
-        bundle mints a new job id — pinning one in configuration would
-        break the API on every deployment. Cached after the first lookup.
+        Name lookup is the default because redeploying the bundle mints a
+        new id, which a pinned value would not survive.
         """
         if self._job_id is not None:
             return self._job_id
@@ -662,12 +599,7 @@ class DatabricksRunner(PipelineRunner):
         return self._job_id
 
     def _monitor_job_status(self, databricks_run_id: int) -> tuple[JobStatus, str | None, float | None]:
-        """Poll one Databricks run.
-
-        Returns:
-            Its `JobStatus`, a user-safe failure message (None unless it
-            failed), and the run's duration in seconds once known.
-        """
+        """Poll one run: returns its JobStatus, a safe error message, and duration."""
         try:
             run = self._workspace.jobs.get_run(run_id=databricks_run_id)
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
@@ -693,11 +625,10 @@ class DatabricksRunner(PipelineRunner):
         return status, error, duration
 
     def _retrieve_pipeline_results(self, record: _DatabricksJobRecord) -> dict[str, Any] | None:
-        """Read the completed run's summary.json back from the UC Volume.
+        """Read the finished run's summary.json from the volume.
 
-        Falls back to MLflow when the file cannot be read: the engine logs
-        the identical summary as a run artifact, so a volume-permission
-        problem costs latency rather than the whole result.
+        Falls back to MLflow, which holds the identical summary, so a volume
+        permission problem costs latency rather than the result.
         """
         payload = self._read_volume_json(record.summary_uri)
         if payload is not None:
@@ -705,12 +636,10 @@ class DatabricksRunner(PipelineRunner):
         return self._history.get_summary(record.run_id)
 
     def read_volume_text(self, uri: str) -> str | None:
-        """A UC Volume file's contents as text, or None if unreadable.
+        """A volume file as text, or None if unreadable.
 
-        Public because it is the only way a caller outside this package
-        (the Results page's dataset preview) can reach a file the *job*
-        wrote: a UC Volume path is meaningless on the API host's own
-        filesystem, so it has to be fetched through this workspace client.
+        Public because a volume path means nothing on the API host, so the
+        dataset preview must fetch it through this client.
         """
         try:
             response = self._workspace.files.download(uri)
@@ -744,11 +673,10 @@ class DatabricksRunner(PipelineRunner):
         return f"{self._settings.databricks_volumes_root.rstrip('/')}/runs/{run_id}"
 
     def _refresh(self, record: _DatabricksJobRecord) -> None:
-        """Bring one record up to date with the workspace.
+        """Refresh one record from the workspace.
 
-        Called from every read path rather than from a polling thread: a
-        status is only interesting when someone asks for it, and this way
-        a backend with a hundred historical runs does no background work.
+        Called on read rather than from a polling thread, so a backend with
+        many historical runs does no background work.
         """
         if record.status not in (JobStatus.PENDING, JobStatus.RUNNING):
             return
@@ -821,11 +749,7 @@ def _is_not_found(exc: Exception) -> bool:
 
 
 def _enum_value(value: Any) -> str | None:
-    """The string form of an SDK enum, or of a plain string.
-
-    The SDK returns typed enums, but a mocked or future client may return
-    raw strings; both must map identically.
-    """
+    """The string form of an SDK enum or a plain string — both must map alike."""
     if value is None:
         return None
     return str(getattr(value, "value", value))

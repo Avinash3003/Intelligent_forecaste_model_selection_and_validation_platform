@@ -1,24 +1,17 @@
-"""Dynamic Threshold Estimation (Section 6.8).
+"""Answers "how large is this statistic when nothing has actually drifted?"
 
-Answers one question for every forecasting group, independently: "how large
-a drift statistic is normal even when nothing has actually drifted?" A null
-distribution of the statistic is built from the group's own history — by
-comparing historical sub-segments against each other, never against another
-group's data — and the configured percentile of that null distribution
-becomes the threshold.
+Per group, independently. A null distribution is built from the group's own
+history — comparing its sub-segments against each other, never another
+group's data — and a configured percentile of it becomes the threshold.
 
-Two registries drive the three supported methods:
+Two registries drive the three methods:
+  - _NULL_BUILDERS: how the null distribution is generated (deterministic
+    historical splits for PERCENTILE, bootstrap resamples for the others).
+  - _READERS: how a threshold is read off it (a raw percentile, or one from
+    a Gaussian-KDE-smoothed version).
 
-  * `_NULL_BUILDERS` — how the null distribution of statistic values is
-    generated (a handful of deterministic historical splits for PERCENTILE;
-    many bootstrap resamples for BOOTSTRAP and KERNEL_DENSITY).
-  * `_READERS` — how a threshold value is read off that null distribution
-    (a raw percentile, or a percentile of a Gaussian-KDE-smoothed version
-    of it).
-
-Adding a later method (Beta distribution fitting, Bayesian updating) is one
-new enum value plus one entry in each registry — `estimate()` itself never
-changes, which is the "without changing business logic" requirement.
+Adding a method is one enum value plus one entry in each registry;
+estimate() itself never changes.
 """
 
 from __future__ import annotations

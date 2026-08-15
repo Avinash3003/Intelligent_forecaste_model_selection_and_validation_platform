@@ -1,12 +1,9 @@
-"""Prophet adapter.
+"""Prophet, which wants a ds/y frame and regressors added before fitting.
 
-Prophet expects a two-column frame (`ds` timestamps, `y` values) and takes
-exogenous regressors through `add_regressor` before fitting. Both are
-handled here so no other stage needs to know Prophet's conventions.
+Both are handled here so no other stage needs to know Prophet's conventions.
 
-Parameters are configuration-driven: Prophet exposes no cheap in-sample
-selection criterion, so the registry's declared values are used directly
-rather than searched.
+Parameters come straight from the registry: Prophet has no cheap in-sample
+selection criterion, so nothing is searched.
 """
 
 from __future__ import annotations

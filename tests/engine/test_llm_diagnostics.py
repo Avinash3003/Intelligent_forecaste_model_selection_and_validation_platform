@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import pytest
 
 from forecast_engine.config.llm_config import LLMConfig
 from forecast_engine.s11_llm.azure_openai_service import LLMCompletionResult

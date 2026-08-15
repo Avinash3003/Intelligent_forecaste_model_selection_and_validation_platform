@@ -1,11 +1,8 @@
-"""DCS Runner — the Databricks Container Services variant of `DatabricksRunner`.
+"""The Container Services variant of DatabricksRunner.
 
-Submit/poll/retrieve, staging, error translation and result mapping are all
-identical to Serverless execution — both are Jobs API runs against the same
-UC Volume. The only thing that differs is *which deployed Job* is targeted
-(the ACR/Docker job vs. the Serverless one) and which `ExecutionBackend` is
-reported back. Both are constructor arguments `DatabricksRunner` already
-takes, so this subclass is the whole difference.
+Everything (staging, submit, poll, result mapping) is identical to Serverless
+execution — only the target job and the reported backend differ, and both are
+constructor arguments, so this subclass is the whole difference.
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ from app.orchestration.schemas import ExecutionBackend
 
 
 class DcsRunner(DatabricksRunner):
-    """Executes the pipeline as a run of the existing DCS (ACR/Docker) Job."""
+    """Runs the pipeline as a Databricks Container Services job."""
 
     def __init__(
         self,

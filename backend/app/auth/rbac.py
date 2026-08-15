@@ -1,10 +1,7 @@
-"""Role -> permission mapping.
+"""Role -> permission mapping: the whole authorization model.
 
-The whole authorization model is this one table. Routes depend on a
-`Permission`; this decides which roles carry it. A caller holding several
-roles gets the union, so adding a role can only ever widen access — never
-silently narrow it, which is the failure mode of a "highest role wins"
-scheme.
+Several roles union rather than "highest wins", so adding a role can only
+widen access, never silently narrow it.
 """
 
 from __future__ import annotations
@@ -42,12 +39,10 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
 
 
 def permissions_for(roles: list[Role]) -> list[Permission]:
-    """Every permission the given roles grant between them, in a stable order.
+    """Every permission the given roles grant, in a stable order.
 
-    An empty role list yields no permissions at all: an authenticated user
-    whom no Entra app role was assigned is authenticated but not
-    authorized, and answering that with viewer access would hand the
-    entire result history to anyone in the tenant.
+    No roles means no permissions: an authenticated user with no app role is
+    authenticated but not authorized.
     """
     granted: set[Permission] = set()
     for role in roles:

@@ -1,12 +1,10 @@
-"""Data Quality Report — the structured output of the assessment stage.
+"""The assessment stage's output shape.
 
-These models are pure data: they describe what was found in a dataset and
-carry no logic. They are built to be rendered directly by the frontend, so
-every field serializes to plain JSON types (no numpy scalars, no
-DataFrames) and every `to_dict()` is safe to hand to `json.dumps`.
+Pure data, no logic. Every field is a plain JSON type (no numpy scalars, no
+DataFrames) so to_dict() is always safe to hand to json.dumps.
 
-Kept separate from the assessor so the report shape — the contract the UI
-and later stages depend on — can be read in one place.
+Kept separate from the assessor so the contract the UI depends on can be
+read in one place.
 """
 
 from __future__ import annotations
@@ -17,12 +15,8 @@ from typing import Any
 
 
 class SuitabilityStatus(str, Enum):
-    """Overall verdict on whether a dataset can be forecast.
-
-    Mirrors the backend Validation Engine's vocabulary so the same three
-    states are used end to end, from metadata validation through to the
-    curated dataset.
-    """
+    """Whether a dataset can be forecast, using the same three states the
+    backend's validation engine reports."""
 
     READY = "Ready"
     WARNINGS = "Warnings"
@@ -52,26 +46,12 @@ class ColumnQuality:
 
 @dataclass
 class QualityReport:
-    """Complete assessment of a raw dataset, produced before any cleaning.
+    """Everything measured about the raw dataset, before any cleaning.
 
-    Attributes:
-        total_rows / total_columns: Shape as uploaded.
-        duplicate_rows: Fully identical rows.
-        duplicate_timestamps: Rows sharing a business key *and* a timestamp —
-            a time-series specific defect that a plain duplicate check misses,
-            since the rows may differ in their target value.
-        columns: Per-column facts for every column in the dataset.
-        invalid_date_values / invalid_target_values: Values present but
-            unconvertible to their required type.
-        constant_target: Whether the target never varies (nothing to learn).
-        distinct_business_keys: Number of forecasting groups implied by the
-            selected key columns; 1 in single-series mode.
-        frequency: Detected sampling grain, reported as found.
-        date_range_start / date_range_end: Observed timeline bounds.
-        total_observations: Rows carrying a usable target value.
-        missing_timestamps: Gaps against the expected timeline, or None when
-            the grain is irregular or the scan was skipped.
-        suitability / suitability_reasons: Overall verdict and its causes.
+    duplicate_timestamps counts rows sharing a key and a timestamp — a
+    time-series defect a plain duplicate check misses, since the target
+    values may differ. invalid_* are values present but unconvertible.
+    missing_timestamps is None when the grain is irregular or unscanned.
     """
 
     total_rows: int = 0
@@ -125,11 +105,10 @@ class QualityReport:
 
 @dataclass
 class PreprocessingSummary:
-    """What preprocessing actually did to produce the curated dataset.
+    """What preprocessing did, as actions taken rather than data described.
 
-    Deliberately reports *actions taken* rather than data characteristics —
-    the QualityReport already covers the latter. Together they let a user
-    reconcile the raw row count with the curated one, line by line.
+    Together with QualityReport this reconciles the raw row count with the
+    curated one, line by line.
     """
 
     rows_read: int = 0

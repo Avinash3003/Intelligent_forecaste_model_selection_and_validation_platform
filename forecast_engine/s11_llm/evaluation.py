@@ -1,21 +1,12 @@
-"""LLM evaluation harness (Section 13.3, "Evaluation").
+"""Scores generated insights against known-correct facts.
 
-Section 13.3 asks for a held-out regression set of key/model/rejection-
-reason combinations, run whenever the prompt template or underlying model
-changes, tracking groundedness, hallucination/unsupported-claim rate, and
-narrative length/readability — "not simply whether an explanation was
-generated successfully."
+Tracks groundedness, unsupported claims and readability — not simply whether
+an explanation was produced.
 
-This harness is generation-source-agnostic: `run_evaluation` takes a
-`generate` callable and scores whatever `InsightPayload` it returns against
-each case's known-correct facts. Pointed at `template_fallback.
-build_template_insight`, it runs with no network access and no credentials
-— a real, CI-safe regression suite that catches a grounding-checker
-regression or a schema change today. Pointed at a live
-`LLMInsightEngine`-style call, the exact same harness becomes the "did this
-prompt/model change hurt quality" suite Section 13.3 describes; that path
-just is not exercised in this environment, which has no Azure OpenAI
-credentials to call.
+Generation-source-agnostic: run_evaluation takes a generate callable and
+scores whatever it returns. Pointed at the template fallback it needs no
+network or credentials, so it runs in CI; pointed at a live LLM call the
+same harness becomes the "did this prompt change hurt quality" suite.
 """
 
 from __future__ import annotations

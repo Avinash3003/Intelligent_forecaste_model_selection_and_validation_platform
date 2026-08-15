@@ -1,24 +1,17 @@
-"""Hyperparameter tuning (Section 6.3.2).
+"""Selects parameters for the model families that benefit from a search.
 
-Selects parameters for models whose family benefits from a search — today
-the gradient-boosted trees. Statistical families opt out via
-`supports_tuning()` and select internally by their own criterion (ARIMA by
-AIC), which is both cheaper and more appropriate than a cross-validated
-search.
+Today that is the gradient-boosted trees. Statistical families opt out and
+select by their own criterion (ARIMA by AIC), which is cheaper and more
+appropriate than a cross-validated search.
 
-Two boundaries are worth being explicit about:
+Strategy is configuration, not code: GRID and RANDOM map to scikit-learn's
+searches, and the other two fall back to RANDOM rather than silently
+skipping tuning.
 
-  * Search strategy is configuration, not code. GRID and RANDOM map to
-    scikit-learn's searches; BAYESIAN and SUCCESSIVE_HALVING are declared
-    for backends a later phase adds and fall back to RANDOM today rather
-    than silently skipping tuning.
-  * Scoring uses chronological splits (TimeSeriesSplit) so a candidate is
-    never scored on data preceding its own training window. This is
-    parameter selection *inside* model fitting — it is not the platform's
-    Backtesting stage (Section 6.4), which evaluates finished models on
-    rolling windows and is deliberately not implemented in this phase.
-    When Backtesting lands, its harness replaces the splitter here so the
-    search and the evaluation share one definition of a window.
+Scoring uses chronological splits, so a candidate is never scored on data
+preceding its own training window. This is parameter selection inside model
+fitting — distinct from the Backtesting stage, which evaluates finished
+models.
 """
 
 from __future__ import annotations

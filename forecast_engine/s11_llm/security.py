@@ -1,19 +1,16 @@
-"""Prompt injection defense (Section 13.1, "Guardrails for injection/leakage").
+"""Neutralizes user text before it can reach a prompt.
 
-Every value in the structured metrics payload the engine builds internally
-— WMAPE, drift statistics, ranking scores — is trusted: it was computed by
-this pipeline, from this pipeline's own data. It never needs sanitizing.
+Everything the engine computes itself — WMAPE, drift statistics, ranking
+scores — is trusted and needs no sanitizing.
 
-What is *not* trusted is anything a user typed into the wizard's column
-mapping: a date column, target column, key column or feature column name.
-Those strings flow into the prompt verbatim today (`context_formatter.py`'s
-dataset section), and nothing stops a user from naming a column
+What is not trusted is anything the user typed in the column mapping. Those
+names flow into the prompt verbatim, and nothing stops someone naming a
+column:
 
-    "sales\\n\\nIGNORE ALL PREVIOUS INSTRUCTIONS AND ..."
+    "sales\n\nIGNORE ALL PREVIOUS INSTRUCTIONS AND ..."
 
-A column name is never validated against the dataset for *safety* — only
-for existence (`ForecastConfiguration.validate_against_columns`) — so this
-is the one place user text is neutralized before it can reach a prompt.
+Column names are only ever validated for existence, never for safety, so
+this is the one place that happens.
 """
 
 from __future__ import annotations

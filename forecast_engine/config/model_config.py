@@ -1,16 +1,12 @@
-"""Model registry configuration (Section 6.4, "pluggable model registry").
+"""Every candidate model, declared as data.
 
-Every candidate model is declared here as *data*: which library backs it,
-its default parameters, its hyperparameter search space and strategy, and
-its minimum data requirements. Nothing about a model's behaviour is
-hard-coded in the training engine, so tuning a parameter or onboarding a
-new model family is a configuration change, never a code change
-(Section 8.4, "Modularity").
+Which library backs it, its defaults, its search space and strategy, and its
+minimum history. Nothing about a model's behaviour is hard-coded in the
+training engine, so onboarding a new family is a config change.
 
-`default_params` are the values a model trains with when no search runs;
-`search_space` describes what a search may vary. Keeping the two separate
-means disabling tuning still leaves every model with a complete, valid
-configuration.
+default_params are what a model trains with when no search runs;
+search_space is what a search may vary. Keeping them separate means
+disabling tuning still leaves every model fully configured.
 """
 
 from __future__ import annotations
@@ -21,21 +17,14 @@ from typing import Any
 
 
 class SearchStrategy(str, Enum):
-    """Hyperparameter search strategies (Section 6.3.2).
+    """How to search a model's parameter space.
 
-    Chosen per model family via config rather than hard-coded, because the
-    right search depends on the size and correlation structure of each
-    model's parameter space:
+    GRID for small enumerable spaces (ARIMA orders), RANDOM for larger ones
+    where exhaustive search is wasteful (tree models), NONE to use the
+    declared defaults as-is.
 
-      * GRID      — small, enumerable spaces (ARIMA order terms).
-      * RANDOM    — larger spaces where exhaustive search is wasteful
-                    (gradient-boosted trees).
-      * NONE      — configuration-driven selection only; the declared
-                    defaults are used as-is.
-
-    BAYESIAN and SUCCESSIVE_HALVING are declared for the search backends a
-    later phase adds; the tuner falls back to RANDOM for them today rather
-    than silently skipping tuning.
+    BAYESIAN and SUCCESSIVE_HALVING are declared but fall back to RANDOM
+    today, rather than silently skipping tuning.
     """
 
     GRID = "grid"
@@ -47,22 +36,13 @@ class SearchStrategy(str, Enum):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Declaration of one candidate forecasting model.
+    """One candidate model's declaration.
 
-    Attributes:
-        name: Registry key, matched against the user's model selection.
-        adapter: Import path of the class implementing this model, resolved
-            lazily by the registry so an uninstalled library only affects
-            the model that needs it.
-        enabled: Whether the model participates at all in this deployment.
-        default_params: Parameters used when no search runs.
-        search_space: Parameter grid a search may explore. Intentionally an
-            untyped mapping — each family describes its own parameters and
-            the engine must not need to understand them to pass them on.
-        search_strategy / trial_budget: How hard to search.
-        supports_features: Whether exogenous regressors can be passed in.
-        min_observations: Fewest observations the model can train on; a
-            group below this is skipped for this model, not failed.
+    adapter is resolved lazily, so an uninstalled library only affects the
+    model that needs it. search_space is deliberately untyped — each family
+    describes its own parameters and the engine just passes them on.
+    min_observations is the least history the model can train on; a shorter
+    group is skipped for this model, not failed.
     """
 
     name: str

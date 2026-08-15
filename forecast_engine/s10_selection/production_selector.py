@@ -1,15 +1,12 @@
-"""Final Production Model Selection (Section 6.9).
+"""Picks the model that ships, per forecast group.
 
-Walks each forecast group's ranked candidates in order — Candidate 1,
-Candidate 2, ... — running Drift Validation on each until one passes or the
-list is exhausted. When every candidate fails (including a group with zero
-surviving candidates at all, which is "every candidate fails" in the
-degenerate case), the configured fallback model is trained fresh and used,
-clearly flagged as such.
+Walks each group's ranked candidates best-first, running drift validation on
+each until one passes or the list runs out. When every candidate fails —
+including a group with no survivors at all — the fallback model is trained
+fresh and used, clearly flagged as such.
 
-Every forecasting group gets exactly one outcome here, even a group Phase
-7A eliminated every model for — Section 6.9's fallback path exists
-specifically for that group.
+Every group gets exactly one outcome, which is what the fallback path exists
+for.
 """
 
 from __future__ import annotations
@@ -57,12 +54,10 @@ class ProductionModelSelector:
         evaluation_report: EvaluationReport,
         series_collection: list[ForecastSeries],
     ) -> ProductionSelectionReport:
-        """Choose one production model for every forecasting group.
+        """One production model per group.
 
-        Groups are independent — a group whose candidates all fail does not
-        affect any other, and every group returns exactly one result even when
-        that result is "no model available". See `_select_one` for the
-        per-group sequence.
+        Groups are independent, and each returns exactly one result even when
+        that result is "no model available".
         """
         # Select the final production model for every forecasting group
         started = time.perf_counter()

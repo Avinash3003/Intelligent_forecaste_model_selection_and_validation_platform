@@ -50,11 +50,8 @@ class TuningInfo(BaseModel):
 
 
 class HyperparameterRecord(BaseModel):
-    """One (key, model) pair's final hyperparameters, tied to the same
-    evaluation outcome shown in `Child runs by key` — every value here is
-    read from the training/evaluation/ranking reports already produced by
-    the pipeline, never invented for display.
-    """
+    """One (key, model) pair's hyperparameters and its evaluation outcome, read
+    from the pipeline's own reports and never invented for display."""
 
     model_config = ConfigDict(protected_namespaces=())
 

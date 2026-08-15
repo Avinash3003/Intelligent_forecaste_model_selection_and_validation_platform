@@ -1,14 +1,10 @@
-"""Frequency Detector — infers a dataset's sampling grain.
+"""Infers the sampling grain from the date column's own spacing.
 
-Reads only the user-selected date column and reports which grain its
-timestamps imply. This is detection, never conversion: the engine records
-the frequency and preserves the data at its original grain. Normalizing to
-a common grain is a separate ingestion concern (Section 6.2) and is
-deliberately out of scope here, so that no stage silently changes the
-values a model will later be judged on.
+Detection only: the grain is recorded and the data left as-is, so no stage
+silently changes values a model will later be judged on.
 
-Frequency bands come from configuration, so a deployment can retune what
-counts as "Weekly" without editing this logic.
+The bands come from configuration, so retuning what counts as "Weekly"
+needs no code change.
 """
 
 from __future__ import annotations

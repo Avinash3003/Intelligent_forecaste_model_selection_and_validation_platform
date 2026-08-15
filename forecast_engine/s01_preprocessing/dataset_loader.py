@@ -1,14 +1,10 @@
-"""Dataset Loader — turns a file on disk into a pandas DataFrame.
+"""Turns a file into a DataFrame — the only place that knows file formats.
 
-Deliberately the only component in the engine that knows about file
-formats and the filesystem. It carries no business logic: it does not know
-what a date, target or business key is, which keeps format concerns from
-leaking into the forecasting stages and makes swapping local disk for ADLS
-/ Blob Storage a change to this file alone.
+Carries no business logic: it does not know what a date or target is, which
+keeps format concerns out of the forecasting stages.
 
-Mirrors the backend's own loader (`backend/app/services/dataset_loader.py`)
-by design — the engine must stay independently deployable, so it does not
-import from the FastAPI application.
+Deliberately mirrors the backend's own loader rather than importing it — the
+engine stays independently deployable.
 """
 
 from __future__ import annotations

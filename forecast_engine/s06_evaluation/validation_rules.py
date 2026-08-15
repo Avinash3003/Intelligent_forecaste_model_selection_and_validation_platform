@@ -1,19 +1,13 @@
-"""Forward-forecast elimination rules (Sections 6.5.1–6.5.3).
+"""The rules a forward forecast must pass.
 
-Each rule is an independent object that answers one question about a
-forecast and returns a structured outcome. Independence is the design
-requirement: rules can be enabled or disabled individually, a new signal is
-added by registering a class, and one rule failing says nothing about the
-others — a model is eliminated if *any* configured rule fails.
+Each rule is independent: they can be enabled individually, a new signal is
+added by registering a class, and a model is eliminated if any one fails.
 
-Every threshold is relative. Section 6.5.3 requires elimination rules to be
-"computed from the key's own history rather than fixed global constants",
-so each rule compares the forecast against the same key's historical
-variance, percentiles, IQR or trend. That is what allows the identical rule
-set to judge a series of unit counts and one of currency amounts.
+Every threshold is relative — each rule compares the forecast against the
+same key's own variance, percentiles, IQR or trend, which is what lets one
+rule set judge unit counts and currency amounts alike.
 
-No narrative text is produced here — only a RejectionReason code and the
-measurements behind it.
+No narrative text here, only a reason code and the measurements behind it.
 """
 
 from __future__ import annotations
@@ -68,12 +62,8 @@ class ValidationRule(ABC):
 
 
 class NonFiniteForecastRule(ValidationRule):
-    """Rejects forecasts containing NaN or infinite values.
-
-    Not one of the doc's named signals but a precondition for all of them:
-    every other rule's arithmetic is meaningless on non-finite input, and
-    such a forecast could never be published.
-    """
+    """Rejects NaN or infinite forecasts — a precondition for every other
+    rule, whose arithmetic is meaningless on non-finite input."""
 
     rule_id = "non_finite_forecast"
     rule_name = "Finite Forecast Values"
@@ -171,9 +161,8 @@ class PercentileSpikeRule(ValidationRule):
 class IqrBoundsRule(ValidationRule):
     """Forecast escapes an IQR-based bound on history.
 
-    A robust alternative to the percentile band: with a heavy-tailed
-    history, quartiles describe the bulk of the distribution better than
-    extreme percentiles do.
+    More robust than the percentile band on heavy-tailed history, where
+    quartiles describe the bulk of the distribution better.
     """
 
     rule_id = "iqr_bounds"
@@ -369,11 +358,10 @@ class ExcessiveSmoothingRule(ValidationRule):
 
 
 class MissingSeasonalityRule(ValidationRule):
-    """Seasonality present in history has vanished from the forecast.
+    """Seasonality in the history has vanished from the forecast.
 
-    Only applied when the history actually is seasonal, measured by
-    autocorrelation at the seasonal lag — demanding seasonality of a
-    non-seasonal series would reject correct forecasts.
+    Applied only when the history really is seasonal, measured by
+    autocorrelation at the seasonal lag.
     """
 
     rule_id = "missing_seasonality"

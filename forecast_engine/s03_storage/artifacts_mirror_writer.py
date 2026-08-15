@@ -1,13 +1,9 @@
-"""Artifacts mirror — a blob-accessible copy of this run's business
-insights and LLM trace, alongside MLflow's own copy.
+"""A blob-accessible copy of the run's insights and LLM trace.
 
-MLflow remains the authoritative record (Section 6.13) — this writer reads
-the same already-serialized data `s12_tracking/artifact_logger.py` logs to
-MLflow and writes an identical copy here, purely so the content is
-reachable by direct blob access without going through the Databricks
-MLflow UI. Nothing is recomputed, re-rendered, or duplicated in a way that
-could disagree with MLflow's copy: both read the same `PipelineResult`
-fields, and only the destination differs.
+MLflow stays authoritative; this writes the same already-serialized data to
+a second location so it is reachable without the MLflow UI. Both read the
+same result fields, so the copies cannot disagree — only the destination
+differs.
 """
 
 from __future__ import annotations
@@ -27,12 +23,8 @@ class ArtifactsMirrorWriter:
         self._config = config or ArtifactsMirrorConfig()
 
     def write(self, business_insights: dict[str, Any], llm_trace: dict[str, Any], run_id: str) -> dict[str, Any]:
-        """Persist the two artifacts already produced for this run.
-
-        Never raises: a run's insights are already complete and correct
-        by the time this runs, so a mirroring failure is reported on its
-        own record, never allowed to fail the run.
-        """
+        """Write both artifacts. Never raises — a mirroring failure is recorded,
+        never allowed to fail an otherwise complete run."""
         if not self._config.enabled:
             return {"enabled": False, "persisted": []}
 

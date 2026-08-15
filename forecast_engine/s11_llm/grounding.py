@@ -1,20 +1,14 @@
-"""Grounding / faithfulness check (Section 13.1, "Automated
-grounding/faithfulness check").
+"""Checks that the model only cited numbers the run actually produced.
 
-Section 13.1 explicitly gives the option of "a rule-based check" instead of
-a second, cheaper LLM call, and Objective 1's brief for this phase is
-direct: don't introduce an unnecessarily expensive second call if a
-deterministic check can do the job. It can — the claims worth checking are
-numbers, and every number the model is allowed to cite already exists,
-verbatim, in the structured grounding facts this module is handed. That
-makes grounding a string/number comparison, not a judgement call, so a
-second model call would add latency and cost to verify something a regex
-already settles.
+A rule-based check rather than a second LLM call: the claims worth checking
+are numbers, and every number the model may cite already exists verbatim in
+the structured facts passed in. That makes this a comparison, not a
+judgement, so a second call would add latency and cost to verify what a
+regex already settles.
 
-What is checked: every number written in `concise_summary` (percentages,
-decimals, plain integers) must match one of the numeric facts the group's
-own metrics actually contain, within a small tolerance for rounding
-("a WMAPE of 8.2%" citing 8.23% is a rounding, not a fabrication).
+Every number in the summary must match one of the group's real metrics,
+within a small rounding tolerance — citing 8.2% for 8.23% is rounding, not
+fabrication.
 """
 
 from __future__ import annotations

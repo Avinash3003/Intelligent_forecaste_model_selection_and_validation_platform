@@ -1,18 +1,14 @@
-"""The consolidated run-record artifact — the contract between the engine
-and any consumer that needs to rebuild a past run.
+"""Logs the whole run record as one artifact.
 
-`PipelineContext.summary()` is already the complete, plain-JSON record of
-one execution, and the backend's `result_mapper` already knows how to turn
-it into the standardized result envelope. Logging exactly that object, as
-one artifact, is what lets a completed run be reconstructed later from
-MLflow alone: the reader downloads this file and reuses the same mapper
-the live path uses, rather than reassembling the run from eight separate
-artifacts through a second, parallel mapping that would have to be kept in
-step with the first.
+The context's summary is already a complete plain-JSON record, and the
+backend already knows how to turn it into a result. Logging exactly that
+object is what lets a past run be rebuilt from MLflow alone: the reader
+downloads this file and reuses the same mapper the live path uses, instead
+of reassembling the run from eight artifacts through a parallel mapping that
+would have to be kept in step.
 
-The granular artifacts (`forecast/`, `drift/`, `insights/`, …) are
-unaffected and remain the browsable view in the MLflow UI. This one is the
-machine-readable whole.
+The granular artifacts remain the browsable view in the MLflow UI; this is
+the machine-readable whole.
 """
 
 from __future__ import annotations

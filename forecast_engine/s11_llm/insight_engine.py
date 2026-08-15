@@ -1,29 +1,20 @@
-"""LLM Insight Engine (Section 6.12) — the LLMOps-governed implementation
-of Section 13.
+"""Generates one structured insight per forecast group.
 
-Generates one structured `InsightPayload` per forecast group (Section 6.1
-Task 10: "Final model x key"), never a whole-run narrative — each call is
-scoped to exactly one group's own decision, which is both what Section
-13.1's structured contract requires and what fixes the class of bug a
-whole-run narrative produces (a reader on group B seeing group A's text,
-because a single blob had to be sliced back apart afterward).
+Per group, never one narrative for the whole run — each call is scoped to a
+single group's decision, which is both the contract the dashboard needs and
+what prevents a reader on group B seeing group A's text.
 
-One group's insight goes through, in order:
+Each insight goes through, in order:
+  1. route to a deployment tier based on decision complexity.
+  2. call Azure OpenAI, capturing token and latency telemetry.
+  3. validate against the schema, retrying with the validation errors fed
+     back into the prompt on failure.
+  4. run the deterministic grounding check against the group's own metrics.
+  5. on provider failure try the fallback deployment, then the deterministic
+     template path, so the run still finishes with an explanation.
 
-  1. Route to a deployment tier (Section 13.2) based on decision complexity.
-  2. Call Azure OpenAI, capturing token/latency telemetry (Section 13.4).
-  3. Validate the response against the structured schema (Section 13.1);
-     on failure, retry with the validation errors fed back into the
-     prompt, up to `max_validation_retries` times.
-  4. Run the deterministic grounding check (Section 13.1) against the
-     group's own metrics.
-  5. On provider failure, try the fallback deployment; if that is also
-     unavailable, fall back to the deterministic template path (Section
-     11) so the run still finishes with an explanation.
-
-Every attempt — including failed and retried ones — is recorded to the
-`LLMTraceStore` before this method returns, so the trace is complete even
-when the final outcome is a fallback.
+Every attempt, including failed and retried ones, is recorded to the trace
+store before returning.
 """
 
 from __future__ import annotations

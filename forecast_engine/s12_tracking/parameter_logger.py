@@ -1,9 +1,8 @@
-"""Parameter extraction (Section 6.13, "Log Parameters").
+"""Extracts the parameters MLflow records.
 
-Every parameter name is derived from the data itself — a business key
-column, a model name — rather than a fixed literal, so a dataset with
-different keys or a differently-named model produces differently-named
-parameters without any code change here.
+Names are derived from the data — a key column, a model name — rather than
+fixed literals, so a different dataset produces different parameter names
+with no code change.
 """
 
 from __future__ import annotations

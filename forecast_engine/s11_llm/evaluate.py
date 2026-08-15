@@ -1,19 +1,15 @@
-"""CLI entry point for the LLM Evaluation + Regression Framework.
+"""CLI for the LLM evaluation and regression suite.
 
     python -m forecast_engine.s11_llm.evaluate
 
-Runs the version-controlled evaluation dataset (`eval_dataset/
-regression_cases.json`) through the currently configured prompt version and
-model — real Azure OpenAI when credentials are configured, the
-deterministic template path otherwise — scores every case, applies the
-configured regression thresholds, and writes a JSON report other tooling
-(the backend's Observability API) can read. Exits 0 on a passing
-regression, 1 on a failing one, 2 if `--mode llm` was requested but Azure
-OpenAI is not actually configured.
+Runs the version-controlled cases through the configured prompt and model —
+real Azure OpenAI when credentials exist, the deterministic template path
+otherwise — scores them, applies the regression thresholds, and writes a
+JSON report the backend can read. Exits 0 on pass, 1 on fail, 2 if --mode
+llm was asked for without Azure OpenAI configured.
 
-Nothing here touches the production pipeline: it never runs
-`forecast_engine.run_pipeline`, never opens an MLflow run, and never writes
-anywhere `run_pipeline` itself reads from.
+Touches nothing the pipeline uses: it never runs run_pipeline, never opens
+an MLflow run, and never writes where run_pipeline reads.
 """
 
 from __future__ import annotations

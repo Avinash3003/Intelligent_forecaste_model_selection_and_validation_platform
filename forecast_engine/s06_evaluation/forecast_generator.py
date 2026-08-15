@@ -1,28 +1,16 @@
-"""Twelve-month forward forecast generation (Section 6.4 → 6.5).
+"""Generates the forward forecast that will be validated and possibly shipped.
 
-The forward forecast must come from a model that has seen the group's
-*complete* history — backtesting only ever fits on partial windows, and a
-forecast that will be validated and potentially promoted needs every
-available observation, not a fold's subset.
+It must come from a model that has seen the group's complete history —
+backtesting only ever fits partial windows.
 
-That model already exists by the time this runs: Model Training (Section
-6.3.3) already fit this exact (group, model) pair on this exact series with
-these exact tuned parameters. Fitting a second, identical model here would
-be a verbatim duplicate — same inputs, same deterministic outcome, pure
-wasted compute — so this reuses the trained wrapper's own `.predict()`
-whenever the caller supplies one (`TrainedModel.fitted_model`). It falls
-back to fitting fresh only when no fitted wrapper is available, which
-keeps this class correct on its own rather than silently depending on the
-caller always providing one.
+That model already exists: training fit this exact pair on this exact series
+with these exact parameters, so fitting again would be a verbatim duplicate.
+This reuses the trained wrapper's predict() when the caller supplies one, and
+fits fresh only when it does not.
 
-The future timeline is extended at the median spacing observed in the
-series, so the generator stays grain-agnostic — it produces monthly dates
-for the monthly data the platform forecasts on without hard-coding that
-assumption.
-
-Confidence intervals are carried through only where the model produces them
-natively (Section 5.6 draws a band when one exists); nothing is fabricated
-for the models that do not.
+The future timeline extends at the median spacing observed in the series, so
+the generator stays grain-agnostic. Intervals are carried through only where
+a model produces them natively; nothing is fabricated.
 """
 
 from __future__ import annotations

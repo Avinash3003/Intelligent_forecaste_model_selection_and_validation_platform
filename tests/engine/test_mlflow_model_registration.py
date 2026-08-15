@@ -199,12 +199,12 @@ def test_the_registered_model_is_the_final_selected_winner():
 
     results = _register(client, winners)
 
-    registered = {r.forecast_group: r.model_name for r in results}
+    registered = {r.group_id: r.model_name for r in results}
     assert registered == {"1 | 1": "prophet", "1 | 2": "seasonal_naive"}
     # And the wrapper carries that same model, not another group's.
     for call in client.log_calls:
         wrapper = call["python_model"]
-        assert registered[wrapper.forecast_group] == wrapper.model_name
+        assert registered[wrapper.group_id] == wrapper.model_name
 
 
 def test_every_key_in_one_dataset_shares_one_registered_model():
@@ -270,7 +270,7 @@ def test_a_tagging_failure_does_not_make_a_registration_look_failed():
 def test_one_group_failing_to_register_does_not_stop_the_next():
     class _FlakyClient(_FakeClient):
         def register_pyfunc_model(self, python_model, artifact_path, registered_model_name, signature=None):
-            if python_model.forecast_group == "1 | 1":
+            if python_model.group_id == "1 | 1":
                 raise MLflowTrackingError("boom")
             return super().register_pyfunc_model(python_model, artifact_path, registered_model_name, signature)
 

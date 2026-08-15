@@ -1,42 +1,18 @@
-"""Forecast confidence — an absolute quality measure, deliberately distinct
-from the engine's ranking score.
+"""How good is this forecast, on its own terms.
 
-The engine's `composite_ranking_score` (forecast_engine/s08_ranking) answers
-"how did this model compare to the *other candidates in this run*" — it is
-min-max normalized within each group's surviving cohort. With a single
-survivor (a common case: a small dataset, or most candidates eliminated),
-every component of that normalization trivially collapses to 1.0 regardless
-of the model's actual accuracy, because there is nothing to compare it
-against. Reusing that number as "confidence" therefore does not answer what
-a user showed 100% actually wants to know: is this forecast any good.
+Deliberately not the engine's composite ranking score: that one is
+normalized within a run's surviving candidates, so a lone survivor scores
+1.0 no matter how bad it is. Confidence instead blends three things that
+are true of a model independently of who else was in the race:
 
-Confidence here answers that question directly, from two things that are
-true about a model on their own, independent of who else was in the race:
+  - backtest accuracy: 100% minus its own WMAPE.
+  - forecast stability: does the forward forecast vary like the history?
+    Catches the model that backtests well then emits a flat line.
+  - drift margin: how far under its threshold the drift statistic landed.
 
-  * Backtest accuracy — 100% minus this model's own WMAPE from Section
-    6.4's rolling backtest. An absolute error measure; a WMAPE of 8% means
-    the same thing whether one model was evaluated or five.
-  * Forecast stability — how closely the forward forecast's variation
-    matches the group's own history. Section 6.10 names this as a
-    component, and it is the only one that can catch the failure backtest
-    accuracy is blind to: a model that scores well replaying history and
-    then emits a near-flat forward line. A flat forecast against a
-    strongly seasonal history is not a good forecast, however well the
-    model backtested.
-
-  * Drift margin — how far below its dynamically estimated threshold
-    (Section 6.8) the winning forecast's drift statistic landed. Passing
-    by a hair and passing by a wide margin are both "Passed", but they are
-    not equally reassuring, and this is the only place that distinction is
-    surfaced.
-
-A fallback model never undergoes drift validation (Section 6.9 — the
-fallback path exists specifically because no candidate reached or survived
-it), so its drift weight is renormalized away rather than counted as zero.
-Its stability is still measured, which matters: the fallback path is
-exactly where a flat forecast is most likely to ship, and without this
-component such a run reported a reassuring high confidence drawn purely
-from a backtest the forward forecast bore no resemblance to.
+A fallback never runs drift validation, so that weight is renormalized away
+rather than counted as zero. Its stability is still measured, because the
+fallback path is exactly where a flat forecast is most likely to ship.
 """
 
 from __future__ import annotations
@@ -71,9 +47,7 @@ MAX_VARIATION_RATIO = 4.0
 
 @dataclass(frozen=True)
 class ConfidenceResult:
-    """Confidence plus the evidence it was built from, so the UI can show
-    the number and its justification together rather than a bare percentage.
-    """
+    """The score plus the evidence behind it, so the UI can justify the number."""
 
     confidence: float | None
     backtest_accuracy: float | None
@@ -92,27 +66,14 @@ def compute_confidence(
     forecast_values: list[float] | None = None,
     history_values: list[float] | None = None,
 ) -> ConfidenceResult:
-    """Compute an absolute confidence score from this model's own evidence.
+    """Score one model from its own evidence.
 
-    Args:
-        wmape: The winning model's own backtest WMAPE, as a percentage
-            (e.g. 8.2 for 8.2%) — matches `forecast_engine`'s own scale
-            (s06_evaluation/metrics.py multiplies by 100).
-        drift_statistic: The drift test statistic for the winning forecast,
-            or None if drift validation never ran (fallback path).
-        drift_threshold: The dynamically estimated threshold it was
-            compared against.
-        is_fallback: Whether this is the fallback path — used only to
-            select the right wording when drift values are absent (as they
-            always are for a fallback), so the "why" reads as "not
-            applicable" rather than "missing data".
-        forecast_values: The forward forecast actually being shipped.
-        history_values: The same group's observed history, which the
-            forecast's variation is judged against.
+    wmape is a percentage (8.2 means 8.2%), matching the engine's scale.
+    drift_statistic/drift_threshold are None on the fallback path, where
+    drift validation never ran. history_values is the group's full observed
+    history, which the forecast's variation is judged against.
 
-    Returns:
-        A ConfidenceResult. `confidence` is None — never a fabricated
-        number — when no component at all could be computed.
+    confidence is None — never a made-up number — if nothing was measurable.
     """
     scores: dict[str, float] = {}
 
@@ -203,17 +164,11 @@ def _explain(
 def _forecast_stability(
     forecast_values: list[float] | None, history_values: list[float] | None
 ) -> float | None:
-    """How closely the forecast's variation matches the history's.
+    """Does the forecast vary like the history?
 
-    Scored on the ratio of the two standard deviations, symmetrically in
-    ratio space: a forecast moving far *less* than its history (the flat
-    forecast that Section 6.5.2 lists as an underfitting signal) and one
-    moving far *more* (Section 6.5.1's excessive volatility) are both
-    wrong about how much this series moves, and are penalised alike.
-
-    Returns None — never a default — when either side is too short to have
-    a meaningful spread, so an unmeasurable component is renormalized away
-    instead of fabricating a score.
+    Compares the two standard deviations symmetrically, so moving far less
+    than history (a flat forecast) and far more (excessive volatility) are
+    penalised alike. None when either side is too short to have a spread.
     """
     if not forecast_values or not history_values:
         return None

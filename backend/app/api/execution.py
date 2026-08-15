@@ -1,15 +1,10 @@
-"""Direct access to the Pipeline Executor (Section 6.14).
+"""Direct access to the Pipeline Executor.
 
-Exposes the orchestration layer's own standardized objects
-(`JobStatus`, `PipelineExecutionResult`) rather than the legacy
-dashboard-shaped `/deploy` + `/results/{run_id}` contract those routes
-still serve — this is the "communicates only with the Pipeline Executor"
-surface Section 6.14 asks for, kept as an additive API so the existing
-frontend contract is undisturbed.
+Exposes the orchestration layer's own objects rather than the
+dashboard-shaped /deploy + /results contract, which those routes still serve.
 
-Every route here is a thin translation between HTTP and the Executor. No
-forecasting logic lives in this layer, and no route talks to Databricks,
-storage or MLflow directly — the selected Runner owns all of that.
+Every route is a thin HTTP-to-Executor translation: no forecasting logic,
+and nothing here talks to Databricks, storage or MLflow — the Runner does.
 """
 
 from __future__ import annotations
@@ -82,10 +77,8 @@ def get_execution_status(
 ) -> ExecutionStatusResponse:
     """The status the frontend polls while a run executes.
 
-    This is what makes opening the Databricks workspace unnecessary: it
-    reports QUEUED/RUNNING/SUCCESS/FAILED in the platform's own vocabulary
-    for both execution backends, and `/deployments/{run_id}` carries the
-    per-stage trail behind it.
+    Reports one vocabulary for both backends, so nobody needs to open the
+    Databricks workspace. /deployments/{run_id} carries the stage trail.
     """
     try:
         status = get_pipeline_executor().get_status(run_id)

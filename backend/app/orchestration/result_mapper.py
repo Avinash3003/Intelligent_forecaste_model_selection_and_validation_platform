@@ -1,14 +1,8 @@
-"""Reshapes `forecast_engine`'s run summary into the standardized
-`PipelineExecutionResult` envelope (Section 6.14).
+"""Reshapes the engine's run summary into PipelineExecutionResult.
 
-`PipelineContext.summary()` (produced unmodified by `forecast_engine`,
-Section 6.13's `--summary-out`) is already a complete, plain-JSON record of
-one run — this module does not recompute or reinterpret any forecasting
-result, it only regroups already-serialized fields into the envelope
-Section 6.14 asks for (Run Metadata, Forecast Results, Metrics,
-Explainability, Drift Results, Winner Model, MLflow Information, Execution
-Summary). Every Runner funnels its summary through this one function, so
-Local and Databricks execution can never disagree about the result shape.
+Pure regrouping of already-serialized fields — nothing here recomputes a
+forecast. Every Runner funnels its summary through this one function so the
+backends cannot disagree about the result shape.
 """
 
 from __future__ import annotations
@@ -45,33 +39,19 @@ def map_summary_to_result(
             "group_count": summary.get("group_count"),
             "series_count": summary.get("series_count"),
             "selected_models": summary.get("selected_models"),
-            # The derived feature columns this run's tree-based models were
-            # actually given (Priority C) — `None` means every supported
-            # feature (the run never mentioned the field, or explicitly
-            # accepted every default), never confused with an explicit
-            # empty selection. Recorded so a future viewer of this run can
-            # tell which optional features were selected.
+            # Features the tree models were given. None = all supported
+            # features, which is distinct from an explicit empty selection.
             "derived_features": summary.get("derived_features"),
-            # Written by Assess Data Quality, computed from the raw
-            # dataset's own date column — never the upload/run time. Absent
-            # (both None) when the date column had no parseable values at
-            # all, which the Results page shows as "unavailable" rather
-            # than a fabricated range.
+            # From the dataset's own date column, not the run time.
             "date_range_start": (summary.get("quality_report") or {}).get("date_range_start"),
             "date_range_end": (summary.get("quality_report") or {}).get("date_range_end"),
-            # Written by Stage 5 (Persist Curated Dataset) — absent if curated
-            # storage was disabled for the run, which the dataset preview
-            # treats as "nothing to show" rather than falling back to the
-            # much larger raw upload.
+            # Absent when curated storage was disabled for the run.
             "curated_dataset_uri": summary.get("curated_dataset_uri"),
-            # Written by Persist Winning Models — where each group's winning
-            # fitted model was durably stored, and whether it was.
+            # Where each group's winning model was stored, and whether it was.
             "model_storage": _model_storage(summary.get("model_storage_results") or []),
-            # Written by Export Forecasts — the run's downloadable forecast
-            # CSV, or why it was not produced.
+            # The downloadable forecast CSV, or why it was not produced.
             "forecast_export": summary.get("forecast_export_result") or {},
-            # Written by Mirror Artifacts — the blob-accessible copy of
-            # business insights / the LLM trace, alongside MLflow's own.
+            # Blob-accessible copy of the insights/LLM trace.
             "artifacts_mirror": summary.get("artifacts_mirror_result") or {},
         },
         forecast_results=summary.get("evaluation_report") or {},
@@ -106,21 +86,18 @@ def map_summary_to_result(
 
 
 def _model_storage(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize where this run's winning models were persisted.
+    """Where this run's winning models were persisted.
 
-    `models_saved` counts models actually written, not groups attempted —
-    a group whose winner could not be serialized is reported by its own
-    entry in `by_group` with the reason, never absorbed into the count.
+    models_saved counts models actually written, not groups attempted; a
+    group that failed keeps its own entry in by_group with the reason.
     """
     persisted = [item for item in results if item.get("persisted")]
 
     return {
         "models_saved": len(persisted),
         "groups_total": len(results),
-        # The run's model directory, read back from a path that was really
-        # written rather than recomputed from configuration — so it cannot
-        # report a location the files are not actually in. None when the
-        # run persisted nothing.
+        # Read back from a path really written, so it cannot point at an
+        # empty location. None when nothing was persisted.
         "location": str(PurePosixPath(persisted[0]["uri"]).parent) if persisted else None,
         "by_group": {
             item.get("forecast_group"): {
@@ -154,8 +131,7 @@ def _winner_model_by_group(winners: list[dict[str, Any]]) -> dict[str, Any]:
             "model_name": winner.get("final_production_model"),
             "final_selection_status": winner.get("final_selection_status"),
             "fallback_used": winner.get("fallback_flag"),
-            # Fallback audit trail, carried through so the dashboard can
-            # explain *why* a fallback produced the forecast.
+            # Audit trail so the dashboard can explain why a fallback ran.
             "fallback_model": winner.get("fallback_model"),
             "fallback_trigger": winner.get("fallback_trigger"),
             "original_candidates": winner.get("original_candidates"),

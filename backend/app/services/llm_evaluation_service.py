@@ -1,14 +1,7 @@
-"""Reads the LLM evaluation/regression report (Section 13.3) for the
-Observability page.
+"""Reads the LLM regression report the evaluate CLI writes.
 
-Not a new tracking system: the report is a JSON file `python -m
-forecast_engine.s11_llm.evaluate` already writes (see `Settings.
-llm_eval_report_path_resolved`), the same generated-artifact pattern the
-rest of this platform already uses for `summary.json`. This service only
-reads that file back and reshapes it into the API contract — it never runs
-an evaluation itself (that stays a deliberate, explicit CLI action, never
-triggered by an HTTP GET) and never talks to Azure OpenAI, MLflow, or
-Databricks directly.
+Read-only: running an evaluation stays an explicit CLI action, never
+triggered by an HTTP GET, and this never talks to Azure OpenAI directly.
 """
 
 from __future__ import annotations
@@ -16,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from app.config.settings import Settings, get_settings

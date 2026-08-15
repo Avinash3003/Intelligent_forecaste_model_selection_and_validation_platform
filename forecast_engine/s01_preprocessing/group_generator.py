@@ -1,20 +1,12 @@
-"""Group Generator — splits a prepared dataset into forecasting groups.
+"""Splits the prepared dataset into one group per business key.
 
-One group == one business key == one thing that will get its own model
-selection, ranking and drift validation downstream. This is where the
-platform's core premise takes effect: because every key has different
-statistical behaviour, a single model across all keys under-performs a
-per-key choice (Section 2).
+Each group gets its own model selection, ranking and drift validation —
+the platform's core premise, since one model across every key under-performs
+a per-key choice.
 
-The split is driven entirely by the configured key columns:
-
-  * No key columns  -> exactly one group covering the whole dataset
-                       (single-series mode).
-  * Key columns set -> one group per distinct combination of their values
-                       (multi-series mode), e.g. (Store1, Item1),
-                       (Store1, Item2), ...
-
-Nothing here knows what those columns mean; "Store"/"Item" never appear.
+No key columns means a single group covering the whole dataset; key columns
+mean one group per distinct combination of their values. Nothing here knows
+what those columns mean.
 """
 
 from __future__ import annotations
@@ -41,13 +33,10 @@ def _to_python_scalar(value: Any) -> Any:
 
 @dataclass
 class ForecastGroup:
-    """One business key's slice of the prepared dataset.
+    """One business key's rows, already sorted.
 
-    Attributes:
-        group_id: Stable, readable identifier for the key, e.g. "1 | 3".
-        key_values: The key columns and their values for this group.
-            Empty in single-series mode.
-        frame: The rows belonging to this key, already sorted.
+    group_id is a stable readable id such as "1 | 3"; key_values is empty in
+    single-series mode.
     """
 
     group_id: str

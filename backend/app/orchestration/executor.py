@@ -1,20 +1,4 @@
-"""Pipeline Executor (Section 6.14) — the single entry point the rest of
-the backend is allowed to call to run a forecast.
-
-Deliberately thin: every method is a one-line delegation to whichever
-`PipelineRunner` was selected at construction time. The Executor holds no
-execution logic of its own and inspects no run state directly — "the
-Pipeline Executor must never know how the pipeline is executed" is
-enforced by there simply being nowhere in this class for that knowledge to
-live.
-
-`get_pipeline_executor()` is a process-wide singleton (mirroring
-`app.config.settings.get_settings()`'s own `@lru_cache` pattern): the
-selected Runner owns in-memory job state, so every caller — the `/deploy`
-route today, `/execution/*` routes, any future caller — must share the
-exact same Runner instance or a `/results/{run_id}` request would never
-see the job `/deploy` just submitted.
-"""
+"""The single entry point the rest of the backend uses to run a forecast."""
 
 from __future__ import annotations
 
@@ -37,14 +21,18 @@ from app.orchestration.schemas import (
 
 
 class PipelineExecutor:
-    """Runs a forecasting pipeline through whichever Runner is configured."""
+    """Delegates every call to the configured Runner.
+
+    Holds no execution logic of its own, so it never needs to know whether a
+    run is executing locally or on Databricks.
+    """
 
     def __init__(self, runner: PipelineRunner | None = None, settings: Settings | None = None) -> None:
         settings = settings or get_settings()
         self._runner = runner or build_runner(settings)
 
     def execute(self, request: PipelineExecutionRequest) -> str:
-        """Submit `request` for execution. Returns immediately with a run id."""
+        """Submit a run and return its id immediately."""
         return self._runner.submit(request)
 
     def get_status(self, run_id: str) -> JobStatus:
@@ -54,11 +42,11 @@ class PipelineExecutor:
         return self._runner.get_result(run_id)
 
     def list_runs(self) -> list[RunListing]:
-        """Every run submitted to the active Runner, most recent first."""
+        """Every run on the active Runner, newest first."""
         return self._runner.list_runs()
 
     def get_run(self, run_id: str) -> RunListing | None:
-        """One run's listing including its stage trail, or None if unknown."""
+        """One run including its stage trail, or None if unknown."""
         return self._runner.get_run(run_id)
 
     def cancel(
@@ -71,12 +59,10 @@ class PipelineExecutor:
 
 
 def build_runner(settings: Settings) -> PipelineRunner:
-    """Select the Runner `settings.execution_mode` names.
+    """Pick the Runner named by EXECUTION_MODE.
 
-    Raises:
-        RunnerConfigurationError: for any value other than the ones this
-            platform supports — an unambiguous failure beats silently
-            defaulting to a backend the deployment did not ask for.
+    Raises RunnerConfigurationError on an unknown mode — failing loudly beats
+    silently running on a backend nobody asked for.
     """
     try:
         mode = ExecutionBackend(settings.execution_mode)
@@ -86,10 +72,6 @@ def build_runner(settings: Settings) -> PipelineRunner:
             f"Unknown execution_mode '{settings.execution_mode}'. Supported values are: {supported}."
         ) from exc
 
-    # Every branch is explicit — an `else: LocalRunner()` fallthrough would
-    # silently run a future/misconfigured cloud mode locally instead of
-    # failing, which is exactly what the ValueError branch above exists to
-    # prevent.
     if mode is ExecutionBackend.DATABRICKS:
         return DatabricksRunner(settings)
     if mode is ExecutionBackend.DATABRICKS_DCS:
@@ -99,7 +81,10 @@ def build_runner(settings: Settings) -> PipelineRunner:
 
 @lru_cache
 def get_pipeline_executor() -> PipelineExecutor:
-    """The process-wide Pipeline Executor. See module docstring for why
-    this must be a singleton rather than constructed per call.
+    """Process-wide singleton.
+
+    The Runner holds in-memory job state, so every caller must share one
+    instance or a status poll would not find the run that /deploy just
+    submitted.
     """
     return PipelineExecutor()

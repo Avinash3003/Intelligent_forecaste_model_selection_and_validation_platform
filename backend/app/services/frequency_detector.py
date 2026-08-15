@@ -1,10 +1,6 @@
-"""Forecast Frequency Detection — Step 4 of the metadata pipeline.
+"""Infers a date column's sampling grain from the spacing of its timestamps.
 
-Infers the sampling grain (Daily / Weekly / Monthly / Quarterly / Yearly) of
-a date column purely from the spacing between its own timestamps. This is
-detection only — no resampling or normalization happens here. That belongs
-to a later ingestion-stage pipeline component (Section 6.2, "Grain
-normalization to monthly"), which is out of scope for this phase.
+Detection only — resampling to monthly happens in the engine's preprocessing.
 """
 
 import pandas as pd
@@ -26,17 +22,8 @@ class FrequencyDetector:
     """Detects the forecast frequency implied by a date column's values."""
 
     def detect(self, date_series: pd.Series) -> str:
-        """Infer the sampling grain of `date_series`.
-
-        Args:
-            date_series: Raw values from the user-selected date column
-                (may contain unparseable or duplicate values).
-
-        Returns:
-            One of "Daily", "Weekly", "Monthly", "Quarterly", "Yearly", or
-            "Irregular" if no consistent spacing can be determined. Called
-            by MetadataInterpreter while building the normalized config.
-        """
+        """One of Daily/Weekly/Monthly/Quarterly/Yearly, or Irregular if the
+        spacing is inconsistent. Tolerates unparseable and duplicate values."""
         parsed = pd.to_datetime(date_series, errors="coerce").dropna()
         unique_sorted = parsed.drop_duplicates().sort_values()
 

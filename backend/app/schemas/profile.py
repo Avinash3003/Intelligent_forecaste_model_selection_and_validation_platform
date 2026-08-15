@@ -10,13 +10,10 @@ class ProfileRequest(BaseModel):
 
 
 class ColumnProfile(BaseModel):
-    """One column's raw, forecasting-agnostic profile.
+    """One column's raw profile, with no forecasting judgement.
 
-    `dtype` is the *raw* pandas dtype (e.g. "object", "int64",
-    "datetime64[ns]") rather than an interpreted semantic type. Profiling
-    deliberately makes no forecasting judgement — deciding whether an
-    "object" column is a usable date or target is the Validation Engine's
-    job, once the user has actually assigned roles.
+    dtype is the raw pandas dtype, not an interpreted type — deciding whether
+    an "object" column works as a date is the Validation Engine's job.
     """
 
     name: str
@@ -46,13 +43,8 @@ class DateRangeRequest(BaseModel):
 
 
 class DateRangeResponse(BaseModel):
-    """The dataset's observed date coverage for `date_column`, computed by
-    the same parsing rule `DataQualityAssessor` uses for a real run
-    (`forecast_engine.s02_quality.quality_assessor.parse_date_column` /
-    `date_range_from_parsed`) — never a second, independent implementation.
-    `available=False` (both bounds `None`) means the column had no
-    parseable date values, not a fabricated range.
-    """
+    """The column's observed date coverage, using the same parsing rule a real
+    run does. available=False means nothing parsed, not a fabricated range."""
 
     available: bool
     date_range_start: str | None = None

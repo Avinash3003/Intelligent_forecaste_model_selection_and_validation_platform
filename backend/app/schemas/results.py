@@ -48,16 +48,11 @@ class ForecastPoint(BaseModel):
 
 
 class DashboardInsight(BaseModel):
-    """The concise, structured form of the LLM narrative that the dashboard
-    renders.
+    """The structured LLM narrative the dashboard card renders.
 
-    The engine emits one prose field per group (`concise_summary`), so there
-    is no separate long-form narrative to defer to — the fields below are
-    hard-capped server-side (see `_dashboard_insight`) purely so a future
-    schema change can't push an unbounded string onto the card. The
-    `paragraphs` a caller sees alongside this (via `ExplainabilityNarrative`)
-    never repeats `summary`; it holds only what the card doesn't already
-    show — full rejection reasons and any caveats beyond the first.
+    Fields are capped server-side so a schema change cannot push an unbounded
+    string onto the card. The paragraphs alongside this never repeat summary —
+    they hold only what the card does not already show.
     """
 
     summary: str | None = None  # <= 60 words
@@ -116,11 +111,10 @@ class ForwardValidationRule(BaseModel):
 
 
 class RankingBreakdown(BaseModel):
-    """Why this model ranked where it did (Section 6.6) — the composite
-    score plus every component that fed it. This is a *relative* score
-    (min-max normalized against this group's other surviving candidates,
-    which is exactly why it is shown here as "ranking", not reused as
-    "confidence" — see `ConfidenceExplanation` for the absolute measure).
+    """Why this model ranked where it did: the composite score and its parts.
+
+    Relative, normalized against this group's other survivors — which is why
+    it is not reused as confidence. See ConfidenceExplanation for that.
     """
 
     composite_score: float | None = None
@@ -133,12 +127,11 @@ class RankingBreakdown(BaseModel):
 
 
 class DriftDetail(BaseModel):
-    """Drift validation outcome (Sections 6.7-6.9) for this specific model.
+    """This model's drift outcome.
 
-    `evaluated=False` is a real, honest state: Final Selection stops at the
-    first candidate that passes, so a lower-ranked survivor may never have
-    been drift-tested at all. That is different from "evaluated and
-    failed", and the two must not be collapsed into one status string.
+    evaluated=False is a real state: selection stops at the first candidate
+    that passes, so a lower-ranked survivor may never have been tested. That
+    is not the same as tested and failed.
     """
 
     evaluated: bool = False
@@ -184,11 +177,8 @@ class MLflowRunInfo(BaseModel):
 
 
 class LLMTraceSummary(BaseModel):
-    """Run-level LLM usage (Section 13.4) — every field the phase's
-    expected report names: calls, tokens, latency, cost, prompt version,
-    groundedness, retries. Sourced verbatim from the engine's
-    `LLMTraceStore.summary()`, never recomputed here.
-    """
+    """Run-level LLM usage — calls, tokens, latency, cost, groundedness,
+    retries — taken verbatim from the engine's trace summary."""
 
     call_count: int = 0
     prompt_tokens: int = 0

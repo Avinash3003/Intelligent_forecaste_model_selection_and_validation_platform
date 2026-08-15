@@ -1,11 +1,9 @@
-"""Artifact logging (Section 6.13, "Log Artifacts").
+"""Logs each run artifact to MLflow.
 
-Every artifact is produced by its own small function, registered in
-`_PRODUCERS` below. Adding a ninth artifact later — a new report, a new
-plot — is registering one more function here; `log_all_artifacts` and the
-tracking pipeline that calls it never change. Each producer is isolated:
-one artifact failing (a plotting error, a missing curated-dataset file) is
-recorded and skipped, never allowed to block the rest.
+Every artifact is produced by its own function, registered in _PRODUCERS, so
+adding one is registering a function rather than changing this module's
+callers. Each producer is isolated: one failing is recorded and skipped, not
+allowed to block the rest.
 """
 
 from __future__ import annotations

@@ -1,11 +1,8 @@
-"""Drift Detection, Threshold Estimation and Drift Validation configuration
-(Sections 6.7, 6.8, 6.9).
+"""Settings for drift detection, threshold estimation and validation.
 
-Nothing here is a global constant applied to every forecasting group. The
-algorithm a group is judged with, and the threshold its drift statistic is
-compared against, are both *derived at runtime* from that group's own
-history — this file only declares the decision rules and method parameters
-that derivation uses.
+Nothing here is a global constant: both the algorithm a group is judged with
+and the threshold it is compared against are derived at runtime from that
+group's own history. This file only declares the rules that derivation uses.
 """
 
 from __future__ import annotations
@@ -16,19 +13,14 @@ from typing import Any
 
 
 class DriftAlgorithm(str, Enum):
-    """Statistical tests the platform can select between (Section 6.7).
+    """The drift statistics available, one chosen per group at runtime.
 
-    No single algorithm suits every distribution, which is exactly why
-    selection is dynamic:
-
-      * POPULATION_STABILITY_INDEX — bin-based, robust for small samples and
-        discrete/low-cardinality distributions.
-      * KOLMOGOROV_SMIRNOV — nonparametric CDF comparison; the standard
-        choice for a continuous, non-normal distribution with enough data.
-      * WASSERSTEIN_DISTANCE — an earth-mover distance that behaves well on
-        roughly unimodal/near-normal continuous distributions.
-      * JENSEN_SHANNON_DIVERGENCE — bounded and stable even on small,
-        non-normal samples where a CDF test is unreliable.
+    PSI: bin-based, robust for small or discrete distributions.
+    KOLMOGOROV_SMIRNOV: nonparametric CDF comparison, for continuous
+      non-normal data with enough samples.
+    WASSERSTEIN_DISTANCE: earth-mover distance, good on near-normal data.
+    JENSEN_SHANNON_DIVERGENCE: bounded and stable on small, non-normal
+      samples where a CDF test is unreliable.
     """
 
     POPULATION_STABILITY_INDEX = "population_stability_index"
@@ -59,12 +51,10 @@ class NormalityTest(str, Enum):
 
 @dataclass(frozen=True)
 class AlgorithmSelectionConfig:
-    """Drives Dynamic Drift Algorithm Selection (Section 6.7).
+    """Thresholds for choosing a drift algorithm.
 
-    The decision considers, in order: whether there is enough history to
-    trust any distributional test, whether the distribution is effectively
-    discrete/low-cardinality, and — only once both of those are settled —
-    whether the history is approximately normal.
+    Considered in order: enough history for any distributional test, then
+    whether the distribution is effectively discrete, then normality.
     """
 
     # Below this many observations, no distributional test is trusted; PSI's
@@ -90,12 +80,11 @@ class AlgorithmSelectionConfig:
 
 @dataclass(frozen=True)
 class ThresholdEstimationConfig:
-    """Drives Dynamic Threshold Estimation (Section 6.8).
+    """Settings for threshold estimation.
 
-    Every method answers the same question — "how large a drift statistic
-    is normal even when nothing has actually drifted?" — by building a null
-    distribution of the statistic from the group's own history and reading
-    off a configured percentile of it.
+    Every method answers "how large is this statistic when nothing has
+    drifted?" by building a null distribution from the group's own history
+    and reading a configured percentile off it.
     """
 
     method: ThresholdMethod = ThresholdMethod.AUTO

@@ -55,10 +55,10 @@ class LLMOpsAttempt(BaseModel):
 
 
 class LLMOpsCall(BaseModel):
-    """One forecast group's LLM activity for this run: its final outcome
-    plus every attempt behind it. Named `calls` to match a group's place
-    in the UI (one expandable row per forecast key), even though a group
-    with retries represents more than one underlying HTTP request.
+    """One forecast group's LLM activity: its final outcome plus every attempt.
+
+    Named for its place in the UI (one row per key), though a group with
+    retries covers more than one HTTP request.
     """
 
     model_config = ConfigDict(protected_namespaces=())
@@ -109,11 +109,9 @@ class LLMOpsResponse(BaseModel):
 
 
 class PromptVersionUsage(BaseModel):
-    """LLM usage/performance/quality aggregated across every completed run
-    that used one prompt version — Section 13.1's "prompt version as a
-    first-class artifact" extended to reporting, not just to which files
-    load. Every number here is a sum or a rate over that version's real
-    calls; nothing is estimated or backfilled for a run with no data.
+    """Usage aggregated across every completed run that used one prompt version.
+
+    Every number is a sum or rate over real calls; nothing is backfilled.
     """
 
     model_config = ConfigDict(protected_namespaces=())

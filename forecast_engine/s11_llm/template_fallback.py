@@ -1,18 +1,13 @@
-"""Non-LLM explanation fallback (Section 11, "template-based, non-LLM
-explanation path... defined for use if the primary endpoint is unavailable
-or rate-limited").
+"""Builds an explanation without an LLM, for when the provider is unavailable.
 
-Produces the exact same `InsightPayload` shape the LLM path produces, built
-directly from the same structured facts the LLM would have been given —
-deterministic, instant, and by construction perfectly grounded, since it
-never writes a number that isn't a straight substitution from the metrics
-dict.
+Produces the same payload shape the LLM path does, from the same structured
+facts — deterministic, instant, and perfectly grounded by construction,
+since it only substitutes numbers straight from the metrics.
 
-This is what keeps Objective 1's hardest requirement true: the forecast
-pipeline must finish with an explanation even when Azure OpenAI is fully
-unavailable, rate-limited, or misconfigured. Nothing downstream can tell
-the difference in shape between this and an LLM-generated payload — only
-`provider` on the trace record says which one ran.
+This is what keeps the hardest guarantee true: the pipeline finishes with an
+explanation even when Azure OpenAI is down or misconfigured. Nothing
+downstream can tell the two apart by shape; only the trace's provider field
+says which ran.
 """
 
 from __future__ import annotations

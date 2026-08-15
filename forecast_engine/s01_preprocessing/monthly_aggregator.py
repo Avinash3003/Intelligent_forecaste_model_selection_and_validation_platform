@@ -1,22 +1,13 @@
-"""Monthly aggregation — rolls sub-monthly data up to the month grain.
+"""Rolls sub-monthly data up to the month grain.
 
-The platform forecasts at month level (Section 6.2). A Daily or Weekly
-dataset therefore has to be resampled before it becomes the curated
-dataset; a Monthly one passes through untouched, and a coarser grain never
-reaches here because validation rejects it rather than disaggregating.
+Forecasting runs at month level, so Daily/Weekly data is resampled here.
+Monthly passes through untouched; anything coarser is rejected by validation
+rather than disaggregated.
 
-Two rules shape the implementation:
-
-  * The target's method is the user's choice (Sum / Mean / Last), because
-    only they know whether the target is a flow quantity that should be
-    totalled or a stock level that should be averaged or sampled.
-  * Feature columns use a configurable default rather than the target's
-    method — summing a price column across a month would be meaningless.
-    Per-column overrides are supported so a deployment can express the
-    column-level rules the design describes without a code change.
-
-Runs entirely inside the preprocessing pipeline: it produces curated data
-and surfaces nothing of its own to the frontend.
+The target's method is the user's choice (Sum/Mean/Last) — only they know
+whether it is a flow to total or a level to average. Feature columns use a
+configurable default instead, since summing a price column would be
+meaningless, with per-column overrides available.
 """
 
 from __future__ import annotations

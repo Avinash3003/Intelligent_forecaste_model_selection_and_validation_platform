@@ -1,10 +1,7 @@
-"""Metadata API — orchestrates Dataset Loader -> Metadata Interpreter ->
-Validation Engine (Sections 5.1.2 / 6.2 of the design doc).
+"""Runs Dataset Loader -> Metadata Interpreter -> Validation Engine.
 
-This route is the only place that knows how to resolve a `file_id` into an
-actual file; every service it calls works with either a Path or an
-already-loaded DataFrame, which keeps them independently testable and easy
-to swap out (e.g. UploadService -> Azure Blob Storage) later.
+The only place that resolves a file_id to a file; every service it calls
+takes a Path or a DataFrame, which keeps them independently testable.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,12 +28,7 @@ def validate_metadata(
     request: MetadataRequest,
     principal: Principal = Depends(require(Permission.FORECAST_CONFIGURE)),
 ) -> MetadataValidationResponse:
-    """Validate a user's Date/Target/Key/Feature column selections against
-    the dataset they previously uploaded.
-
-    Called by the frontend's Metadata Mapping step once the user has
-    chosen every required column role.
-    """
+    """Validate the user's column-role selections against their dataset."""
     # Resolve file_id -> path first; every later step needs real data to
     # validate against, so there's nothing useful to do without it.
     try:

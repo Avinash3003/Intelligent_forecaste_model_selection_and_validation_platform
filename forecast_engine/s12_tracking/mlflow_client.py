@@ -1,18 +1,12 @@
-"""Thin facade around the MLflow SDK.
+"""The one place the engine touches the MLflow SDK.
 
-Every other module in `forecast_engine/tracking/` — and every other module
-in the engine — reaches MLflow only through this class. That single choke
-point is what makes two things true elsewhere in the codebase:
+That single choke point makes two things true: retargeting local to
+Databricks is exactly one value (the tracking URI), because nothing else
+ever constructs one or imports mlflow; and an SDK change is a one-file
+change rather than a hunt through the pipeline.
 
-  * Retargeting Local Development to Databricks is exactly one value —
-    `MLflowConfig.tracking_uri` — because nothing outside this file ever
-    constructs a tracking URI or imports `mlflow` itself.
-  * A future SDK change (a renamed argument, a new registry API) is a
-    one-file change, never a hunt through the pipeline.
-
-The `mlflow` package is imported lazily, mirroring the platform's existing
-optional-dependency pattern (SHAP, Prophet, TFT): a deployment that
-disables tracking is never forced to have it installed.
+mlflow is imported lazily, like the other optional dependencies, so a
+deployment with tracking disabled need not install it.
 """
 
 from __future__ import annotations

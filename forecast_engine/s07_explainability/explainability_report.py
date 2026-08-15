@@ -15,12 +15,8 @@ from forecast_engine.s08_ranking.ranking_report import ShapScoreBreakdown
 
 @dataclass
 class StabilityMetrics:
-    """Structured explainability metadata (Section 6.10, "SHAP Stability").
-
-    Every field is a measurement or a code, never prose — narrative
-    interpretation of these numbers is the LLM Insight Engine's job
-    (Section 6.12), not this stage's.
-    """
+    """Explainability measurements and codes, never prose — interpreting these
+    numbers is the LLM insight stage's job, not this one's."""
 
     window_stability: float | None = None
     horizon_stability: float | None = None

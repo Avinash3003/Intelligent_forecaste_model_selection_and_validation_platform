@@ -1,26 +1,18 @@
-"""MLflow Experiment Tracking & Model Registry orchestration — Section
-6.13 end to end.
+"""Orchestrates MLflow tracking for one run.
 
-    Open Parent Run -> Pipeline Execution -> Log Parameters -> Log
-    Metrics -> Log Artifacts -> Register Winner Model -> Close Run
+    open run -> pipeline executes -> log params -> log metrics
+    -> log artifacts -> register winner -> close run
 
-One MLflow Parent Run per forecasting pipeline execution. Every value
-logged is read from a single `PipelineResult` — this class never touches
-`PipelineContext`, a live model, or a DataFrame, which is what keeps it
-usable unchanged against a Databricks tracking server: only
-`MLflowConfig.tracking_uri` differs between environments.
+One parent run per execution. Everything logged is read from a single
+result object — never the live context, a model or a DataFrame — which is
+what keeps this unchanged against a Databricks tracking server.
 
-The run is opened by `begin()` *before the first pipeline stage* and
-closed by either `complete()` or `fail()`. That ordering is what makes
-MLflow a usable system of record: a run that dies in preprocessing still
-leaves a real MLflow run marked FAILED, carrying the reason. Closing at
-the end only — logging everything in one shot once the pipeline had
-already succeeded — meant failed runs were never recorded at all.
+begin() opens the run before the first stage and complete()/fail() closes
+it. That ordering is what makes MLflow a usable record: a run that dies in
+preprocessing still leaves a real run marked FAILED with the reason.
 
-Nothing here can fail the forecasting run it is recording. Every failure
-mode — an unreachable tracking server, a bad experiment name, a
-registration conflict — is caught and reflected on the returned
-`TrackingResult` instead of raised.
+Nothing here can fail the run it records — every failure is caught and
+reflected on the returned result instead of raised.
 """
 
 from __future__ import annotations

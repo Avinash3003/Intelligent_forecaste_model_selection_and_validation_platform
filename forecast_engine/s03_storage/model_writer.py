@@ -1,24 +1,15 @@
-"""Winning-model persistence.
+"""Persists the model that won for each forecast key.
 
-Final Production Model Selection decides one model per forecast key. This
-module writes *that* model — the fitted estimator that actually won, taken
-from the training stage's own record — so a run's decision can be reloaded
-and re-served later without re-running the pipeline.
+So a run's decision can be reloaded and served later without re-running the
+pipeline. Three deliberate properties:
 
-Three properties are deliberate:
-
-  * **Only winners are written.** A run trains keys x candidates models;
-    persisting all of them would multiply storage by the candidate count to
-    keep models no decision refers to.
-  * **Nothing is retrained.** The fitted wrapper is already held on the
-    training record (`TrainedModel.fitted_model`), kept there precisely so a
-    later stage can reuse it. This module reads that object and serializes
-    it; it never calls `train()`.
-  * **Storage is a location, not a mechanism the engine knows about.** Like
-    curated datasets, the caller supplies an absolute root — a local
-    directory locally, a Unity Catalog Volume path in the cloud — and this
-    module only joins paths beneath it. No cloud SDK, no credentials, and no
-    execution-mode branching reach the engine.
+  - Only winners are written; persisting every candidate would multiply
+    storage to keep models no decision refers to.
+  - Nothing is retrained — the fitted wrapper is already on the training
+    record, and this only serializes it.
+  - Storage is a location, not a mechanism: the caller supplies an absolute
+    root and this joins paths beneath it, so no cloud SDK or credential
+    reaches the engine.
 """
 
 from __future__ import annotations
@@ -40,11 +31,10 @@ _DOT_RUNS = re.compile(r"\.{2,}")
 
 
 def sanitize_forecast_key(raw: str) -> str:
-    """A forecast key reduced to something safe to put in a filename.
+    """A forecast key made safe for a filename.
 
-    Path traversal is prevented structurally rather than by blocklisting:
-    every separator and every character that could form one is replaced, so
-    the result is always a single path segment.
+    Traversal is prevented structurally, not by blocklist: every separator
+    is replaced, so the result is always one path segment.
     """
     cleaned = _UNSAFE_KEY_CHARS.sub("_", str(raw))
     # Collapse runs of dots. Replacing separators alone already makes the
@@ -69,11 +59,10 @@ class WinningModelWriter:
         trained_models: list[Any],
         run_id: str,
     ) -> list[dict[str, Any]]:
-        """Persist one model per winning key and describe what was written.
+        """Write one model per winning key.
 
-        Returns a record per winner — including the ones that could not be
-        written — so the run summary reports persistence honestly instead of
-        silently omitting a key.
+        Returns a record per winner, including failures, so the run summary
+        reports persistence honestly instead of omitting a key.
         """
         if not self._config.enabled:
             return []

@@ -1,26 +1,17 @@
-"""Data Preprocessing — turns a raw dataset into the curated dataset.
+"""Turns the raw dataset into the curated one.
 
-The only module in the engine permitted to modify data. Everything else
-either reads (quality assessment, profiling) or reshapes without altering
-values (grouping, series building), which makes this the single place to
-look when explaining why a curated row count differs from the raw one.
+The only module allowed to modify data — everything else reads or reshapes
+— so this is the single place to look when a curated row count differs from
+the raw one.
 
-Its contract is deliberately strict. Where the Data Quality Assessor
-*describes* problems, this stage *acts* on them:
+Where quality assessment describes problems, this acts on them:
+  - date and target are converted or the dataset is rejected; silently
+    coercing a categorical target to NaN would hide the problem until a
+    model produced nonsense.
+  - rows that cannot carry an observation are removed and counted.
+  - key values and feature columns are left exactly as uploaded.
 
-  * Date and target columns are converted to their required types, or the
-    dataset is rejected. A column that cannot become a timeline, or a target
-    that is really categorical ("Apple", "High"), must never reach
-    forecasting — silently coercing it to NaN would hide the problem until
-    a model produced nonsense.
-  * Rows that cannot carry an observation (unreadable date, missing target)
-    are removed and counted.
-  * Business key values are never touched, and feature columns are left
-    exactly as uploaded — imputing or deriving from them is feature
-    engineering, which this phase excludes.
-
-The input DataFrame is never mutated: the caller keeps the raw dataset for
-comparison and audit.
+The input DataFrame is never mutated, so the caller keeps the raw data.
 """
 
 from __future__ import annotations

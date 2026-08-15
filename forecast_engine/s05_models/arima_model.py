@@ -1,13 +1,11 @@
-"""ARIMA / SARIMA adapter (statsmodels).
+"""ARIMA / SARIMA, backed by statsmodels.
 
-Statistical models are selected differently from tree models. Rather than
-scoring candidates on held-out data, ARIMA orders are chosen by an
-information criterion (AIC) computed from the fit itself — the standard
-approach for this family, and one that needs no validation split.
+Orders are chosen by AIC computed from the fit itself rather than by scoring
+on held-out data — the standard approach for this family, needing no
+validation split.
 
-The candidate orders come from the registry's `search_space`; when the
-space is empty the configured default order is used as-is, which is the
-"configuration-driven parameter selection" the design calls for.
+Candidate orders come from the registry's search_space; an empty space means
+the configured default order is used as-is.
 """
 
 from __future__ import annotations

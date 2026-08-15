@@ -1,13 +1,10 @@
-"""Series Builder — turns forecasting groups into forecast-ready series.
+"""Turns groups into the forecast-ready series training consumes.
 
-This is the final stage of the foundation and produces the artifact the
-Model Training Engine consumes directly: for each business key, one clean,
-chronologically sorted frame containing the timeline, the value to
-forecast, and any exogenous regressors.
+One chronologically sorted frame per business key, holding the timeline,
+the target, and any exogenous regressors.
 
-The builder projects and orders; it never alters values. Whatever a model
-is later judged on is exactly what the user uploaded, which is what makes
-the downstream forward-validation and drift stages meaningful.
+Projects and orders only, never alters values — which is what makes the
+later forward-validation and drift stages meaningful.
 """
 
 from __future__ import annotations
@@ -26,19 +23,12 @@ from forecast_engine.s01_preprocessing.group_generator import ForecastGroup
 
 @dataclass
 class ForecastSeries:
-    """One business key's forecast-ready time series.
+    """One business key's forecast-ready series.
 
-    Attributes:
-        group_id: Identifier of the business key this series belongs to.
-        key_values: The key columns and values, empty in single-series mode.
-        frame: Date, target and feature columns only, sorted chronologically.
-        frequency: Detected grain of the parent dataset, carried for
-            reference — the series itself is left at its original grain.
-        date_column / target_column: Recorded so consumers address columns
-            by role without re-reading the run configuration.
-        feature_columns: Regressors present in `frame`.
-        meets_minimum_history: Whether this key has enough observations for
-            the platform's accuracy target to apply (Section 10).
+    frame holds date, target and feature columns only, sorted chronologically.
+    date_column/target_column are recorded so consumers address columns by
+    role without re-reading the run configuration. frequency is carried for
+    reference; the series stays at its original grain.
     """
 
     group_id: str

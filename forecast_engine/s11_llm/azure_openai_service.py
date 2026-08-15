@@ -1,22 +1,15 @@
-"""Azure OpenAI service — the platform's sole LLM implementation
-(Section 6.12, "Model Provider").
+"""The platform's only LLM implementation.
 
-There is deliberately no provider interface or registry here: the platform
-uses Azure OpenAI only, so an abstraction with a single implementation
-would add indirection without buying flexibility. `LLMInsightEngine`
-depends on this concrete class directly.
+No provider interface or registry: with a single implementation an
+abstraction would add indirection without buying flexibility.
 
-The Azure OpenAI SDK is imported lazily, inside `complete()`, mirroring the
-lazy-optional-dependency pattern used everywhere else in the engine
-(SHAP, Prophet, TFT): a deployment that never enables LLM insights is not
-forced to install it, and a missing package degrades to an "unavailable"
-report rather than an import-time crash.
+The SDK is imported lazily inside complete(), like every other optional
+dependency here, so a deployment that never enables insights need not
+install it and a missing package degrades to "unavailable".
 
-`complete()` returns an `LLMCompletionResult` rather than a bare string —
-Section 13's token/latency tracking requires the caller to know exactly
-what one call cost, and threading that back out is only possible if the
-service itself reports it (the SDK response carries `usage`; nothing
-upstream can reconstruct it after the fact).
+complete() returns a result object rather than a bare string because the
+caller needs to know what one call cost — the SDK response carries usage,
+and nothing upstream could reconstruct it afterwards.
 """
 
 from __future__ import annotations

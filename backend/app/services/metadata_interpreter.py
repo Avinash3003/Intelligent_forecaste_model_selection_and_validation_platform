@@ -1,13 +1,8 @@
-"""Metadata Interpreter — Step 2 of the metadata pipeline (Section 5.1.2 /
-6.2 of the design doc).
+"""Turns the user's column choices into one normalized config.
 
-Takes the raw metadata a user selected in the frontend (date/target/key/
-feature columns) plus the uploaded dataset, and produces ONE normalized
-configuration object. Every downstream stage — ValidationEngine today, and
-the Databricks pipeline in a later phase — consumes this normalized shape
-instead of re-deriving it, which is what keeps the whole platform dataset
-agnostic: nothing in this class ever references a specific column name
-like "Store" or "Sales".
+Everything downstream reads this shape instead of re-deriving it, which is
+what keeps the platform dataset-agnostic — nothing here ever names a
+specific column like "Store" or "Sales".
 """
 
 import pandas as pd
@@ -26,17 +21,8 @@ class MetadataInterpreter:
         self._frequency_detector = frequency_detector or FrequencyDetector()
 
     def interpret(self, dataframe: pd.DataFrame, request: MetadataRequest) -> NormalizedMetadataConfig:
-        """Interpret `request` against `dataframe` and normalize it.
-
-        Args:
-            dataframe: The uploaded dataset, already loaded by DatasetLoader.
-            request: The raw column-role selections from the frontend.
-
-        Returns:
-            A NormalizedMetadataConfig capturing forecast mode, frequency,
-            unique key count and dataset shape. Called by the
-            /metadata/validate route, before ValidationEngine runs.
-        """
+        """Normalize the frontend's column choices into forecast mode,
+        frequency, key count and dataset shape."""
         # The presence of key columns is the single deciding factor between
         # single-series and multi-series forecasting (Section 6.1) — no
         # other signal is needed to make this call.
@@ -59,24 +45,18 @@ class MetadataInterpreter:
         )
 
     def _detect_frequency(self, dataframe: pd.DataFrame, date_column: str) -> str:
-        """Return the detected frequency for `date_column`, or "Unknown" if
-        the column doesn't exist in the dataset.
+        """Detected frequency, or "Unknown" for a missing column.
 
-        The interpreter must never raise on a bad column reference —
-        ValidationEngine is responsible for reporting that as a proper
-        validation failure with a user-facing message.
+        Never raises on a bad column — validation reports that properly.
         """
         if date_column not in dataframe.columns:
             return "Unknown"
         return self._frequency_detector.detect(dataframe[date_column])
 
     def _count_unique_keys(self, dataframe: pd.DataFrame, key_columns: list[str]) -> int:
-        """Count distinct business keys formed by `key_columns`.
+        """Count distinct business keys; no key columns means one implicit key.
 
-        A single-series dataset (no key columns selected) is treated as one
-        implicit key. Missing key columns are ignored here — surfaced as a
-        validation error instead — so this always returns a number instead
-        of raising.
+        Missing columns are ignored here and reported by validation instead.
         """
         if not key_columns:
             return 1

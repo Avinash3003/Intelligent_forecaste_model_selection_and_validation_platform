@@ -1,23 +1,15 @@
-"""Base forecasting model interface.
+"""The one interface every model family is reached through.
 
-Every model family the platform supports — statistical, gradient-boosted,
-deep — is reached through this one interface. The trainer therefore never
-knows which library it is driving, which is what lets a new model be
-onboarded by registering an adapter rather than by editing the training
-loop (Section 6.4, "pluggable model registry").
+The trainer never knows which library it is driving, so onboarding a model
+means registering an adapter rather than editing the training loop.
 
-Two responsibilities live in the adapter, deliberately:
-
-  * Library isolation. Each adapter imports its backing library lazily
-    inside `initialize()`, so a deployment that never selects TFT is not
-    forced to install PyTorch, and a missing library degrades to a skipped
-    model rather than a crashed pipeline.
-  * Input adaptation. Every library wants a different shape — Prophet
-    wants ds/y columns, ARIMA a univariate series, trees a numeric design
-    matrix. Converting the common ForecastSeries into that shape belongs
-    to the adapter that needs it, not to the shared pipeline. This is
-    input plumbing only; genuine feature engineering (lags, rolling
-    windows, encodings — Section 6.3) is a separate later phase.
+Each adapter owns two things:
+  - Library isolation: the backing library is imported lazily in
+    initialize(), so a deployment that never selects TFT need not install
+    PyTorch, and a missing library skips the model rather than failing the run.
+  - Input adaptation: Prophet wants ds/y, ARIMA a univariate series, trees a
+    design matrix. Converting the shared ForecastSeries into that shape
+    belongs to the adapter that needs it.
 """
 
 from __future__ import annotations
@@ -35,12 +27,10 @@ from forecast_engine.s01_preprocessing.series_builder import ForecastSeries
 
 
 class TrainingStatus(str, Enum):
-    """Outcome of training one model on one forecasting group.
+    """How training one model on one group ended.
 
-    SKIPPED and UNAVAILABLE are distinct from FAILED on purpose: neither
-    indicates a defect. A group too short for a deep model, or a library a
-    deployment chose not to install, are expected conditions that later
-    stages should treat differently from a genuine training failure.
+    SKIPPED and UNAVAILABLE are deliberately not FAILED: a group too short
+    for a deep model, or an uninstalled library, are expected conditions.
     """
 
     TRAINED = "Trained"
@@ -51,13 +41,10 @@ class TrainingStatus(str, Enum):
 
 @dataclass
 class ForecastOutput:
-    """Point forecasts and, where the model supports them, intervals.
+    """Point forecasts, plus intervals where the model produces them.
 
-    Confidence intervals are optional by design: statistical models
-    (ARIMA, Prophet) produce them natively, whereas the gradient-boosted
-    regressors do not. Rather than fabricate intervals for the trees —
-    which would misrepresent their uncertainty — the fields stay None and
-    downstream consumers check before using them.
+    ARIMA and Prophet produce intervals natively; the tree models do not, and
+    the fields stay None rather than fabricating uncertainty for them.
     """
 
     values: list[float] = field(default_factory=list)
@@ -80,12 +67,10 @@ class ForecastOutput:
 
 @dataclass
 class TrainedModel:
-    """One trained model, its provenance and its outcome.
+    """One trained model with its provenance and outcome.
 
-    This is the unit of output for the whole phase: the next phase consumes
-    a collection of these. The fitted estimator itself is held in `model`
-    and excluded from `to_dict()`, which carries only the serializable
-    training record.
+    The fitted estimator lives in `model` and is excluded from to_dict(),
+    which carries only the serializable record.
     """
 
     group_id: str
@@ -223,24 +208,19 @@ class BaseForecastingModel(ABC):
 
 
 class SupervisedTreeModel(BaseForecastingModel):
-    """Shared behaviour for gradient-boosted tree adapters.
+    """What XGBoost and LightGBM share.
 
-    XGBoost and LightGBM differ only in which estimator class they build; the
-    way a time series is framed as a supervised problem is identical, so it
-    lives here rather than being duplicated in both adapters.
+    They differ only in which estimator they build; framing a series as a
+    supervised problem is identical, so it lives here.
 
-    Feature engineering (Section 6.3). A tree splits on feature values it saw
-    in training, so it cannot extrapolate an ordinal `time_index` past the last
-    training row — every future step lands in the same terminal leaf and the
-    forecast comes out dead flat. That is not a tuning problem: it is a
-    consequence of framing the series with position as its only predictor. The
-    lag, rolling and calendar features below give the tree something it *can*
-    split on out of sample, which is what lets it reproduce level, trend and
-    seasonality instead of a horizontal line.
+    Why the features exist: a tree can only split on values it saw in
+    training, so it cannot extrapolate an ordinal time index — every future
+    step lands in the same leaf and the forecast comes out flat. The lag,
+    rolling and calendar features give it something it can split on out of
+    sample, which is what lets it reproduce level, trend and seasonality.
 
-    Every generated column is configuration-driven through the model spec's
-    params (`lags`, `rolling_windows`, `calendar_features`), so the feature set
-    is changed by configuration rather than by editing this class.
+    Which columns are generated is driven by the model spec's params, so the
+    feature set changes by configuration rather than by editing this class.
     """
 
     # Defaults chosen for the platform's monthly grain: the previous month
@@ -285,17 +265,12 @@ class SupervisedTreeModel(BaseForecastingModel):
     def _fit_to_history(self, spans: tuple[int, ...], observations: int | None) -> tuple[int, ...]:
         """Drop spans the series is too short to support.
 
-        A lag of 12 needs twelve prior observations, so every row before that
-        is incomplete and gets dropped from training. On a short slice — a
-        backtest window starting at the configured minimum of 12 — that leaves
-        nothing to fit, and the model silently produces no backtest at all.
-        Narrowing the spans to what the history can actually support keeps the
-        feature set honest for short series instead of emptying the matrix.
+        A lag of 12 needs twelve prior rows, so shorter history would leave
+        nothing to fit and the model would silently produce no backtest.
+        Narrowing the spans keeps the feature set honest instead.
 
-        An empty `spans` is left alone regardless of `observations`: that is
-        a deliberate "none of these" (a user who selected zero lags/windows,
-        Priority C), not a series too short to support what was asked —
-        the floor below exists only for the latter.
+        An empty spans list is left alone: that is a deliberate "none of
+        these", not a series too short for what was asked.
         """
         if observations is None or not spans:
             return spans
@@ -333,13 +308,12 @@ class SupervisedTreeModel(BaseForecastingModel):
     def _feature_row(
         self, history: list[float], position: int, timestamp: pd.Timestamp | None
     ) -> dict[str, float]:
-        """Build one row of features from the values observed *before* it.
+        """Build one feature row from the values observed strictly before it.
 
-        `history` holds every target value up to (not including) this row, so
-        the same function serves training and forecasting: during training it
-        is fed actuals, during prediction it is fed actuals followed by the
-        model's own predictions. Using one builder for both is what guarantees
-        the forecast-time matrix matches the one the model was fitted on.
+        history holds every target up to but not including this row, so the
+        same function serves training (fed actuals) and prediction (fed
+        actuals then the model's own output). One builder for both is what
+        guarantees the forecast-time matrix matches the fitted one.
         """
         row: dict[str, float] = {"time_index": float(position)}
 
@@ -451,11 +425,10 @@ class SupervisedTreeModel(BaseForecastingModel):
     def predict(self, horizon: int, future_frame: pd.DataFrame | None = None) -> ForecastOutput:
         """Forecast one step at a time, appending each prediction to history.
 
-        Multi-step forecasting with lag features has to be recursive: step 2's
-        `lag_1` is step 1's prediction. The previous implementation instead
-        froze every non-index feature at its last observed value, which is the
-        direct cause of the flat forecasts that forward validation was
-        eliminating these models for.
+        Multi-step forecasting with lags must be recursive: step 2's lag_1 is
+        step 1's prediction. Freezing features at their last observed value
+        instead is what produces the flat forecasts forward validation
+        eliminates.
         """
         self._require_trained()
 

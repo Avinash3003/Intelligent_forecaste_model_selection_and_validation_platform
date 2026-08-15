@@ -1,17 +1,12 @@
-"""LLMOps observability — one run's LLM activity, reshaped for the UI.
+"""One run's LLM activity, reshaped for the Observability page.
 
-Reads the exact same `PipelineExecutionResult` the Results dashboard and
-the debug view read (`business_insights` for the structured per-group
-insight, `llm_trace` for the detailed per-call record) and merges them into
-one row per forecast group. No new storage, no new MLflow round trip: both
-fields already travel through `summary.json`, which every Runner already
-reads via `get_result()` — this module only reshapes what's already there.
+Merges business_insights (the per-group insight) and llm_trace (the per-call
+record) into one row per forecast group. Both already travel in the run
+summary, so there is no extra storage or MLflow round trip.
 
-A forecast group that never made a real LLM call (the template fallback
-path, which `LLMInsightEngine` takes without touching Azure OpenAI at all)
-still gets a row here, with `provider="template"` and no tokens/latency —
-Section 13's LLMOps view is meant to show what happened to every key, not
-only the ones that reached the network.
+A group that took the template fallback and never called Azure OpenAI still
+gets a row, with provider="template" and no tokens — the view is meant to
+show what happened to every key, not only the ones that hit the network.
 """
 
 from __future__ import annotations
@@ -38,13 +33,10 @@ class LLMOpsService:
         self._executor = executor or get_pipeline_executor()
 
     def get_llmops(self, run_id: str) -> LLMOpsResponse:
-        """Assemble the LLMOps view.
+        """The LLMOps view.
 
-        Never raises for a run with no LLM activity — a local run with
-        Azure OpenAI disabled, or one still executing, simply has nothing
-        to show yet, which `available=False` reports honestly rather than
-        as an error. `UnknownRunError` still propagates: an unknown run_id
-        is a 404, not an empty observability view.
+        Reports available=False for a run with no LLM activity rather than
+        raising. UnknownRunError still propagates, since that is a 404.
         """
         result = self._executor.get_result(run_id)
         insights = result.business_insights or {}
@@ -74,13 +66,9 @@ class LLMOpsService:
         )
 
     def get_prompt_usage(self) -> PromptUsageResponse:
-        """LLM usage/performance/quality across every completed run,
-        grouped by the prompt version each run actually used.
+        """Usage across every completed run, grouped by prompt version.
 
-        Built entirely from repeated `get_llmops()` calls — the exact same
-        per-run read this module already does, run once per completed run
-        instead of once. No second trace format, no new storage: a prompt
-        version's numbers are just its runs' numbers, summed.
+        Just repeated get_llmops() calls summed — no second trace format.
         """
         accumulators: dict[str, _PromptVersionAccumulator] = {}
 
@@ -193,19 +181,14 @@ class LLMOpsService:
 
 
 class _PromptVersionAccumulator:
-    """Running totals for one prompt version, across however many
-    completed runs used it.
+    """Running totals for one prompt version across every run that used it.
 
-    Usage/performance figures (calls, tokens, cost, latency) come from
-    each run's own `summary` — already the exact count of real network
-    attempts, correctly computed once per run. Quality/reliability figures
-    (groundedness, validation, retry, fallback) come from each run's
-    `calls` instead — one entry per *forecast group*, carrying that
-    group's *final* outcome after any retries — because those are
-    properties of "did this key end up with a good, grounded answer",
-    not of the raw request count, and a template-only group (no network
-    attempt at all) still needs to count toward "how often did the system
-    fall back" even though it contributes zero to the call/token totals.
+    Usage figures (calls, tokens, cost, latency) come from each run's summary,
+    which already counts real network attempts. Quality figures (groundedness,
+    validation, retry, fallback) come from its per-group calls instead, since
+    those describe whether a key ended up with a good answer — and a
+    template-only group must still count toward "how often did we fall back"
+    despite contributing no tokens.
     """
 
     def __init__(self, prompt_version: str) -> None:

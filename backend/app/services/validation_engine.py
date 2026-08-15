@@ -1,27 +1,16 @@
-"""Validation Engine — decides whether the user's metadata selections can
-actually be forecast (Section 6.2, "Data Ingestion & Validation").
+"""Decides whether the user's column choices can actually be forecast.
 
-This service owns *every* forecasting judgement in the platform. The
-frontend deliberately makes none: it shows all columns in every dropdown
-and renders whatever report this engine returns. Concentrating the logic
-here is what lets validation rules evolve without a UI release, and keeps
-one authoritative answer to "is this dataset forecastable".
+Every forecasting judgement lives here — the frontend makes none, it just
+renders this report — so rules can change without a UI release.
 
-Two design decisions drive the implementation:
+Two things shape the implementation:
+  - Three states, not two. CSVs store almost everything as text, so a column
+    holding "2025-09-09" is CONVERTIBLE (safely cast during preprocessing),
+    not INVALID. Only genuinely uncastable values ("Apple") are INVALID.
+  - Checks read a bounded sample rather than converting whole columns, so
+    validation stays interactive on large uploads.
 
-  * Three-state validation. A column is not rejected for having the wrong
-    raw dtype. CSV uploads store nearly everything as text, so a column
-    holding "2025-09-09" or "100" is reported CONVERTIBLE — safely
-    castable during preprocessing — rather than INVALID. Only values that
-    genuinely cannot be cast ("ABC123", "Apple") are INVALID.
-
-  * Sample-based type checks. Convertibility is judged from a bounded,
-    representative sample rather than by converting the whole column, so
-    validation stays fast and interactive on large uploads. Conversion
-    itself happens later, during preprocessing after deployment.
-
-Nothing here references a specific column name; every check reads the
-roles the user assigned.
+Nothing here names a specific column; every check reads the assigned roles.
 """
 
 import pandas as pd
@@ -68,17 +57,7 @@ class ValidationEngine:
     def validate(
         self, dataframe: pd.DataFrame, config: NormalizedMetadataConfig, dataset_name: str
     ) -> MetadataValidationResponse:
-        """Validate a metadata mapping against the real dataset.
-
-        Args:
-            dataframe: The uploaded dataset.
-            config: Normalized config produced by MetadataInterpreter.
-            dataset_name: Original filename, for display.
-
-        Returns:
-            The full validation report plus the forecast-suitability
-            verdict. Called by /metadata/validate as the final step.
-        """
+        """The full validation report plus the forecast-suitability verdict."""
         checks = [
             self._validate_date_column(dataframe, config),
             self._validate_target_column(dataframe, config),
@@ -244,17 +223,11 @@ class ValidationEngine:
         )
 
     def _validate_frequency(self, config: NormalizedMetadataConfig) -> ValidationCheckItem:
-        """Report the detected sampling grain.
+        """Report the detected grain.
 
-        Detection only — the grain is reported as found. Sub-monthly grains
-        are accepted, but flagged CONVERTIBLE (not VALID) since the
-        pipeline silently aggregates them up to monthly before forecasting
-        — the same "reported now, converted automatically later" pattern
-        used for text-encoded date/target columns, so this warning surfaces
-        alongside them under Forecast Suitability. Grains coarser than
-        monthly are rejected outright, since reaching month level from them
-        would require disaggregating below the source grain, which the
-        platform does not do (Section 6.2).
+        Sub-monthly is CONVERTIBLE, not VALID: the pipeline aggregates it up
+        to monthly, and the user should know that is coming. Coarser than
+        monthly is rejected outright, since that would need disaggregation.
         """
         frequency = config.forecast_frequency
 
@@ -300,12 +273,8 @@ class ValidationEngine:
         config: NormalizedMetadataConfig,
         checks: list[ValidationCheckItem],
     ) -> ForecastSuitability:
-        """Aggregate every check into one verdict.
-
-        Any INVALID check blocks deployment. CONVERTIBLE checks do not —
-        they describe work preprocessing will do automatically — but they
-        are surfaced as warnings so the user knows a conversion is coming.
-        """
+        """One verdict from every check: INVALID blocks deployment, CONVERTIBLE
+        only warns, since preprocessing handles it automatically."""
         blocking = [check.description for check in checks if check.status is ValidationStatus.INVALID]
         warnings = [check.description for check in checks if check.status is ValidationStatus.CONVERTIBLE]
 
@@ -342,13 +311,8 @@ class ValidationEngine:
     # ------------------------------------------------------------------
 
     def _sample(self, series: pd.Series) -> pd.Series:
-        """Take a bounded, representative sample of a column's values.
-
-        Values are drawn evenly across the whole column rather than from
-        the head, so a file whose first rows are clean but whose later rows
-        are malformed is still judged honestly — without paying to scan or
-        convert the entire dataset.
-        """
+        """A bounded sample drawn evenly across the column, so a file with clean
+        first rows and malformed later ones is still judged honestly."""
         non_null = series.dropna()
         if len(non_null) <= SAMPLE_SIZE:
             return non_null

@@ -1,15 +1,8 @@
-"""The authoritative list of derived feature columns a deployment request
-may select (Priority C) — mirrors `forecast_engine.config.
-derived_features_config.SUPPORTED_FEATURE_IDS` exactly.
+"""The derived feature columns a deployment request may select.
 
-Kept as a small, separate duplicate rather than an import of that module:
-the backend and forecast_engine are two independently deployable processes
-with separate dependencies (the backend invokes forecast_engine only as an
-external subprocess/job, never in-process — see LocalRunner/
-DatabricksRunner), the same reasoning `services/profile_service.py`'s
-`compute_date_range()` already documents. The engine itself validates
-again, defensively, regardless of what passes here — this is the fast,
-user-facing rejection, not the only one.
+Mirrors the engine's own list. Duplicated rather than imported because the
+two are separately deployed processes; the engine validates again anyway,
+so this is the fast user-facing rejection, not the only one.
 """
 
 from __future__ import annotations

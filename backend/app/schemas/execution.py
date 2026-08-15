@@ -4,13 +4,8 @@ from app.orchestration.schemas import ExecutionBackend, JobStatus
 
 
 class ExecutionSubmitResponse(BaseModel):
-    """Response for `POST /execution/submit` — intentionally minimal.
-
-    The full `PipelineExecutionResult` is only meaningful once a run
-    reaches a terminal status; immediately after submission there is
-    nothing more to report than "here is your run id, and here is where it
-    stands right now".
-    """
+    """Deliberately minimal: right after submission there is nothing to report
+    beyond the run id and its current status."""
 
     run_id: str
     job_status: JobStatus

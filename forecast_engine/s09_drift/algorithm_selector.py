@@ -1,11 +1,8 @@
-"""Dynamic Drift Algorithm Selection (Section 6.7).
+"""Chooses a drift algorithm from the history's own properties.
 
-Chooses one of the four registered drift algorithms for a forecasting
-group's history, based only on properties measurable from that history
-itself: sample size, cardinality, and a normality test. No algorithm is
-hardcoded per dataset or per model family — the same function looks at
-every group's history exactly the same way and can land on a different
-algorithm for each.
+Sample size, cardinality and a normality test decide it — nothing is
+hardcoded per dataset or model family, and the same function can land on a
+different algorithm for every group.
 """
 
 from __future__ import annotations
@@ -25,24 +22,19 @@ class DriftAlgorithmSelector:
         self._config = config or AlgorithmSelectionConfig()
 
     def select(self, history: np.ndarray) -> DriftAlgorithmSelection:
-        """Pick the drift algorithm this history is best suited to.
+        """Pick the algorithm this history suits, first matching branch wins:
 
-        The decision is a four-way tree, evaluated in this order — the first
-        matching branch wins:
+            too few samples ....................... PSI
+            low cardinality (discrete-looking) .... PSI
+            normal ................................ Wasserstein
+            non-normal, enough for KS ............. Kolmogorov-Smirnov
+            non-normal, too few for KS ............ Jensen-Shannon
 
-            too few samples ............................ PSI
-            low cardinality (discrete-looking) ......... PSI
-            normal distribution ........................ Wasserstein
-            non-normal, enough samples for KS .......... Kolmogorov-Smirnov
-            non-normal, too few for KS ................. Jensen-Shannon
+        Order matters: size and cardinality come before the normality test,
+        which is meaningless on a tiny or near-discrete sample.
 
-        The order matters: sample size and cardinality are checked before the
-        normality test because a normality test on a tiny or near-discrete
-        sample is not meaningful in the first place.
-
-        Every branch records its own `reason` in prose, which is what the
-        dashboard and MLflow show — the selection is never reported as a bare
-        algorithm name with no justification.
+        Every branch records its own reason, so the dashboard never shows a
+        bare algorithm name with no justification.
         """
         config = self._config
         n = int(history.size)

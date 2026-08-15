@@ -1,23 +1,15 @@
-"""LLM Business Insights configuration (Section 6.12) + LLMOps (Section 13).
+"""Everything an Azure OpenAI call needs, read from the environment.
 
-The platform uses Azure OpenAI exclusively — there is no provider
-abstraction to configure a choice between providers. Every value an Azure
-OpenAI Chat Completions call needs (endpoint, credential, deployment, API
-version) lives here, centralized, and is populated from environment
-variables rather than ever being hardcoded. A prompt's *wording* is a
-separate concern, kept in `forecast_engine/s11_llm/prompts/`.
+Azure OpenAI only — there is no provider abstraction. Prompt wording is a
+separate concern and lives in s11_llm/prompts/.
 
-Credentials are read from the environment once, at config-construction
-time, and held only in memory for the lifetime of the run — never written
-to a log, a report, or `PipelineResult`.
+Credentials are read once at construction and held in memory for the run —
+never written to a log, a report, or the result.
 
-This module also carries every LLMOps knob Section 13 requires: token
-pricing (13.2 — configurable, never invented), a per-run token budget
-(13.2), model routing between a cheap and a strong deployment (13.2), and
-the fallback deployment used when the primary is unavailable (13.2/11 —
-reliability). All of it defaults to "off" or "unconfigured" rather than a
-guessed value, so an unconfigured deployment degrades visibly instead of
-reporting a number nobody set.
+Also carries the LLMOps knobs: token pricing, a per-run token budget, model
+routing, and the fallback deployment. All default to unconfigured rather
+than a guess, so a deployment degrades visibly instead of reporting a number
+nobody set.
 """
 
 from __future__ import annotations

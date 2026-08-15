@@ -1,11 +1,8 @@
-"""Explainability configuration (Section 6.10 — SHAP / Feature Importance).
+"""Thresholds for the SHAP / feature-importance engine.
 
-Owns every threshold the SHAP/feature-importance engine uses. Previously
-these lived on `RankingConfig` because the computation ran inline during
-ranking; Phase 8 moves generation to its own stage ahead of ranking, so the
-configuration moves with it. `RankingConfig` keeps only the composite weight
-that decides how much this signal counts toward the ranking score — it no
-longer needs to know how the signal itself is produced.
+Explainability runs as its own stage ahead of ranking, so its settings live
+here. RankingConfig keeps only the weight deciding how much the signal
+counts, not how it is produced.
 """
 
 from __future__ import annotations
@@ -16,13 +13,8 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ExplainabilityConfig:
-    """Controls SHAP / feature-importance generation (Section 6.10).
-
-    Governs both the SHAP path (tree models, when the `shap` package is
-    installed) and the permutation-importance / univariate-fallback paths
-    used for every other model family, so no surviving model is ever
-    skipped.
-    """
+    """Governs both the SHAP path (tree models, when shap is installed) and the
+    permutation/univariate fallbacks, so no surviving model is skipped."""
 
     enabled: bool = True
 

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from app.config.settings import Settings
 from app.orchestration.dcs_runner import DcsRunner
 from app.orchestration.exceptions import RunNotReadyError
-from app.orchestration.schemas import ExecutionBackend, JobStatus, PipelineExecutionRequest
+from app.orchestration.schemas import ExecutionBackend, PipelineExecutionRequest
 
 
 class _FakeFiles:

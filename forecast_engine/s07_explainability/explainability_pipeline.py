@@ -1,9 +1,8 @@
-"""Explainability orchestration — Phase 8 end to end.
+"""Generates explainability for every surviving (group, model) pair.
 
-Generates SHAP/importance results for every surviving (group, model) pair
-from Phase 7A, mirroring `EvaluationPipeline`'s per-pair failure isolation.
-Runs strictly before Model Ranking, whose composite score consumes this
-report's output rather than computing importance itself.
+Same per-pair failure isolation as the evaluation pipeline. Runs strictly
+before ranking, whose composite score consumes this report rather than
+computing importance itself.
 """
 
 from __future__ import annotations

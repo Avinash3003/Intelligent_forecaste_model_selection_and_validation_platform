@@ -1,17 +1,12 @@
-"""Turning infrastructure failures into messages a user can act on.
+"""Turns infrastructure failures into messages a user can act on.
 
-Two separate jobs live here, and they are separate on purpose:
+Two jobs, deliberately separate:
+  - friendly_message() translates the failures that have a real explanation
+    (missing Azure OpenAI config, unreachable workspace, permissions).
+  - redact() strips anything resembling a secret, token or internal URL.
 
-  * `friendly_message()` *translates* — it recognises the handful of
-    infrastructure failures that have a real, actionable explanation
-    (missing Azure OpenAI configuration, an unreachable workspace, a
-    permission problem) and states the cause in product terms.
-  * `redact()` *defends* — it strips anything that looks like a secret,
-    a token, or an internal URL from whatever text is left.
-
-Everything that reaches a client goes through both, so an unrecognised
-error degrades to a generic message rather than leaking a stack trace,
-a connection string or a workspace URL.
+Everything reaching a client goes through both, so an unrecognised error
+degrades to a generic message rather than leaking a connection string.
 """
 
 from __future__ import annotations
@@ -89,12 +84,10 @@ def redact(text: str) -> str:
 
 
 def friendly_message(error: BaseException | str, *, fallback: str = GENERIC_MESSAGE) -> str:
-    """A message safe and useful to show a user for `error`.
+    """A message safe to show a user.
 
-    A recognised infrastructure failure is explained in product terms. An
-    unrecognised one falls back to `fallback` rather than to the raw text:
-    an unclassified error is exactly the case where we do not know what it
-    might contain.
+    Recognised failures are explained in product terms; anything else falls
+    back to the generic text, since we cannot know what it contains.
     """
     raw = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
     for pattern, message in _TRANSLATIONS:
@@ -104,9 +97,9 @@ def friendly_message(error: BaseException | str, *, fallback: str = GENERIC_MESS
 
 
 def safe_detail(error: BaseException | str, *, fallback: str = GENERIC_MESSAGE) -> str:
-    """`friendly_message`, then `redact` — the function routes should use.
+    """friendly_message then redact — what routes should call.
 
-    Redaction runs even on a translated message so a future translation
-    that interpolates part of the original can never reintroduce a leak.
+    Redaction runs even on translated text, so a future translation that
+    interpolates the original cannot reintroduce a leak.
     """
     return redact(friendly_message(error, fallback=fallback)) or fallback

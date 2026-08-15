@@ -26,10 +26,7 @@ logger = logging.getLogger("forecastiq.api")
 
 settings = get_settings()
 
-# Fail at import time, not per request. A deployment that is neither local
-# development nor authenticated is a configuration mistake with a security
-# consequence, and refusing to start is the only response that cannot be
-# ignored.
+# Refuse to start rather than serve an unauthenticated production deployment.
 if not settings.auth_enabled and settings.is_production_like:
     raise AuthConfigurationError(
         f"AUTH_ENABLED is false but APP_ENV is '{settings.app_env}'. "
@@ -37,8 +34,7 @@ if not settings.auth_enabled and settings.is_production_like:
     )
 
 if settings.auth_enabled:
-    # Surfaces a missing tenant/audience now rather than as a blanket 401
-    # on every request once the frontend is already deployed.
+    # Catch a missing tenant/audience now, not as a 401 on every request later.
     get_token_validator().require_configuration()
 
 app = FastAPI(
@@ -60,12 +56,7 @@ app.add_middleware(
 
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-    """Report *what* is wrong with a request, never how it is parsed.
-
-    FastAPI's default body enumerates pydantic locations and internal type
-    names. Users get the field names and nothing else; the full detail is
-    logged for whoever is debugging it.
-    """
+    """Return the offending field names only; log the full pydantic detail."""
     logger.warning("Request validation failed for %s: %s", request.url.path, exc.errors())
     fields = sorted({str(error["loc"][-1]) for error in exc.errors() if error.get("loc")})
     detail = (
@@ -78,18 +69,12 @@ async def handle_validation_error(request: Request, exc: RequestValidationError)
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    """Last line of defence: no traceback, credential or endpoint escapes.
-
-    The real exception is logged with its stack trace; the client receives
-    a translated, redacted message (see `app/utils/errors.py`).
-    """
+    """Log the traceback, return a redacted message — never leak internals."""
     logger.exception("Unhandled error serving %s", request.url.path)
     return JSONResponse(status_code=500, content={"detail": safe_detail(exc)})
 
 
-# Routed at the root today (matching the current frontend contract) rather
-# than under settings.api_v1_prefix; switch to the prefix once the frontend
-# is updated to call versioned paths.
+# Mounted at the root to match the current frontend contract.
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(upload.router)

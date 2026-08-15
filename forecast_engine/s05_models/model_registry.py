@@ -1,19 +1,12 @@
-"""Model Registry — the trainer's only route to a forecasting model.
+"""The trainer's only route to a model.
 
-The trainer never imports or constructs a model class directly. It asks the
-registry for the models the user selected, and the registry resolves each
-declaration to an adapter class by import path, checks that the backing
-library is present, and constructs instances on demand.
+The trainer never imports a model class directly: it asks the registry,
+which resolves each declaration to an adapter by import path, checks the
+backing library is present, and constructs instances on demand.
 
-That indirection buys three things the platform needs:
-
-  * Onboarding a model is registering a ModelSpec (Section 8.4) — the
-    training loop never changes.
-  * Only selected models are loaded. Section 5.2 requires that no model
-    outside the user's selection is trained or considered, and a model
-    never selected is never even imported.
-  * A missing optional dependency degrades to an Unavailable model instead
-    of failing the run.
+That buys three things: onboarding a model is registering a spec, a model
+never selected is never even imported, and a missing optional dependency
+degrades to Unavailable instead of failing the run.
 """
 
 from __future__ import annotations

@@ -14,12 +14,11 @@ from forecast_engine.s06_evaluation.evaluation_report import ForwardForecast
 
 
 class FinalSelectionStatus(str, Enum):
-    """Outcome of Final Production Model Selection for one forecast group.
+    """How selection ended for one group.
 
-    FALLBACK_USED and NO_MODEL_AVAILABLE are both "no ranked candidate
-    survived Drift Validation", but only the first produced a usable
-    forecast — the second means even the configured fallback could not be
-    trained on this group's data.
+    Both FALLBACK_USED and NO_MODEL_AVAILABLE mean no ranked candidate
+    survived drift validation, but only the first produced a usable forecast;
+    the second means even the fallback could not be trained.
     """
 
     SELECTED = "Selected"

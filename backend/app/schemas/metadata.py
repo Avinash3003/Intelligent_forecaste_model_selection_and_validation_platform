@@ -4,13 +4,11 @@ from pydantic import BaseModel, Field
 
 
 class AggregationMethod(str, Enum):
-    """How a sub-monthly target is rolled up to the monthly grain.
+    """How a sub-monthly target is rolled up to monthly.
 
-    All forecasting runs at month level, so Daily/Weekly datasets are
-    aggregated during preprocessing. The right method depends on what the
-    target measures — SUM for flow quantities (units sold), MEAN or LAST
-    for stock-type levels (price, inventory) — which only the user knows,
-    hence the explicit choice.
+    The right method depends on what the target measures — SUM for flows
+    (units sold), MEAN or LAST for levels (price, inventory) — which only
+    the user knows, hence the explicit choice.
     """
 
     SUM = "sum"
@@ -19,13 +17,10 @@ class AggregationMethod(str, Enum):
 
 
 class MetadataMapping(BaseModel):
-    """The column-role selections a user makes in Metadata Mapping, with no
-    file reference attached. Reused wherever only the selections themselves
-    matter — e.g. nested inside DeploymentRequest, which already carries its
-    own top-level `file_id`.
+    """The user's column-role selections, with no file reference attached.
 
-    `aggregation_method` is chosen after validation and only applies when
-    the detected grain is finer than monthly; it is ignored otherwise.
+    aggregation_method is chosen after validation and applies only when the
+    detected grain is finer than monthly.
     """
 
     date_column: str
@@ -53,14 +48,12 @@ class DatasetShape(BaseModel):
 
 
 class ValidationStatus(str, Enum):
-    """Outcome of a single metadata validation.
+    """Outcome of one validation check.
 
-    CONVERTIBLE is the important middle state: a column whose raw storage
-    type is wrong for its assigned role, but whose values can be safely
-    converted during preprocessing (text "2025-09-09" used as a date, text
-    "100" used as a target). Rejecting these outright would fail datasets
-    the platform can handle perfectly well, since CSV uploads store almost
-    everything as text.
+    CONVERTIBLE is the important middle state: the raw type is wrong for the
+    role but the values cast safely during preprocessing (text "2025-09-09"
+    as a date). Rejecting those would fail datasets the platform handles
+    fine, since CSVs store almost everything as text.
     """
 
     VALID = "Valid"
@@ -77,13 +70,8 @@ class SuitabilityStatus(str, Enum):
 
 
 class NormalizedMetadataConfig(BaseModel):
-    """The single normalized object produced by MetadataInterpreter.
-
-    This is the contract the rest of the platform is built around: the
-    ValidationEngine consumes it today, and the future Databricks pipeline
-    will consume it directly instead of re-parsing frontend metadata
-    (Section 4 — the orchestration/results contracts decouple layers).
-    """
+    """The normalized object MetadataInterpreter produces, and the contract
+    everything downstream reads instead of re-parsing frontend metadata."""
 
     date_column: str
     target_column: str
@@ -97,11 +85,10 @@ class NormalizedMetadataConfig(BaseModel):
 
 
 class ValidationCheckItem(BaseModel):
-    """One row of the Metadata Validation Report.
+    """One row of the validation report.
 
-    `status_label` lets a check display something more specific than its
-    status on the badge — the Frequency check shows the detected grain
-    ("Daily") while still reporting status VALID for decision logic.
+    status_label lets a check show something more specific than its status —
+    Frequency shows "Daily" while still reporting VALID for decision logic.
     """
 
     id: str
@@ -112,11 +99,8 @@ class ValidationCheckItem(BaseModel):
 
 
 class ForecastSuitability(BaseModel):
-    """Final verdict shown after the validation report.
-
-    `reasons` lists every blocking or cautionary finding, so a user sees
-    all problems at once rather than fixing them one run at a time.
-    """
+    """The final verdict, listing every finding at once so a user is not
+    fixing problems one run at a time."""
 
     status: SuitabilityStatus
     summary: str
@@ -124,11 +108,10 @@ class ForecastSuitability(BaseModel):
 
 
 class ForecastConfigurationSummary(BaseModel):
-    """Interpreted metadata accompanying a validated configuration.
+    """Interpreted metadata for a validated configuration.
 
-    Field names mirror the frontend's summary cards so the payload can be
-    consumed with no reshaping. Frequency is reported exactly as detected —
-    no normalization or aggregation is applied or implied at this stage.
+    Field names mirror the frontend's cards so no reshaping is needed.
+    Frequency is exactly as detected; nothing is aggregated at this stage.
     """
 
     dataset_name: str

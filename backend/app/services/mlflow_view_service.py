@@ -1,11 +1,8 @@
-"""Run-level MLflow governance view (Section 6.11 / reference "run traceability").
+"""The run-level view: what happened across the whole run.
 
-Deliberately *not* the Results payload. Results answers "what happened for this
-one key" — the decision, its chart, its narrative. This answers "what happened
-in this run overall": how many keys were processed, what was logged to the
-tracking store, and the per-key outcome roll-up an auditor scans before opening
-any single key. Sharing a service between the two would force one of them to
-carry the other's shape, so they stay separate readers over the same result.
+Deliberately separate from the Results payload, which answers "what happened
+for this one key". This answers "how many keys, what was logged, how did each
+come out" — the roll-up an auditor scans before opening any single key.
 """
 
 from __future__ import annotations
@@ -109,13 +106,11 @@ class MLflowViewService:
         return None
 
     def _hyperparameter_records(self, result: PipelineExecutionResult) -> list[HyperparameterRecord]:
-        """Every (key, model) pair's final hyperparameters, tied to its
-        real evaluation outcome — read entirely from reports the pipeline
-        already produced (training/backtesting/ranking/winner_model), the
-        same ones the rest of this page already reads. Nothing here is
-        recomputed or invented: a model with no hyperparameter record
-        (the fallback path, fitted at selection time rather than through
-        training) is reported as unavailable, never filled with a guess.
+        """Each (key, model) pair's final hyperparameters and its outcome.
+
+        Read from reports the pipeline already produced. A model with no
+        record (the fallback, fitted at selection time) is reported as
+        unavailable rather than filled with a guess.
         """
         training_results = ((result.metrics or {}).get("training") or {}).get("results") or []
         backtest_by_key = {
@@ -208,12 +203,8 @@ class MLflowViewService:
         )
 
     def _parameters(self, meta: dict[str, Any], outcomes: list[PerKeyOutcome]) -> list[ParameterEntry]:
-        """The run configuration, as MLflow recorded it.
-
-        Only the handful of parameters that identify *this* run are surfaced —
-        the full set (200+, one block per key/model) is an artifact, not a
-        table anyone reads on a page.
-        """
+        """The few parameters identifying this run; the full 200+ set is an
+        artifact, not a table anyone reads on a page."""
         config = meta.get("configuration") or {}
         entries = [
             ("selected_models", ", ".join(meta.get("selected_models") or []) or "all registered"),

@@ -1,13 +1,9 @@
-"""Temporal Fusion Transformer adapter (pytorch-forecasting).
+"""The deep-learning candidate, backed by pytorch-forecasting.
 
-TFT is the platform's deep-learning candidate. Its dependencies (PyTorch,
-Lightning) are multi-gigabyte, so they are intentionally excluded from the
-engine's default install: a deployment that wants TFT installs
-`pytorch-forecasting` explicitly, and one that does not simply sees TFT
-reported as Unavailable while every other model trains normally.
-
-That graceful degradation is the point of the registry's availability
-check — an absent optional dependency must never fail a run.
+Its dependencies are multi-gigabyte and deliberately excluded from the
+default install: a deployment that wants TFT installs pytorch-forecasting
+explicitly, and one that does not sees TFT reported Unavailable while every
+other model trains normally.
 """
 
 from __future__ import annotations

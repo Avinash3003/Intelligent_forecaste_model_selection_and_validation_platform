@@ -1,9 +1,7 @@
-"""Estimation API — the "Estimate" step between Configure and Run.
+"""The Estimate step between Configure and Run.
 
-Reuses the same resolve -> load path as /profile and /metadata/validate
-rather than re-implementing file handling, and calls no forecasting code:
-the estimate is derived from the dataset's shape and the selected model
-mix, never from a trial run.
+Reuses the same resolve -> load path as /profile, and runs no forecasting
+code: the estimate comes from the dataset's shape and the model mix.
 """
 
 from fastapi import APIRouter, Depends, HTTPException

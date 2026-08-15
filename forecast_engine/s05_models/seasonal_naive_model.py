@@ -1,15 +1,11 @@
-"""Seasonal Naive adapter — the platform's fallback forecasting model.
+"""The fallback model, used when every ranked candidate fails drift validation.
 
-Section 6.9 requires a configured fallback that is used whenever every
-ranked candidate fails Drift Validation for a forecasting group. Seasonal
-naive is the standard choice for that role: it has no hyperparameters to
-mistune, cannot fail to converge, and its forecast is simply "what happened
-at this point in the cycle last time" — a transparent, always-available
-baseline rather than another candidate competing for first place.
+Seasonal naive is the standard choice: no hyperparameters to mistune, cannot
+fail to converge, and its forecast is simply "what happened at this point in
+the cycle last time" — a transparent baseline, not another competitor.
 
-Not part of the normal candidate set trained in Phase 6 (its ModelSpec is
-registered with `enabled=False`); it is looked up directly by name only when
-the Final Production Model Selection stage needs it.
+Registered with enabled=False, so it is never trained as a normal candidate;
+final selection looks it up by name only when it is needed.
 """
 
 from __future__ import annotations
@@ -25,9 +21,8 @@ from forecast_engine.s01_preprocessing.series_builder import ForecastSeries
 class SeasonalNaiveModel(BaseForecastingModel):
     """Repeats each period's value from one seasonal cycle earlier.
 
-    Falls back to the plain naive method (repeat the last observed value)
-    when the series is shorter than one full seasonal cycle, so the model
-    always produces a complete forecast regardless of history length.
+    Falls back to repeating the last observed value when the series is
+    shorter than a full cycle, so a forecast is always produced.
     """
 
     # No external library, so always available

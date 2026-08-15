@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.dependencies import get_current_principal
-from app.auth.models import Permission, Principal, Role
+from app.auth.models import Principal, Role
 from app.auth.rbac import permissions_for
 from app.config.settings import Settings, get_settings
 from app.main import app

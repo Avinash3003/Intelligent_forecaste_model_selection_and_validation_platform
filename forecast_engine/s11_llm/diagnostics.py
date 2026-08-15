@@ -1,18 +1,14 @@
-"""LLM configuration and connectivity diagnostics (Section 13 — LLMOps).
+"""Checks whether the LLM is configured and reachable.
 
-Two checks, deliberately separate:
+Two deliberately separate checks:
+  - check_configuration: static, no network call. Reports whether each
+    setting is present, never its value, so it is safe to log or return.
+  - run_connectivity_test: exactly one request, the smallest that proves
+    the whole path works (auth, endpoint, deployment, telemetry) without the
+    cost of a real insight prompt.
 
-  * `check_configuration` — static, deterministic, makes no network call.
-    Reports *whether* each required setting is present, never a value —
-    safe to print, log, or return from an API endpoint.
-  * `run_connectivity_test` — makes exactly ONE Azure OpenAI request, the
-    smallest one that can prove the whole request path works (auth,
-    endpoint, deployment resolution, token/latency capture) without the
-    cost or noise of a real business-insight prompt.
-
-Neither belongs inside `LLMInsightEngine`: that class's job is turning a
-finished run into insights, not answering "is this deployment reachable" —
-a question an operator needs answered before or independent of any run.
+Neither belongs in the insight engine, whose job is turning a run into
+insights — not answering "is this deployment reachable".
 """
 
 from __future__ import annotations

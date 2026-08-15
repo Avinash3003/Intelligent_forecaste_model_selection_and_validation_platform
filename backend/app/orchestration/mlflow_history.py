@@ -1,27 +1,10 @@
-"""Persistent execution history, read from MLflow.
+"""Reads finished-run history back from MLflow.
 
-MLflow is already the platform's system of record for a finished run —
-parameters, metrics, artifacts, registered models, and (since the tracking
-layer opens its Parent Run before the first stage) the run's terminal
-status and failure reason too. This module is the read side of that: it
-reconstructs past executions from the tracking store so run history
-survives a backend restart, which an in-memory job registry cannot.
+Memory owns active runs; MLflow owns finished ones. That is what lets run
+history survive a backend restart, and it keeps MLflow a tracking store
+rather than a job scheduler — live status is never read from here.
 
-The split it enforces is deliberate:
-
-  * **Memory** owns *active* execution — RUNNING/PENDING jobs, the
-    subprocess handle, cancellation. Those exist only while a run is
-    executing and are meaningless after a restart.
-  * **MLflow** owns *finished* execution — everything a completed or
-    failed run left behind.
-
-Nothing here is ever consulted for live status; a run still executing is
-answered from memory. That is what keeps MLflow an experiment-tracking
-store rather than a job scheduler.
-
-Read-only by construction: this module never starts, ends, or mutates an
-MLflow run. Writing is the engine's job alone, which is what keeps a
-single writer and no duplicate source of truth.
+Read-only apart from mark_cancelled: the engine is the only writer.
 """
 
 from __future__ import annotations
@@ -91,12 +74,10 @@ class MLflowHistoryStore:
         return self._get_client() is not None
 
     def list_runs(self, limit: int = DEFAULT_HISTORY_LIMIT) -> list[RunListing]:
-        """Every finished run in the configured experiment, newest first.
+        """Every finished run, newest first.
 
-        Returns an empty list — never raises — if MLflow is unreachable or
-        the experiment does not exist yet: a history view that cannot reach
-        its store should degrade to "no history", not break the page that
-        also has to show live runs.
+        Returns an empty list rather than raising when MLflow is
+        unreachable, so history degrades to "none" instead of breaking the page.
         """
         client = self._get_client()
         if client is None:
@@ -123,12 +104,10 @@ class MLflowHistoryStore:
         return listings
 
     def get_summary(self, run_id: str) -> dict[str, Any] | None:
-        """The consolidated run record for `run_id`, or None if absent.
+        """The engine's own summary payload for a run, or None.
 
-        This is the exact `PipelineContext.summary()` payload the engine
-        logged, so the caller can hand it straight to `result_mapper` — the
-        same function the live path uses — instead of reassembling a run
-        from individual artifacts through a second mapping.
+        Handed straight to result_mapper, the same function the live path
+        uses, so a restored run needs no second mapping.
         """
         with self._lock:
             cached = self._summary_cache.get(run_id)
@@ -157,12 +136,10 @@ class MLflowHistoryStore:
         return summary
 
     def get_listing(self, run_id: str, with_stages: bool = False) -> RunListing | None:
-        """One run's history entry, or None if it is not in the store.
+        """One run's history entry, or None.
 
-        `with_stages` additionally loads the run's stage trail out of the
-        summary artifact. It is off by default because that costs an
-        artifact download — acceptable for a detail view opened once,
-        wasteful on the status poll that runs every few seconds.
+        with_stages also loads the stage trail, which costs an artifact
+        download — fine for a detail view, wasteful on a status poll.
         """
         client = self._get_client()
         if client is None:
@@ -244,24 +221,14 @@ class MLflowHistoryStore:
         cancelled_by_display_name: str | None,
         cancelled_at: str,
     ) -> bool:
-        """Reconcile a cancelled run's MLflow Parent Run, if one exists.
+        """Mark a cancelled run KILLED in MLflow, if it ever opened a run.
 
-        A run cancelled before its Parent Run could even be opened (still
-        PENDING, or tracking disabled/unreachable) has nothing to reconcile
-        here — that is a normal case, reported as `False`, not an error.
+        Returns False (not an error) when there was nothing to reconcile —
+        cancelled while still PENDING, or tracking unreachable.
 
-        Idempotent: safe to call more than once for the same run. Tags are
-        simply re-set to the same values, and `set_terminated` is only
-        attempted while MLflow still reports the run `RUNNING` — calling
-        this again after that succeeds is a no-op beyond re-setting tags.
-
-        Deliberately does not delete the MLflow run itself: `begin()` logs
-        only `run_id`/`dataset_name`/`started_by_*` as tags, and nothing
-        else is ever logged to a run before `track()` — the final stage a
-        cancelled run by definition never reached. So a cancelled run's
-        MLflow record is already exactly the minimal metadata Section 7
-        (Feature 1.4) asks history to retain: marking it `KILLED` is
-        sufficient, there is no larger artifact set to strip away first.
+        Idempotent. The MLflow run is not deleted: nothing but a few tags is
+        logged before the final tracking stage, which a cancelled run never
+        reaches, so KILLED already leaves the minimal record history needs.
         """
         client = self._get_client()
         if client is None:

@@ -1,22 +1,12 @@
-"""The standardized Pipeline Result object.
+"""The finished run, as every downstream consumer sees it.
 
-Originally built for the LLM Insight Engine (Section 6.12), this object is
-now the single shared input to *every* downstream consumer that needs a
-finished run's results without touching the engine that produced them —
-the LLM layer and, as of this phase, the MLflow tracking layer
-(Section 6.13). Both log/interpret exactly the same object; neither
-re-derives its own view of the run from `PipelineContext`, which is what
-"do not collect information separately from each module" means in
-practice.
+The LLM layer and the MLflow tracking layer both read exactly this object;
+neither derives its own view from PipelineContext.
 
-Building it is the *only* place permitted to reach into `PipelineContext`.
-Everything past this module deals only with this already-finalized,
-already-serializable object — no live model, DataFrame, or config object
-ever crosses this boundary.
-
-`PipelineResult` is deliberately built from each stage's own `to_dict()` —
-the same plain-JSON contract already used for the API and the run summary —
-rather than by touching any model, adapter, or trainer object directly.
+Building it is the only place allowed to reach into PipelineContext — past
+this module nothing sees a live model, DataFrame or config object. It is
+assembled from each stage's own to_dict(), the same plain-JSON contract the
+API and run summary already use.
 """
 
 from __future__ import annotations
@@ -32,12 +22,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class PipelineResult:
-    """Complete, finalized execution record of one forecast run.
-
-    Every field is plain-JSON-serializable data — no consumer of this
-    object ever receives a live model, DataFrame, or config object, only
-    this.
-    """
+    """One run's finished record, entirely plain-JSON data."""
 
     run_id: str
     dataset_metadata: dict[str, Any] = field(default_factory=dict)
@@ -93,12 +78,8 @@ class PipelineResult:
 
 
 class PipelineResultBuilder:
-    """Builds a `PipelineResult` from a finished `PipelineContext`.
-
-    The one place permitted to read `PipelineContext` for LLM or MLflow
-    purposes. Everything downstream sees only the `PipelineResult` this
-    produces.
-    """
+    """Builds a PipelineResult from a finished context — the one place allowed
+    to read PipelineContext for LLM or MLflow purposes."""
 
     # Build a PipelineResult from a finished PipelineContext
     def build(self, context: "PipelineContext") -> PipelineResult:

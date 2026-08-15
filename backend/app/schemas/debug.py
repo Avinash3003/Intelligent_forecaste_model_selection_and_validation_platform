@@ -19,12 +19,8 @@ class ArtifactLocation(BaseModel):
 
 
 class DebugSummary(BaseModel):
-    """Structured execution summary for developer debugging.
-
-    Every field here is read from the same `PipelineExecutionResult` the
-    Results dashboard renders from — nothing is recomputed, so this view
-    can never disagree with the dashboard about what actually happened.
-    """
+    """Execution summary for debugging, read from the same result the
+    dashboard renders — so the two can never disagree."""
 
     model_config = ConfigDict(protected_namespaces=())
 

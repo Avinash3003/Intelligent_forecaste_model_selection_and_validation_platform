@@ -1,16 +1,12 @@
-"""Business Insight result model — the output contract of Section 6.12,
-restructured for Section 13's LLMOps requirements.
+"""What the insight stage produces.
 
-Structured JSON per forecast group is the primary contract now (Section
-13.1) — `GroupInsight` wraps one group's validated `InsightPayload` plus
-everything about *how* it was produced (provider, prompt version, retry
-count, grounding/validation status). `BusinessInsightReport` is the
-run-level envelope: one `GroupInsight` per group, plus the run's aggregate
-LLM trace summary (Section 13.4/8.5.3) so a caller never has to walk every
-call individually just to answer "how many tokens did this run use".
+GroupInsight wraps one group's validated payload plus how it was produced
+(provider, prompt version, retries, grounding and validation status).
+BusinessInsightReport is the run-level envelope: one per group, plus the
+run's aggregate trace summary, so a caller never walks every call just to
+total the tokens.
 
-Nothing here is ever read back into a forecasting decision — same
-invariant the old free-text report carried, just over structured data now.
+Nothing here is ever read back into a forecasting decision.
 """
 
 from __future__ import annotations

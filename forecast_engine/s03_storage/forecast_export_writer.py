@@ -1,15 +1,11 @@
-"""Forecast export — the business-facing forecast values, written durably.
+"""The business-facing forecast values.
 
-Distinct from the other two storage writers in this package: the curated
-writer persists the *input* the models trained on, and the model writer
-persists the *model* itself; this persists the *output* — what every group
-was actually forecast to be, over the horizon, with its confidence bounds.
-A business user exporting a run's numbers wants this file, not a `.pkl` or
-a training dataset.
+The other writers persist the input (curated) and the model; this persists
+the output — what each group was forecast to be, with bounds. This is the
+file a business user actually wants.
 
-One CSV per run, every group's forecast as its own rows — not one file per
-group, so a run's complete export is always a single download regardless of
-key count.
+One CSV per run with every group's rows in it, so a complete export is a
+single download regardless of key count.
 """
 
 from __future__ import annotations
@@ -32,11 +28,10 @@ class ForecastExportWriter:
         self._config = config or ForecastExportConfig()
 
     def write(self, winners: list[Any], run_id: str) -> dict[str, Any]:
-        """Persist every winning group's forecast as one CSV.
+        """Write every winner's forecast to one CSV.
 
-        Returns a record describing what was written — never raises: a
-        run whose forecasts could not be exported is still a complete,
-        correct run, so export failure is reported, not fatal.
+        Never raises: a run whose export failed is still a correct run, so
+        the failure is reported on the returned record.
         """
         if not self._config.enabled:
             return {"enabled": False, "persisted": False, "uri": None, "rows": 0, "error": None}

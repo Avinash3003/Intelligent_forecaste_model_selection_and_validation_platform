@@ -1,24 +1,15 @@
-"""LLM Evaluation + Regression Framework (Section 13.3) — the "when we
-change the prompt or model, is the explanation still correct" layer.
+"""The "did changing the prompt or model break the explanation" suite.
 
-Deliberately additive, not a replacement: `evaluation.py`'s `run_evaluation`
-already scores groundedness (via `grounding.check_grounding`, unmodified)
-and length-cap compliance correctly, and nothing here recomputes those —
-`check_groundedness` below calls the exact same `check_grounding` function.
-What this module adds is everything `run_evaluation` does not attempt:
-winner consistency, rejection-reason accuracy (against the engine's own
-rejection reasons, by category rather than exact wording), an explicit
-hallucination taxonomy (grounded / unsupported / contradictory, not just a
-grounded/not boolean), readability rules the v2 prompt itself specifies
-(winner named first, no repetition, no leaked JSON), schema validity (by
-reusing `schema.parse_and_validate` when the raw model response is
-available), and configurable pass/fail regression thresholds over the
-whole set.
+Additive to evaluation.py, not a replacement: groundedness and length are
+already scored there and are not recomputed — check_groundedness calls the
+same function. What this adds is winner consistency, rejection-reason
+accuracy (by category, not exact wording), an explicit hallucination
+taxonomy (grounded / unsupported / contradictory), the readability rules the
+prompt itself states, schema validity, and pass/fail thresholds over the set.
 
-Every check is deterministic — string/keyword comparison against the
-structured ground truth each `EvalCase` already carries, never a second LLM
-call grading the first one. That keeps the suite free, fast, and reusable
-in CI without new credentials.
+Every check is deterministic — comparison against the ground truth each case
+carries, never a second LLM grading the first — so the suite is free, fast,
+and needs no credentials in CI.
 """
 
 from __future__ import annotations

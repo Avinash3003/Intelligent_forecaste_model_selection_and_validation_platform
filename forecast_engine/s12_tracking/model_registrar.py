@@ -1,32 +1,20 @@
-"""Model Registry (Section 6.13, "Model Registry").
+"""Registers one model version per forecasting group.
 
-Registers exactly one model version per forecasting group: whichever one
-Final Production Model Selection (Section 6.9) actually chose, ranked
-winner or configured fallback alike. Nothing else — a ranked-but-rejected
-candidate is never registered.
+Only the model final selection actually chose — ranked winner or fallback.
+A rejected candidate is never registered.
 
-All of a dataset's keys — across every run of it — share one registered
-model, versioned rather than multiplied: a per-key registered model name
-would mean a 500-key dataset creates 500 permanent registry entries on its
-first run alone, and two unrelated datasets that happen to share a key
-name (e.g. both have "1 | 1") would silently share one model's version
-history. Each version is tagged with its `forecast_group` and `run_id`
-(see `_register_one`), so "which version is the current model for key X"
-is still a direct lookup, just via tags instead of via the registered
-model's own name.
+Every key of a dataset shares one registered model, versioned rather than
+multiplied: a per-key name would mean a 500-key dataset creates 500
+permanent entries on its first run, and two unrelated datasets sharing a key
+name would silently share one version history. Each version is tagged with
+its forecast_group and run_id, so "which version is key X" stays a direct
+lookup via tags.
 
-The registered model is a `mlflow.pyfunc.PythonModel` wrapping that group's
-already-computed forward forecast, rather than the raw fitted estimator.
-This is a deliberate, uniform choice: the model families this platform
-trains (statistical, tree-based, transformer, and the seasonal-naive
-fallback) have incompatible native prediction signatures, and a fallback
-model's own fitted estimator is not retained anywhere past the moment it
-produced its forecast (Section 6.9). One wrapper flavour that packages the
-frozen forecast the same way for every family avoids a five-way branch of
-near-identical native-flavour registration code, and keeps this layer
-working from `PipelineResult` alone — the "only log the contents of this
-object" contract Section 6.13 requires, extended to registration as well
-as logging.
+The registered model wraps that group's already-computed forecast rather
+than the raw estimator. The families trained here have incompatible native
+prediction signatures, and a fallback's estimator is not retained past the
+moment it forecast — so one wrapper flavour for every family avoids a
+five-way branch and keeps this layer working from the result object alone.
 """
 
 from __future__ import annotations
@@ -62,8 +50,8 @@ if _PYFUNC_AVAILABLE:
         """
 
         # Store the frozen forecast for this group
-        def __init__(self, forecast_group: str, model_name: str, forecast: dict[str, Any]) -> None:
-            self.forecast_group = forecast_group
+        def __init__(self, group_id: str, model_name: str, forecast: dict[str, Any]) -> None:
+            self.group_id = group_id
             self.model_name = model_name
             self.forecast = forecast
 
@@ -107,7 +95,7 @@ class ModelRegistrationResult:
     Timestamp.
     """
 
-    forecast_group: str
+    group_id: str
     model_name: str
     run_id: str
     registered: bool
@@ -126,7 +114,9 @@ class ModelRegistrationResult:
     # Convert to a plain dict for the tracking report
     def to_dict(self) -> dict[str, Any]:
         return {
-            "forecast_group": self.forecast_group,
+            # JSON key stays "forecast_group": it is a frozen wire/tag name
+            # already written into every past run's artifacts.
+            "forecast_group": self.group_id,
             "model_name": self.model_name,
             "run_id": self.run_id,
             "registered": self.registered,
@@ -151,7 +141,7 @@ def register_winner_models(
     if not _PYFUNC_AVAILABLE:
         return [
             ModelRegistrationResult(
-                forecast_group=winner["forecast_group"],
+                group_id=winner["forecast_group"],
                 model_name=winner.get("final_production_model") or "unknown",
                 run_id=run_id,
                 registered=False,
@@ -193,7 +183,7 @@ def _register_one(
 
     if model_name is None or not forecast:
         return ModelRegistrationResult(
-            forecast_group=group_id,
+            group_id=group_id,
             model_name=model_name or "unknown",
             run_id=run_id,
             registered=False,
@@ -205,7 +195,7 @@ def _register_one(
 
     group_slug = sanitize_model_name(group_id)
     registered_model_name = f"{config.registered_model_name_prefix}-{dataset_slug}"
-    wrapper = _FrozenForecastModel(forecast_group=group_id, model_name=model_name, forecast=forecast)
+    wrapper = _FrozenForecastModel(group_id=group_id, model_name=model_name, forecast=forecast)
 
     try:
         # `artifact_path` doubles as part of the model's identity when
@@ -220,7 +210,7 @@ def _register_one(
         )
     except MLflowTrackingError as exc:
         return ModelRegistrationResult(
-            forecast_group=group_id, model_name=model_name, run_id=run_id, registered=False, error=str(exc)
+            group_id=group_id, model_name=model_name, run_id=run_id, registered=False, error=str(exc)
         )
 
     version = getattr(model_info, "registered_model_version", None)
@@ -252,7 +242,7 @@ def _register_one(
             tag_error = str(exc)
 
     return ModelRegistrationResult(
-        forecast_group=group_id,
+        group_id=group_id,
         model_name=model_name,
         run_id=run_id,
         registered=True,

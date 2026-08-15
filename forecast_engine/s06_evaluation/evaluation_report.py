@@ -1,17 +1,11 @@
-"""Evaluation result models — the output contract of Phase 7A.
+"""What evaluation produces for each (group, model) pair.
 
-Everything this phase produces for one (forecast group, model) pair lands
-in an `EvaluationResult`: its backtest metrics, its twelve-month forward
-forecast, whether it survived forward validation, and — when it did not —
-the structured reasons why.
+Backtest metrics, the forward forecast, whether it survived validation and,
+if not, the structured reasons why.
 
-Rejection reasons are codes, never prose. The dashboard's Rejected Models
-list (Section 5.5) and the Explainability layer (Section 6.10) both build
-on them, so this phase deliberately generates no narrative text.
-
-These models are the direct input to Phase 7B (ranking), and every
-`to_dict()` yields plain JSON types so a result can be logged or returned
-without further conversion.
+Rejection reasons are codes, never prose — the dashboard and the
+explainability layer both build on them. Every to_dict() yields plain JSON,
+so a result can be logged or returned without conversion.
 """
 
 from __future__ import annotations
@@ -25,12 +19,11 @@ from forecast_engine.s06_evaluation.metrics import ForecastMetrics
 
 
 class EvaluationStatus(str, Enum):
-    """Outcome of evaluating one model on one forecasting group.
+    """How evaluating one model on one group ended.
 
-    ELIMINATED and FAILED are distinct: the first is a judgement (the model
-    produced an implausible forecast), the second is a malfunction (it could
-    not be backtested or could not forecast at all). Ranking must treat them
-    differently, and the dashboard reports them differently.
+    ELIMINATED is a judgement (the forecast was implausible); FAILED is a
+    malfunction (it could not backtest or forecast at all). Ranking and the
+    dashboard treat them differently.
     """
 
     SURVIVED = "Survived"
@@ -66,12 +59,8 @@ class BacktestWindowResult:
 
 @dataclass
 class BacktestResult:
-    """Complete backtest outcome for one group/model pair.
-
-    Carries three views of the same evidence, as Section 6.4 requires:
-    overall metrics, per-fold metrics, and metrics per horizon step — the
-    last of which shows how accuracy decays with distance.
-    """
+    """One pair's backtest, in three views: overall, per fold, and per horizon
+    step — the last showing how accuracy decays with distance."""
 
     strategy: str
     windows: list[BacktestWindowResult] = field(default_factory=list)
@@ -226,14 +215,11 @@ class EvaluationResult:
 
 @dataclass
 class EvaluationReport:
-    """Aggregate outcome of the evaluation phase.
+    """The evaluation stage's overall outcome.
 
-    The three `*_seconds` fields break this stage's total down by what it
-    actually spent time on. They exist because "Evaluate Models" and "Train
-    Models" look like one comparable stage each in the run summary, but
-    Evaluation does several model fits per (group, model) pair where
-    Training does one — without this breakdown that difference is invisible
-    to anyone reading stage durations after a run.
+    The *_seconds fields break the total down, because Evaluate and Train
+    look like comparable stages in the summary while evaluation does several
+    fits per pair where training does one.
     """
 
     results: list[EvaluationResult] = field(default_factory=list)

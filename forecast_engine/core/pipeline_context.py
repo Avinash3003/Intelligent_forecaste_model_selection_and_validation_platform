@@ -1,18 +1,11 @@
-"""Pipeline Context — the state object carried through every engine stage.
+"""The state object every stage reads from and writes back to.
 
-Rather than threading a growing list of arguments between stages, each
-stage reads what it needs from this context and writes its output back
-onto it. That gives the pipeline three properties the platform needs:
+Threading a growing argument list between stages would mean changing every
+signature to add a field; instead each stage takes what it needs from here.
+It also accumulates a timed record of every stage, which becomes the MLflow
+run trail, and represents exactly one run.
 
-  * Extensibility — a later phase (training, backtesting, drift) adds a
-    field instead of changing every stage signature.
-  * Auditability — the context accumulates a timed record of every stage,
-    which becomes the MLflow run trail once that integration lands
-    (Section 6.11).
-  * Isolation — one context represents exactly one run, keyed by run_id.
-
-The context is deliberately mutable; it is the one place in the engine
-where accumulating state is the point.
+Deliberately mutable — accumulating state is the point.
 """
 
 from __future__ import annotations
@@ -54,12 +47,8 @@ class StageStatus(str, Enum):
 
 @dataclass
 class StageRecord:
-    """Timed record of one pipeline stage's execution.
-
-    Collected for every stage so a completed run can explain where its
-    time went and which stage failed — the same per-stage isolation the
-    DAG provides in production (Section 6.1).
-    """
+    """One stage's timed record, so a run can say where its time went and
+    which stage failed."""
 
     name: str
     status: str = StageStatus.RUNNING.value
@@ -88,27 +77,14 @@ class StageRecord:
 
 @dataclass
 class PipelineContext:
-    """Carries one run's configuration, data and execution record.
+    """One run's configuration, data and execution record.
 
-    Attributes:
-        run_id: Unique identifier for this run; the key every artifact and
-            log line is eventually tied back to.
-        dataset_path: Location of the dataset being processed.
-        configuration: Normalized metadata — the only source of column
-            identities anywhere in the engine.
-        pipeline_config: Behavioural settings for this run.
-        raw_dataset: The dataset exactly as loaded, never mutated, so any
-            stage can compare against the original.
-        prepared_dataset: The cleaned dataset produced by DataPreprocessor.
-        groups: One entry per business key (or exactly one in single-series
-            mode).
-        series: The forecast-ready time series — this phase's final output
-            and the Model Training Engine's direct input.
-        frequency: Detected sampling grain, recorded but never normalized.
-        current_key: Group being processed, set while iterating per key so
-            failures can be attributed to a specific business key.
-        metadata: Free-form run facts (row counts, drop counts) for logging.
-        stages: Ordered execution record.
+    run_id ties every artifact and log line back to this run. configuration
+    is the only source of column identities in the engine. raw_dataset is
+    never mutated, so any stage can compare against the original;
+    prepared_dataset is the cleaned version. groups holds one entry per
+    business key, series the forecast-ready output. current_key is set while
+    iterating so a failure can be attributed to a specific key.
     """
 
     run_id: str

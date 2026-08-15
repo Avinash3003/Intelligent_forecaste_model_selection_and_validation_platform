@@ -1,13 +1,10 @@
-"""Forecast Stability scoring (Section 6.6).
+"""Judges the shape of each forward forecast: variance, smoothness, intervals.
 
-Judges the *shape* of each model's already-generated 12-month forward
-forecast — variance, smoothness and interval behaviour — independent of how
-accurate the backtest said the model was. A model can score well on history
-and still hand production an erratic forecast; this signal is what lets
-ranking catch that.
+Independent of backtest accuracy — a model can score well on history and
+still hand production an erratic forecast, and this is what catches that.
 
-Raw measurements are computed per model, then min-max normalized across one
-group's surviving candidates so every group is scored on its own terms.
+Measurements are normalized across one group's survivors, so every group is
+scored on its own terms.
 """
 
 from __future__ import annotations

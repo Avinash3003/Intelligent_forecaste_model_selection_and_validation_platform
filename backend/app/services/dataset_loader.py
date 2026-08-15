@@ -1,12 +1,8 @@
-"""Dataset Loader — Step 1 of the metadata pipeline (Section 6.2 of the
-solution design doc, "Data Ingestion & Validation").
+"""Turns a staged file into a DataFrame, and nothing else.
 
-Its only responsibility is turning a file on disk into a pandas DataFrame.
-It knows nothing about forecasting metadata (date/target/key columns) —
-that interpretation happens one layer up, in MetadataInterpreter. Keeping
-this boundary clean means swapping local disk storage for ADLS / Blob
-Storage in a later phase only touches UploadService + this loader, never
-the interpretation/validation logic built on top of it.
+Knows nothing about date/target/key columns — that is MetadataInterpreter's
+job one layer up. Keeping the boundary clean means changing where files are
+stored touches only this and UploadService.
 """
 
 from pathlib import Path
@@ -22,20 +18,10 @@ class DatasetLoader:
     """Reads an uploaded CSV/Excel file into a pandas DataFrame."""
 
     def load(self, file_path: Path) -> pd.DataFrame:
-        """Load `file_path` into a DataFrame.
+        """Load a staged file into a non-empty DataFrame.
 
-        Args:
-            file_path: Absolute path to a file previously staged by
-                UploadService.
-
-        Returns:
-            A non-empty pandas DataFrame.
-
-        Raises:
-            DatasetLoadError: if the file is missing, has an unsupported
-                extension, fails to parse, or contains no usable data.
-                Called from the /metadata/validate route, before any
-                column-level validation runs.
+        Raises DatasetLoadError if it is missing, an unsupported type,
+        unparseable, or empty.
         """
         if not file_path.exists():
             raise DatasetLoadError(f"Uploaded file '{file_path.name}' could not be found on the server.")

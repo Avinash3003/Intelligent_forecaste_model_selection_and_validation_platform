@@ -1,16 +1,11 @@
-"""Evaluation configuration — backtesting, metrics and forward-forecast
-validation (Sections 6.4 and 6.5).
+"""Backtesting, metrics and forward-validation settings.
 
-Every threshold the elimination framework uses lives here as a value.
-Section 6.5.3 is explicit that elimination rules must be configurable and
-derived from each key's own history rather than fixed global constants, so
-nothing in this file is an absolute magnitude: each rule expresses a
-*ratio* or *percentile* measured against the series being judged. That is
-what lets the same rules apply to a dataset of unit sales and one of
-revenue without retuning.
+Nothing here is an absolute magnitude: every elimination rule is a ratio or
+percentile measured against the series being judged, which is what lets the
+same rules apply to unit sales and to revenue without retuning.
 
-Each rule also carries its own enabled flag, so a deployment can switch one
-off without disturbing the others (Section 9).
+Each rule carries its own enabled flag, so one can be switched off without
+disturbing the others.
 """
 
 from __future__ import annotations
@@ -21,11 +16,10 @@ from typing import Any
 
 
 class BacktestStrategy(str, Enum):
-    """How training windows advance through history (Section 6.4).
+    """How training windows advance.
 
-    ROLLING keeps a fixed-length training window that slides forward —
-    appropriate when recent behaviour matters most. EXPANDING grows the
-    window from a fixed origin, using all history available at each point.
+    ROLLING slides a fixed-length window forward; EXPANDING grows from a
+    fixed origin, using all history available at each point.
     """
 
     ROLLING = "rolling"
@@ -33,12 +27,10 @@ class BacktestStrategy(str, Enum):
 
 
 class RejectionReason(str, Enum):
-    """Structured elimination codes (Section 6.5.3).
+    """Why a model was eliminated, as codes rather than prose.
 
-    Codes, not prose: the dashboard's Rejected Models list and the later
-    Explainability layer both key off these, so the reason a model was
-    dropped stays machine-readable and translatable. No narrative text is
-    generated in this phase.
+    The dashboard and the explainability layer both key off these, so the
+    reason stays machine-readable.
     """
 
     EXCESSIVE_FORECAST_VOLATILITY = "Excessive Forecast Volatility"

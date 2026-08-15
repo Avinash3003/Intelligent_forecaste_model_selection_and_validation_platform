@@ -1,16 +1,11 @@
-"""Forward Forecast Validation — the elimination stage (Section 6.5).
+"""Decides whether a forward forecast survives.
 
-Runs every enabled rule against a model's forward forecast and decides
-whether it survives. The governing principle is Section 6.5's opening
-statement: historical accuracy alone does not determine the final model. A
-model can score well on backtest windows and still produce a forward
-forecast that is implausible for the key it was fitted on, and this stage
-exists to catch exactly that.
+Historical accuracy alone does not determine the final model: one can score
+well on backtest windows and still produce a forecast that is implausible
+for the key it was fitted on. This stage catches exactly that.
 
-Rules are evaluated independently and *all* of them run, even after one has
-failed. Collecting every failure rather than short-circuiting means the
-dashboard can show a user each distinct reason a model was rejected, not
-just the first one encountered.
+Every rule runs even after one has failed, so the dashboard can show each
+distinct reason a model was rejected rather than only the first.
 """
 
 from __future__ import annotations

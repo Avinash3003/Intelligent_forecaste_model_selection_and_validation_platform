@@ -1,22 +1,17 @@
-"""Prompt loading (Section 6.12, "Prompt Architecture") + versioning
-(Section 13.1, "Prompt versioning as a first-class artifact").
+"""Loads versioned prompt templates from disk.
 
-Prompts are plain text files under `forecast_engine/s11_llm/prompts/<version>/`,
-never strings embedded in business logic — editing a prompt's wording, or
-adding a new one, is a file change, not a code change.
+Prompts are plain text files under prompts/<version>/, never strings in
+business logic, so editing wording is a file change.
 
-Versioning is a directory per version rather than a filename suffix
-(`structured_insight_v2.txt`) because it makes "what does v1 look like next
-to v2" a `diff -r prompts/v1 prompts/v2`, and because a version is a
-complete, self-contained set of templates — a system prompt written for
-free-text narrative and one written for structured JSON output do not mix
-across a version boundary, so nothing here lets a caller combine a system
-prompt from one version with a template from another.
+A directory per version rather than a filename suffix, because it makes
+comparing versions a plain directory diff, and because a version is a
+self-contained set — a system prompt written for prose and one written for
+JSON do not mix, and nothing here lets a caller combine them across
+versions.
 
-`string.Template`'s `$name` substitution (rather than `str.format`) is used
-deliberately: `safe_substitute` leaves an unrecognized placeholder
-untouched instead of raising, so a template can be edited to reference a
-new variable without every call site needing to supply it immediately.
+Uses string.Template's $name substitution: safe_substitute leaves an
+unknown placeholder alone instead of raising, so a template can reference a
+new variable before every call site supplies it.
 """
 
 from __future__ import annotations

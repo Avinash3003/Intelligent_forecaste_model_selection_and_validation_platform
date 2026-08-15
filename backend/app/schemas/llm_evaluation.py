@@ -1,10 +1,7 @@
-"""LLM Evaluation + Regression report (Section 13.3) — the API-facing
-shape of the JSON `python -m forecast_engine.s11_llm.evaluate` writes.
+"""The HTTP shape of the JSON the LLM evaluate CLI writes.
 
-Mirrors `forecast_engine.s11_llm.regression_eval.RegressionReport.to_dict()`
-field-for-field rather than reshaping it: the engine module is the single
-source of truth for what the report contains, this is only its HTTP
-contract.
+Mirrors the engine's own report field-for-field rather than reshaping it:
+the engine is the source of truth, this is only its contract.
 """
 
 from __future__ import annotations

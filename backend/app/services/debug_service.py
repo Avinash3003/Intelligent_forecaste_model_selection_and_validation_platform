@@ -1,10 +1,7 @@
-"""Developer debugging mode — a structured execution summary for one run.
+"""A flat, traceable execution summary for developers.
 
-Reads the exact same `PipelineExecutionResult` the Results dashboard reads
-(`app/services/result_service.py`) and reshapes it into one flat,
-traceable summary. Nothing is recomputed and nothing here can disagree
-with what the dashboard shows — this is a different *view* of the same
-data, not a second source of truth.
+Reads the same result the Results dashboard does, so the two can never
+disagree — a different view of one source, not a second source.
 """
 
 from __future__ import annotations
@@ -47,15 +44,12 @@ class DebugService:
         self._executor = executor or get_pipeline_executor()
 
     def get_debug_summary(self, run_id: str) -> DebugSummary:
-        """Assemble the debug summary.
+        """The debug summary.
 
-        Unlike `ResultService.get_results`, this does not refuse a
-        non-completed run — a developer debugging a run precisely wants to
-        see how far a RUNNING or FAILED execution got, not be told to wait.
-        For a still-RUNNING job most fields are honestly empty (the
-        pipeline's structured reports do not exist yet); live per-stage
-        progress is `GET /deployments/{run_id}`'s job, not this one's — this
-        endpoint is the post-hoc structural summary.
+        Unlike get_results this accepts an unfinished run — the whole point
+        is seeing how far a RUNNING or FAILED execution got. Most fields are
+        empty until the pipeline writes its reports; live stage progress
+        belongs to GET /deployments/{run_id}, not here.
         """
         result = self._executor.get_result(run_id)
         meta = result.run_metadata or {}

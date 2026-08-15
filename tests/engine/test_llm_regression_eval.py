@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from forecast_engine.s11_llm.evaluation import EvalCase
 from forecast_engine.s11_llm.regression_eval import (
-    CheckResult,
-    RegressionReport,
     RegressionThresholds,
     check_groundedness,
     check_readability,

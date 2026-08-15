@@ -1,16 +1,11 @@
-"""Data Quality Assessment — analyses a raw dataset and reports on it.
+"""Measures a raw dataset without changing it.
 
-Strictly read-only. This module never mutates, cleans, converts or drops a
-single value; it only measures. That separation matters for auditability:
-the report describes the dataset exactly as the user uploaded it, so the
-"before" picture stays truthful no matter what preprocessing later does.
+Strictly read-only, so the report describes the data exactly as uploaded no
+matter what preprocessing later does.
 
-Everything it measures is driven by the user's metadata selection — which
-column is the date, the target, a key — so no dataset-specific assumption
-is ever made.
-
-Runs immediately after loading, and its verdict gates preprocessing: a
-dataset judged NOT_SUITABLE never reaches the cleaning stage.
+Everything measured is driven by the user's column choices, so no
+dataset-specific assumption is made. Its verdict gates preprocessing: a
+NOT_SUITABLE dataset never reaches the cleaning stage.
 """
 
 from __future__ import annotations

@@ -1,22 +1,15 @@
-"""Model Trainer — trains every selected model on every forecasting group.
+"""Trains every selected model on every forecasting group.
 
-The orchestration layer of the training phase. For each group it walks the
-user's selected models, tunes, fits, and records the outcome, producing one
-TrainedModel per (group, model) pair.
+For each group it walks the selected models, tunes, fits and records the
+outcome — one TrainedModel per (group, model) pair.
 
-Two behaviours matter most here:
+Two behaviours matter most:
+  - Failure isolation: every fit is individually guarded, so a model failing
+    on one group is recorded as a result rather than ending the run.
+  - Selection fidelity: only the models the user chose are trained, and
+    availability is resolved once per run, not per group.
 
-  * Failure isolation. A model that fails on one group must not end the
-    run — Section 5.3 requires failed keys to be flagged without blocking
-    the rest. Every fit is therefore individually guarded, and the failure
-    is recorded as a result rather than raised.
-  * Selection fidelity. Only models the user chose are trained
-    (Section 5.2), and availability is resolved once per run rather than
-    per group, since it cannot change mid-run.
-
-No evaluation happens here. Nothing is scored, compared, ranked or
-forecast; that is the next phase's work. The output is trained objects and
-training metadata, nothing more.
+Nothing is scored, compared or forecast here — that is evaluation's work.
 """
 
 from __future__ import annotations
