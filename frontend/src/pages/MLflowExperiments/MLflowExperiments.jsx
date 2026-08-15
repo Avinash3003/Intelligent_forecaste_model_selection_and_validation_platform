@@ -6,8 +6,9 @@ import EmptyState from '../../components/ui/EmptyState'
 import Loader from '../../components/ui/Loader'
 import Select from '../../components/ui/Select'
 import Badge from '../../components/ui/Badge'
+import DatasetRunFilter from '../../components/common/DatasetRunFilter'
+import { useDatasetRunFilter } from '../../hooks/useDatasetRunFilter'
 import { fetchDeployments, fetchMLflowRun } from '../../services'
-import { formatRunLabel } from '../../utils/formatDateTime'
 import { fallbackModelOptions, forecastModels } from '../../data/appConfig'
 import { cn } from '../../utils/cn'
 
@@ -331,20 +332,23 @@ function AccuracyBar({ value }) {
 }
 
 export default function MLflowExperiments() {
-  const [runs, setRuns] = useState([])
-  const [run, setRun] = useState('')
+  const [deployments, setDeployments] = useState([])
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  // Dataset -> Run, the same dependent pair the Results page uses. Only
+  // completed runs are offered: a run still executing has not written the
+  // tracking record this page reads.
+  const { dataset, setDataset, datasetOptions, run, setRun, runOptions } = useDatasetRunFilter(
+    deployments,
+    { completedOnly: true }
+  )
+  const runs = runOptions
+
   useEffect(() => {
     fetchDeployments()
-      .then((rows) => {
-        // Only completed runs have a tracking record to show.
-        const done = rows.filter((r) => r.status === 'Completed')
-        setRuns(done.map((r) => ({ value: r.id, label: formatRunLabel(r.startTimeRaw || r.start_time, r.dataset) })))
-        if (done.length) setRun(done[0].id)
-      })
+      .then(setDeployments)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
   }, [])
@@ -394,10 +398,16 @@ export default function MLflowExperiments() {
         </p>
       </div>
 
-      {runs.length > 0 && (
-        <div className="mb-5 sm:max-w-md">
-          <Select value={run} onChange={setRun} options={runs} placeholder="Select a run" />
-        </div>
+      {datasetOptions.length > 0 && (
+        <DatasetRunFilter
+          className="mb-5 lg:max-w-3xl"
+          dataset={dataset}
+          datasetOptions={datasetOptions}
+          onDatasetChange={setDataset}
+          run={run}
+          runOptions={runOptions}
+          onRunChange={setRun}
+        />
       )}
 
       {error && (

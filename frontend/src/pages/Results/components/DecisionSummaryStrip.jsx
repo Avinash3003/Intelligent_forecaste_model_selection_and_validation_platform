@@ -1,4 +1,4 @@
-import { Trophy, Gauge, ShieldCheck, Activity, AlertTriangle } from 'lucide-react'
+import { Trophy, Gauge, ShieldCheck, Activity, AlertTriangle, Target } from 'lucide-react'
 
 /**
  * The four facts a reader needs before anything else: which model shipped,
@@ -31,7 +31,7 @@ export default function DecisionSummaryStrip({ decision, evaluatedModels = [] })
   const confidence = decision.confidence
 
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
       <Tile
         icon={Trophy}
         label="Selected model"
@@ -45,12 +45,27 @@ export default function DecisionSummaryStrip({ decision, evaluatedModels = [] })
         }
         tone={decision.fallbackUsed ? 'warn' : 'default'}
       />
+      {/* Confidence is a blend of backtest accuracy, forecast stability and
+          drift margin — never accuracy alone. Labelling it with a bare
+          "WMAPE 19.47%" made a legitimately higher-confidence/lower-accuracy
+          model read as a contradiction, so the subtitle names the blend and
+          the exact split stays one click away in the explain popover. */}
       <Tile
         icon={Gauge}
         label="Confidence"
         value={confidence == null ? 'N/A' : `${Math.round(confidence * 100)}%`}
-        sub={winner?.backtest?.wmape != null ? `WMAPE ${winner.backtest.wmape.toFixed(2)}%` : undefined}
+        sub="accuracy + stability + drift"
         tone={confidence == null ? 'default' : confidence >= 0.7 ? 'good' : confidence >= 0.5 ? 'warn' : 'bad'}
+      />
+      <Tile
+        icon={Target}
+        label="Backtest accuracy"
+        value={
+          winner?.backtest?.wmape != null
+            ? `${(100 - winner.backtest.wmape).toFixed(1)}%`
+            : '—'
+        }
+        sub={winner?.backtest?.wmape != null ? `WMAPE ${winner.backtest.wmape.toFixed(2)}%` : undefined}
       />
       <Tile
         icon={ShieldCheck}

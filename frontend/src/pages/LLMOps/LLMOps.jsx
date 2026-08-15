@@ -9,9 +9,11 @@ import SearchBox from '../../components/ui/SearchBox'
 import Pagination from '../../components/common/Pagination'
 import Card from '../../components/ui/Card'
 import LLMCallCard from './components/LLMCallCard'
-import LlmEvaluationSection from './components/LlmEvaluationSection'
+// LlmEvaluationSection is intentionally not imported — see the commented-out
+// "LLM Evaluation" block below for why that section is currently hidden.
+import DatasetRunFilter from '../../components/common/DatasetRunFilter'
+import { useDatasetRunFilter } from '../../hooks/useDatasetRunFilter'
 import { fetchDeployments, fetchLlmObservability, fetchPromptUsage } from '../../services'
-import { formatRunLabel } from '../../utils/formatDateTime'
 import { formatCost, formatGroundedness, formatLatency, formatTokens } from '../../utils/formatLlmMetrics'
 
 const PAGE_SIZE = 20
@@ -155,10 +157,18 @@ function LlmUsageSummary({ usage, loading, error }) {
  * request reaches Databricks or MLflow directly from the browser.
  */
 export default function LLMOps() {
-  const [runs, setRuns] = useState([])
+  const [deployments, setDeployments] = useState([])
   const [runsLoading, setRunsLoading] = useState(true)
   const [runsError, setRunsError] = useState(null)
-  const [run, setRun] = useState('')
+
+  // Dataset -> Run, the same dependent pair Results and Experiments use.
+  // Completed runs only: LLM traces are written by the run itself, so a job
+  // still executing has nothing to report here yet.
+  const { dataset, setDataset, datasetOptions, run, setRun, runOptions } = useDatasetRunFilter(
+    deployments,
+    { completedOnly: true }
+  )
+  const runs = runOptions
 
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -184,11 +194,7 @@ export default function LLMOps() {
 
   useEffect(() => {
     fetchDeployments()
-      .then((rows) => {
-        const done = rows.filter((r) => r.status === 'Completed')
-        setRuns(done.map((r) => ({ value: r.id, label: formatRunLabel(r.startTimeRaw), sublabel: r.dataset })))
-        if (done.length) setRun(done[0].id)
-      })
+      .then(setDeployments)
       .catch((e) => setRunsError(String(e.message || e)))
       .finally(() => setRunsLoading(false))
   }, [])
@@ -270,6 +276,23 @@ export default function LLMOps() {
         </SectionContainer>
       </div>
 
+      {/* LLM Evaluation — hidden from the UI pending a decision on whether
+          to keep it.
+
+          What it is: the offline regression suite's report (schema
+          validity, groundedness, winner consistency, rejection accuracy,
+          readability over a fixed set of eval cases). It is NOT per-run
+          telemetry — that is "LLM Usage & Performance" above and the
+          per-call detail below, both of which are unaffected by this.
+
+          Why it is always empty here: the section reads a JSON report that
+          `python -m forecast_engine.s11_llm.evaluate` writes to
+          forecast_engine/s11_llm/eval_output/. That path is a gitignored
+          build artifact, so it exists on a developer machine but is never
+          shipped in the deployed App Service image — the panel therefore
+          renders its "no report yet" empty state permanently in production.
+
+          Re-enable by restoring this block; nothing else depends on it.
       <div className="mb-6">
         <SectionContainer
           title="LLM Evaluation"
@@ -278,6 +301,7 @@ export default function LLMOps() {
           <LlmEvaluationSection />
         </SectionContainer>
       </div>
+      */}
 
       {noCompletedRuns && (
         <div className="mb-6">
@@ -300,10 +324,16 @@ export default function LLMOps() {
         </div>
       )}
 
-      {runs.length > 0 && (
-        <div className="mb-5 sm:max-w-md">
-          <Select value={run} onChange={setRun} options={runs} placeholder="Select a run" />
-        </div>
+      {datasetOptions.length > 0 && (
+        <DatasetRunFilter
+          className="mb-5 lg:max-w-3xl"
+          dataset={dataset}
+          datasetOptions={datasetOptions}
+          onDatasetChange={setDataset}
+          run={run}
+          runOptions={runOptions}
+          onRunChange={setRun}
+        />
       )}
 
       {error && (

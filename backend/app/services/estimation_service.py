@@ -1,21 +1,15 @@
-"""Pre-run runtime and cost estimation — the "Estimate" step of the user flow.
+"""Estimates how long a run will take and what it will cost, before it runs.
 
-Every number in the response is derived from two real things: the actual
-uploaded dataset (rows, columns, per-key history length, missingness — read
-directly from the file, never guessed) and the actual selected
-configuration (models, horizon). Nothing here runs forecasting code.
+Every number comes from the real uploaded dataset (rows, per-key history,
+missingness) and the real selected configuration (models, horizon). No
+forecasting code runs here.
 
-Runtime is calibrated from this platform's own history whenever enough of
-it exists (`MLflowHistoryStore`, Section 8.5.1: "historical run telemetry
-... used to calibrate the estimate rather than a purely theoretical
-calculation"). A fresh deployment with no completed runs yet falls back to
-a clearly-labelled heuristic instead — `calibration_basis` on the response
-always says which one was used, so the estimate is never silently
-theoretical when better data existed.
+Timings are calibrated from this deployment's own completed runs when there
+are enough of them, otherwise from labelled heuristics — calibration_basis
+on the response always says which was used.
 
-The estimate is deliberately a *range*, never a single number: per-key
-runtime varies with series length and with how many keys clear each
-model's minimum-history bar, neither of which is knowable before the run.
+The answer is a range, never one number: per-key runtime depends on series
+length and on how many keys clear each model's minimum-history bar.
 """
 
 from __future__ import annotations
@@ -54,8 +48,12 @@ _BACKTEST_MAX_WINDOWS = 5
 # Mirrors ModelConfig.registry's per-model `min_observations` (model_config.py).
 _MODEL_MIN_OBSERVATIONS: dict[str, int] = {
     "seasonal_naive": 2,
-    "arima": 24,
-    "prophet": 20,
+    # arima=20 / prophet=24, matching model_config.py exactly. These two
+    # were previously transposed here, which mis-counted how many keys clear
+    # each model's history bar and so skewed the workload the estimate is
+    # built from.
+    "arima": 20,
+    "prophet": 24,
     "lightgbm": 24,
     "xgboost": 24,
     "tft": 60,
@@ -93,9 +91,21 @@ _HEURISTIC_SECONDS_PER_LLM_CALL = 2.5
 # assessment, preprocessing, curated write-back, ranking, MLflow logging.
 _FIXED_OVERHEAD_SECONDS = 20.0
 
-# Cloud execution adds cluster acquisition, image pull and library install
-# before any Python of ours runs. Local execution has no such wait.
-_DATABRICKS_STARTUP_SECONDS = 300.0
+# Cloud execution waits for compute before any Python of ours runs; local
+# execution has no such wait. Serverless is the primary cloud path and
+# acquires compute in seconds, not minutes — charging it the same 5-minute
+# classic-cluster figure added ~5 min of pure fiction to every cloud
+# estimate, which is most of why estimates read far longer than the run
+# actually took. Each mode now carries its own figure, and both are
+# superseded by `_calibrate_startup_seconds()` as soon as this deployment
+# has real completed runs to measure instead.
+_SERVERLESS_STARTUP_SECONDS = 45.0
+_CLASSIC_CLUSTER_STARTUP_SECONDS = 300.0
+
+# Startup is only calibrated from runs whose measured overhead is credible:
+# a negative or absurd gap means the two clocks disagree, not that startup
+# was instant, so such a sample is discarded rather than averaged in.
+_MAX_CREDIBLE_STARTUP_SECONDS = 900.0
 
 # The estimate's uncertainty band around the calibrated/heuristic center.
 _LOW_FACTOR = 0.7
@@ -133,13 +143,8 @@ class EstimationService:
 
         runtime_seconds = self._estimate_runtime_seconds(period_counts, dataset, workload, calibration)
         backend = (self._settings.execution_mode or "local").strip().lower()
-        # Both cloud modes pay a cluster/environment startup cost local
-        # execution never does; DCS's is typically longer (image pull), but
-        # a distinct figure would be invented rather than measured, so both
-        # share the one calibrated constant.
-        startup_seconds = _DATABRICKS_STARTUP_SECONDS if backend in ("databricks", "databricks_dcs") else 0.0
+        startup_seconds = self._startup_seconds(backend)
 
-        total_seconds = runtime_seconds + startup_seconds
         low_minutes = (startup_seconds + runtime_seconds * _LOW_FACTOR) / 60.0
         high_minutes = (startup_seconds + runtime_seconds * _HIGH_FACTOR) / 60.0
 
@@ -172,12 +177,14 @@ class EstimationService:
             ),
         ]
         if startup_seconds:
-            breakdown.append(
-                EstimateComponent(
-                    label="Cluster startup",
-                    detail=f"~{int(startup_seconds / 60)} min before the pipeline begins",
-                )
-            )
+            # Rendered in whichever unit reads honestly: a 45-second
+            # serverless start is "~45 sec", not the "~0 min" an
+            # unconditional minutes conversion produced.
+            if startup_seconds < 90:
+                startup_detail = f"~{int(round(startup_seconds))} sec before the pipeline begins"
+            else:
+                startup_detail = f"~{startup_seconds / 60:.0f} min before the pipeline begins"
+            breakdown.append(EstimateComponent(label="Compute startup", detail=startup_detail))
 
         return EstimationResponse(
             dataset=dataset,
@@ -235,13 +242,8 @@ class EstimationService:
     def _periods_by_group(
         self, dataframe: pd.DataFrame, date_column: str, key_columns: list[str]
     ) -> dict[tuple, int]:
-        """Distinct calendar months observed per group.
-
-        This is what the curated dataset will actually contain per key
-        after monthly aggregation (Section 6.2) — a far better proxy for
-        real per-key history than raw row count, which overcounts by the
-        sub-monthly sampling rate of the raw upload.
-        """
+        """Distinct months per group — what the curated dataset will hold after
+        monthly aggregation, and a better proxy than raw row count."""
         if date_column not in dataframe.columns:
             return {}
 
@@ -312,12 +314,8 @@ class EstimationService:
         )
 
     def _model_ids(self, request: EstimationRequest) -> list[str]:
-        """Selected models, or the full registry when none were chosen.
-
-        An empty selection means "train everything" to the engine, so the
-        estimate has to mean the same thing — estimating zero models for a
-        run that trains six would be the one genuinely misleading answer.
-        """
+        """Selected models, or the whole registry when none were chosen —
+        an empty selection means "train everything" to the engine."""
         selected = [model.strip().lower() for model in request.selected_models if model.strip()]
         return selected or sorted(_MODEL_MIN_OBSERVATIONS)
 
@@ -325,15 +323,61 @@ class EstimationService:
     # Historical calibration (Section 8.5.1)
     # ------------------------------------------------------------------
 
-    def _calibrate(self) -> _Calibration:
-        """Calibrate per-fit/per-call timings from this platform's own
-        recent completed runs, when enough usable telemetry exists.
+    def _startup_seconds(self, backend: str) -> float:
+        """Seconds spent waiting for compute before stage one.
 
-        "Usable" means the run's summary carries the timing breakdown added
-        for this phase (`evaluation_report.timing_breakdown`) — an older
-        run predates that telemetry and is silently excluded, exactly as
-        it should be: there is nothing to calibrate from data that was
-        never recorded.
+        Zero locally. In the cloud it is measured from real runs — wall-clock
+        duration minus the engine's own stage time is exactly the time spent
+        outside the engine — falling back to the per-mode constant only when
+        no credible sample exists.
+        """
+        if backend not in ("databricks", "databricks_dcs"):
+            return 0.0
+
+        default = (
+            _CLASSIC_CLUSTER_STARTUP_SECONDS
+            if backend == "databricks_dcs"
+            else _SERVERLESS_STARTUP_SECONDS
+        )
+
+        measured = self._measured_startup_seconds()
+        return measured if measured is not None else default
+
+    def _measured_startup_seconds(self) -> float | None:
+        """Median non-engine overhead across recent completed runs, or None."""
+        samples: list[float] = []
+        try:
+            listings = self._history.list_runs(limit=_HISTORY_SAMPLE_SIZE)
+        except Exception:  # noqa: BLE001 - calibration is best-effort
+            return None
+
+        for listing in listings:
+            if listing.job_status.value != "Completed" or not listing.duration_seconds:
+                continue
+            try:
+                summary = self._history.get_summary(listing.run_id)
+            except Exception:  # noqa: BLE001
+                continue
+            if not summary:
+                continue
+
+            stage_total = _total_stage_seconds(summary)
+            if stage_total is None:
+                continue
+
+            overhead = float(listing.duration_seconds) - stage_total
+            if 0.0 <= overhead <= _MAX_CREDIBLE_STARTUP_SECONDS:
+                samples.append(overhead)
+
+        if len(samples) < _MIN_RUNS_FOR_CALIBRATION:
+            return None
+        return statistics.median(samples)
+
+    def _calibrate(self) -> _Calibration:
+        """Per-fit and per-call timings measured from recent completed runs.
+
+        Runs whose summary predates the timing breakdown are skipped — there
+        is nothing to calibrate from data that was never recorded.
         """
         fit_ratios: list[float] = []
         shap_ratios: list[float] = []
@@ -427,16 +471,12 @@ class EstimationService:
         workload: WorkloadEstimate,
         calibration: _Calibration,
     ) -> float:
-        """Fit-seconds, weighted per selected model family.
+        """Fit-seconds, weighted by model family.
 
-        `calibration.seconds_per_fit` is a platform-wide average (or the
-        heuristic default) — a run selecting only TFT should not be
-        estimated as cheaply as one selecting only seasonal_naive. Each
-        model's own heuristic weight, relative to the default family,
-        rescales the calibrated average toward that model's real relative
-        cost without needing per-model historical calibration (which would
-        need far more sampled runs than `_MIN_RUNS_FOR_CALIBRATION` to be
-        reliable per model).
+        seconds_per_fit is one platform-wide average, so a TFT-only run must
+        not be estimated as cheaply as a seasonal_naive-only one. Each model's
+        heuristic weight rescales that average toward its real relative cost,
+        which needs far fewer sampled runs than per-model calibration would.
         """
         fit_seconds = 0.0
         for model in dataset.selected_models:
@@ -511,12 +551,8 @@ def _backtest_window_count(
     horizon: int = _BACKTEST_HORIZON,
     max_windows: int = _BACKTEST_MAX_WINDOWS,
 ) -> int:
-    """Mirrors `forecast_engine.s06_evaluation.backtest_engine.
-    BacktestEngine._build_windows`'s fold count exactly (rolling
-    strategy), without importing forecast_engine into the backend process
-    — the two run in separate virtual environments by design (backend/
-    requirements.txt is deliberately light; forecast_engine's is not).
-    """
+    """The engine's rolling-backtest fold count, duplicated rather than
+    imported — the two run in separate virtual environments."""
     if history_periods < min_train + horizon:
         return 0
     windows = 0
@@ -533,6 +569,17 @@ def _stage_duration(summary: dict, stage_name: str) -> float | None:
         if stage.get("name") == stage_name:
             return stage.get("duration_seconds")
     return None
+
+
+def _total_stage_seconds(summary: dict) -> float | None:
+    """Seconds the engine accounted for across its stages, or None if nothing
+    was measured — treating that as zero would read the whole run as startup."""
+    durations = [
+        stage.get("duration_seconds")
+        for stage in summary.get("stages") or []
+        if isinstance(stage.get("duration_seconds"), (int, float))
+    ]
+    return float(sum(durations)) if durations else None
 
 
 def _duration_label(low_minutes: float, high_minutes: float) -> str:

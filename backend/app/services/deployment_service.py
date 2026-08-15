@@ -8,10 +8,15 @@ from app.orchestration.schemas import JobStatus, PipelineExecutionRequest, RunLi
 from app.schemas.deployment import DeploymentRequest, DeploymentResponse, DeploymentStatus, StageStatus
 from app.services.upload_service import UploadService
 
-# The forecast_engine's own stage names, in execution order. Used only to
-# render the *shape* of the pipeline for a run that has not reported its
-# stage trail yet (the engine emits that trail only in its final summary);
-# a finished run always renders its real, recorded stages instead.
+# The forecast_engine's own stage names, in execution order — the complete
+# set, matching `run_pipeline.py`'s `begin_stage(...)` calls one for one.
+# This is both the shape rendered for a run that has not reported a trail
+# yet AND the skeleton a live run's reported stages are merged onto, so the
+# UI always shows the whole pipeline with the stages not yet reached marked
+# Pending rather than silently omitted.
+#
+# Keep in sync with run_pipeline.py: it is also the progress denominator, so
+# a missing entry here overstates how far along every run is.
 PIPELINE_STAGES = [
     "Load Dataset",
     "Detect Frequency",
@@ -25,7 +30,10 @@ PIPELINE_STAGES = [
     "Evaluate Models",
     "Generate Explainability (SHAP)",
     "Rank & Select Production Models",
+    "Persist Winning Models",
+    "Export Forecasts",
     "Generate Business Insights",
+    "Mirror Artifacts",
     "Track to MLflow",
 ]
 
@@ -35,19 +43,11 @@ _TERMINAL_STATUSES = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED
 def build_execution_request(
     request: DeploymentRequest, dataset_path: Path, principal: Principal
 ) -> PipelineExecutionRequest:
-    """Reshape a `DeploymentRequest` (file_id + metadata mapping) into the
-    orchestration layer's backend-and-transport-agnostic
-    `PipelineExecutionRequest`.
+    """Turn a DeploymentRequest into a transport-agnostic execution request.
 
-    Shared between `DeploymentService` (the existing `/deploy` contract)
-    and the `/execution/*` routes, so the two entry points never build this
-    mapping differently.
-
-    `principal` is the authenticated caller behind this HTTP request — the
-    same object `Depends(require(...))` already produced for the route —
-    never a value read from `request` itself. `DeploymentRequest` has no
-    `started_by` field at all, so there is nothing here a client could ever
-    override.
+    Shared by /deploy and /execution/* so the two never build it differently.
+    principal is the authenticated caller, never read from the request body —
+    DeploymentRequest has no started_by field for a client to override.
     """
     return PipelineExecutionRequest(
         dataset_path=str(dataset_path),
@@ -64,15 +64,11 @@ def build_execution_request(
 
 
 class DeploymentService:
-    """Submits a forecasting run through the Pipeline Executor
-    (Section 6.14) — this is the *only* thing this service calls to make a
-    run happen; it never imports training, evaluation, ranking, drift
-    validation, MLflow, or LLM code directly.
+    """Submits runs through the Pipeline Executor and reports their status.
 
-    `list_deployments` reports the active Runner's real job registry. That
-    registry is in-memory, so history covers the current backend process
-    only and does not survive a restart — an honest limitation, and still
-    strictly better than inventing runs that never happened.
+    Never imports training, evaluation, ranking or MLflow code directly.
+    list_deployments reads the Runner's in-memory registry, so it covers the
+    current process only.
     """
 
     def __init__(self, executor: PipelineExecutor | None = None, upload_service: UploadService | None = None) -> None:
@@ -80,15 +76,10 @@ class DeploymentService:
         self._upload_service = upload_service or UploadService()
 
     def deploy(self, request: DeploymentRequest, principal: Principal) -> DeploymentResponse:
-        """Submit one run and return the id it can be polled by.
+        """Submit one run and return the id to poll it by.
 
-        Raises:
-            FileResolutionError: the `file_id` names no staged dataset.
-            ExecutionError: the Runner refused the submission.
-
-        Both propagate to the route rather than being answered with a
-        synthetic run id: an id that refers to no real job would 404 on the
-        very next status poll, which is worse than a clear failure here.
+        Raises FileResolutionError or ExecutionError rather than returning a
+        made-up id, which would 404 on the very next poll.
         """
         dataset_path, original_filename = self._upload_service.resolve(request.file_id)
         execution_request = build_execution_request(request, dataset_path, principal)
@@ -107,13 +98,7 @@ class DeploymentService:
         return [self._to_deployment_status(listing) for listing in self._executor.list_runs()]
 
     def get_deployment(self, run_id: str) -> DeploymentStatus:
-        """One run's status detail.
-
-        Raises:
-            UnknownRunError: if no run with this id exists on the active
-                Runner, so the route can answer 404 rather than inventing
-                an empty record.
-        """
+        """One run's status. Raises UnknownRunError so the route can 404."""
         listing = self._executor.get_run(run_id)
         if listing is None:
             raise UnknownRunError(f"No run found for run_id '{run_id}'.")
@@ -159,25 +144,47 @@ class DeploymentService:
         )
 
     def _to_stage_statuses(self, listing: RunListing) -> list[StageStatus]:
-        # A finished (or currently executing) run carries its real,
-        # recorded stage trail — timestamps included, straight from the
-        # engine's own StageRecord.
-        if listing.stages:
-            return [
-                StageStatus(
-                    label=stage.get("name", "—"),
-                    status=stage.get("status", "Pending"),
-                    started_at=stage.get("started_at"),
-                    completed_at=stage.get("completed_at"),
-                )
-                for stage in listing.stages
-            ]
+        """The stage trail, always covering the whole pipeline.
 
-        # Still executing (or a backend that reports no trail): show the
-        # pipeline's shape with nothing yet claimed as done.
-        if listing.job_status in _TERMINAL_STATUSES:
+        The engine reports a stage only once it begins it, so a live run's
+        trail grows one entry at a time. Merging it onto PIPELINE_STAGES keeps
+        unreached stages visible as Pending instead of dropping them.
+        """
+        reported = {
+            stage.get("name"): stage
+            for stage in (listing.stages or [])
+            if stage.get("name")
+        }
+
+        # A terminal run with no trail at all has nothing to show — inventing
+        # seventeen Pending stages for a finished run would be a lie.
+        if not reported and listing.job_status in _TERMINAL_STATUSES:
             return []
-        return [StageStatus(label=label, status="Pending") for label in PIPELINE_STAGES]
+
+        merged = [
+            StageStatus(
+                label=label,
+                status=(reported.get(label) or {}).get("status", "Pending"),
+                started_at=(reported.get(label) or {}).get("started_at"),
+                completed_at=(reported.get(label) or {}).get("completed_at"),
+            )
+            for label in PIPELINE_STAGES
+        ]
+
+        # A stage the engine reported that this list does not know about
+        # (a renamed or newly added stage) is appended rather than dropped,
+        # so the trail can never silently lose real, recorded execution.
+        merged.extend(
+            StageStatus(
+                label=name,
+                status=stage.get("status", "Pending"),
+                started_at=stage.get("started_at"),
+                completed_at=stage.get("completed_at"),
+            )
+            for name, stage in reported.items()
+            if name not in set(PIPELINE_STAGES)
+        )
+        return merged
 
 
 # Human-readable run duration, measured live while a run is still going

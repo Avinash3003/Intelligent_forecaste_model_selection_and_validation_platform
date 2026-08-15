@@ -1,17 +1,12 @@
-"""Forecast Insights Dashboard payload (Sections 5.4–5.7).
+"""Builds the Results page payload from one run's result.
 
-Reads one run's real `PipelineExecutionResult` from the Pipeline Executor
-and reshapes it into what the Results page renders. Nothing here recomputes
-a forecasting decision: every model name, metric, drift statistic and
-narrative already exists in the pipeline's own reports — this module only
-selects the requested group and flattens it for display.
+Recomputes nothing: every model name, metric, drift statistic and narrative
+already exists in the pipeline's reports. This only picks the requested
+group and flattens it for display.
 
-`_evaluated_models` is the transparency panel's data source: one row per
-model actually trained for the selected group, built by joining the
-training, evaluation, ranking and selection reports on (group_id,
-model_name) — the same join key every one of those reports already uses.
-Nothing is computed here that the pipeline did not already produce; this
-module only assembles what exists into one place per model.
+_evaluated_models feeds the transparency panel — one row per model trained
+for the group, joining the training, evaluation, ranking and selection
+reports on (group_id, model_name).
 """
 
 from __future__ import annotations
@@ -62,13 +57,10 @@ class ResultService:
         self._dataset_preview_service = dataset_preview_service or get_dataset_preview_service()
 
     def get_results(self, run_id: str, group_id: str | None = None) -> ResultsResponse:
-        """Assemble the Results payload.
+        """The Results payload.
 
-        Raises:
-            UnknownRunError / RunNotReadyError: propagated from the
-                executor so the route can map them to 404 / 409 — a run
-                that has not finished has no results to show, and saying so
-                is more honest than returning an empty dashboard.
+        Lets UnknownRunError/RunNotReadyError through so the route can answer
+        404/409 rather than returning an empty dashboard.
         """
         result = self._executor.get_result(run_id)
 
@@ -159,11 +151,21 @@ class ResultService:
         # group's own observed history (Section 6.10). Both are passed
         # verbatim; `compute_confidence` decides whether they are long
         # enough to score and renormalizes if not.
+        #
+        # The history here is the group's COMPLETE observed series, read
+        # through the same `_full_actual_history` the chart uses — not
+        # `recent_history`, which is a 24-point tail bounded purely to keep
+        # the run summary small for charting (series_builder.py). Scoring a
+        # 30%-weighted confidence component against that tail made the
+        # number depend on a display constant: on a long series the tail is
+        # a small, unrepresentative slice of the real variation, so a model
+        # whose forecast happened to match the last two years could outscore
+        # a genuinely more accurate one. Stability must be judged against
+        # the same history the model was actually fitted on.
         group = next((g for g in result.forecast_groups if g.get("group_id") == group_id), {})
         history_values = [
-            observation.get("value")
-            for observation in (group.get("recent_history") or [])
-            if isinstance(observation.get("value"), (int, float))
+            value for _, value in self._full_actual_history(result, group)
+            if isinstance(value, (int, float))
         ]
         forecast_values = [
             value for value in ((winner.get("forecast") or {}).get("values") or [])
@@ -433,7 +435,6 @@ class ResultService:
             points.append(ForecastPoint(period=date, actual=value))
 
         forecast = winner.get("forecast") or {}
-        dates = forecast.get("dates") or []
         values = forecast.get("values") or []
         lower = forecast.get("lower") or []
         upper = forecast.get("upper") or []
@@ -458,18 +459,11 @@ class ResultService:
     def _full_actual_history(
         self, result: PipelineExecutionResult, group: dict[str, Any]
     ) -> list[tuple[str, float]]:
-        """The complete actual-value history for one business key — every
-        observation in the curated dataset, never a bounded tail (the
-        Results chart must represent the whole available history, not an
-        arbitrary fixed window).
+        """Every observation for one business key, at full resolution.
 
-        Reads back the run's own curated file — already persisted, already
-        read for the "Curated dataset" preview panel — filtered to this
-        group's key values, full resolution. Falls back to
-        `PipelineContext.summary()`'s bounded `recent_history` only when
-        the curated file itself is unavailable (e.g. curated storage was
-        disabled for this run), so a run without one still shows something
-        rather than an empty chart.
+        Read from the run's own curated file, filtered to this group's key
+        values. Falls back to the summary's bounded recent_history only when
+        the curated file is unavailable, so the chart is never empty.
         """
         configuration = (result.run_metadata or {}).get("configuration") or {}
         date_column = configuration.get("date_column")
@@ -498,14 +492,10 @@ class ResultService:
         fallback_used: bool = False,
         group_id: str | None = None,
     ) -> ExplainabilityNarrative:
-        """Build the dashboard's narrative directly from this group's own
-        structured insight (`business_insights["groups"][group_id]`).
+        """The narrative for one group, mapped from its structured insight.
 
-        The engine now generates one JSON payload per group (Section 6.1
-        Task 10, "Final model x key") rather than one free-text narrative
-        covering every group — so there is no longer a whole-run blob to
-        slice apart for a single group. This method is a direct field
-        mapping, not a parser: nothing here infers structure from prose.
+        The engine emits one JSON payload per group, so this is a direct
+        field mapping — nothing here parses prose.
         """
         insights = result.business_insights or {}
         groups = insights.get("groups") or {}
@@ -555,13 +545,10 @@ class ResultService:
         caveats: list[str],
         fallback_used: bool,
     ) -> DashboardInsight:
-        """The three short fields the dashboard card shows.
+        """The three short fields on the dashboard card.
 
-        The engine's schema (`s11_llm/schema.py`) already caps
-        `concise_summary` at 70 words before this ever runs — this is the
-        belt to that suspenders, so a future schema change or a template
-        fallback path can never push an unbounded string onto the
-        dashboard even if the upstream cap is ever loosened.
+        The engine already caps the summary at 70 words; this re-caps so a
+        schema change can never push an unbounded string onto the page.
         """
         if not summary:
             return DashboardInsight()
