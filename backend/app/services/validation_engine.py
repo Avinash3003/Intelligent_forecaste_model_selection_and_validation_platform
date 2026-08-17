@@ -13,6 +13,7 @@ Two things shape the implementation:
 Nothing here names a specific column; every check reads the assigned roles.
 """
 
+import numpy as np
 import pandas as pd
 
 from app.schemas.metadata import (
@@ -317,8 +318,13 @@ class ValidationEngine:
         if len(non_null) <= SAMPLE_SIZE:
             return non_null
 
-        step = len(non_null) // SAMPLE_SIZE
-        return non_null.iloc[::step][:SAMPLE_SIZE]
+        # An integer stride degenerates to 1 for any length under
+        # 2*SAMPLE_SIZE (e.g. 300 rows // 200 == 1), which silently
+        # collapses "evenly across the column" into "the first 200 rows" —
+        # exactly the case this method exists to avoid. Evenly spaced
+        # positions guarantee full-column coverage at every length instead.
+        positions = np.linspace(0, len(non_null) - 1, num=SAMPLE_SIZE, dtype=int)
+        return non_null.iloc[positions]
 
     def _parse_ratio(self, sample: pd.Series, parser) -> float:
         """Fraction of `sample` that `parser` converts successfully."""

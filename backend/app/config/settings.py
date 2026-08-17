@@ -194,13 +194,32 @@ class Settings(BaseSettings):
     def mlflow_tracking_uri_resolved(self) -> str:
         """The tracking store this backend reads, matching what the engine writes.
 
-        Configured values are used as-is. Unset falls back to the engine's
-        local sqlite default, absolutized so both processes open one file
-        rather than one per working directory.
+        Configured values are used as-is. Unset falls back per execution
+        mode, because the two modes write to different stores and there is
+        no single unset default that matches both:
+
+        - local: the engine subprocess runs on this same box with no
+          explicit MLFLOW_TRACKING_URI, so it falls through to its own
+          sqlite default (mlflow.db next to forecast_engine/). Matching
+          that path is what lets both processes open the same file.
+        - databricks / databricks_dcs: the engine runs as a Databricks job,
+          where MLflow's own unset-default resolves to the workspace's
+          managed tracking store (see forecast_job_serverless.yml's note on
+          this) — never the sqlite file above, which that job never
+          touches. A deployment that sets DATABRICKS_HOST/credentials for
+          job submission but never separately sets MLFLOW_TRACKING_URI
+          previously fell through to the sqlite branch here, silently
+          reading a store the engine never wrote to: run history and
+          Experiments/Observability would show only whatever this
+          backend's own process still held in memory, and nothing from
+          before its last restart — exactly the "runs vanish" symptom this
+          mirrors "databricks" to fix.
         """
         configured = (self.mlflow_tracking_uri or "").strip()
         if configured:
             return configured
+        if (self.execution_mode or "").strip().lower() in ("databricks", "databricks_dcs"):
+            return "databricks"
         return f"sqlite:///{self.engine_working_dir / 'mlflow.db'}"
 
     @property

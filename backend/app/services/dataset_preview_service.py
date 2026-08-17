@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -45,6 +46,14 @@ class DatasetPreviewService:
     def __init__(self, executor: PipelineExecutor | None = None) -> None:
         self._executor = executor or get_pipeline_executor()
         self._cache: "OrderedDict[str, tuple[list[str], list[list[str]]]]" = OrderedDict()
+        # This service is a process-wide singleton (get_dataset_preview_
+        # service) and FastAPI runs sync path operations like get_preview()
+        # in a threadpool, so concurrent requests for different runs/pages
+        # genuinely interleave on this dict — a plain OrderedDict's
+        # check-then-act sequences (move_to_end after an `in` check,
+        # popitem after a len() check) are not atomic as a whole even
+        # though CPython's GIL makes each individual op atomic.
+        self._lock = threading.Lock()
 
     def get_preview(self, run_id: str, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> DatasetPreview:
         page = max(page, 1)
@@ -78,9 +87,10 @@ class DatasetPreviewService:
     # ------------------------------------------------------------------
 
     def _load(self, run_id: str) -> tuple[list[str], list[list[str]]] | None:
-        if run_id in self._cache:
-            self._cache.move_to_end(run_id)
-            return self._cache[run_id]
+        with self._lock:
+            if run_id in self._cache:
+                self._cache.move_to_end(run_id)
+                return self._cache[run_id]
 
         uri = self._curated_uri(run_id)
         if not uri:
@@ -97,9 +107,17 @@ class DatasetPreviewService:
             return [], []
         rows = list(reader)
 
-        self._cache[run_id] = (columns, rows)
-        if len(self._cache) > _CACHE_CAPACITY:
-            self._cache.popitem(last=False)
+        # The parse above happens outside the lock — it is pure CPU/IO work
+        # on a local `text` string, not shared state, and holding a lock
+        # across it would serialize every concurrent preview load for no
+        # reason. Two threads racing to parse the same uncached run_id both
+        # do the (idempotent) work once each; only the dict mutation below
+        # needs to be exclusive.
+        with self._lock:
+            self._cache[run_id] = (columns, rows)
+            self._cache.move_to_end(run_id)
+            if len(self._cache) > _CACHE_CAPACITY:
+                self._cache.popitem(last=False)
         return columns, rows
 
     def _read(self, uri: str) -> str | None:

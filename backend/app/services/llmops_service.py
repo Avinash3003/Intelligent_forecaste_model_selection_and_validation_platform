@@ -237,6 +237,16 @@ class _PromptVersionAccumulator:
                 self._cost_known_for_all_runs = False
 
         for call in response.calls:
+            # "none" is not a fallback provider — it is _build_call's own
+            # marker for a group with no insight and no trace attempts at
+            # all (llmops_service.py's `final = attempts[-1] if attempts
+            # else None`, provider falls through to "none"). Counting those
+            # groups here inflated fallback_rate (and diluted retry_rate)
+            # with groups that never invoked the LLM path either way,
+            # rather than groups that invoked it and fell back.
+            if call.provider == "none":
+                continue
+
             self._groups_total += 1
             if call.grounding_status == "grounded":
                 self._grounded += 1
@@ -248,7 +258,7 @@ class _PromptVersionAccumulator:
                 self._validation_failed += 1
             if call.retry_count > 0:
                 self._groups_retried += 1
-            if call.provider not in ("azure_openai",):
+            if call.provider != "azure_openai":
                 self._groups_fallback += 1
 
     def finalize(self) -> PromptVersionUsage:
