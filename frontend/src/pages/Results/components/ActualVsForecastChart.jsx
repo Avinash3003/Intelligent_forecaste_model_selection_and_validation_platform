@@ -13,6 +13,14 @@ import {
 } from 'recharts'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import ResultsFilterBar from './ResultsFilterBar'
+import {
+  chooseGranularity,
+  formatLabel,
+  formatTooltipLabel,
+  historySpanDays,
+  pointLabel,
+  selectTicks,
+} from './chartAxis'
 
 function ForecastDot(props) {
   const { cx, cy, payload } = props
@@ -29,39 +37,6 @@ function ForecastDot(props) {
   return <circle cx={cx} cy={cy} r={3} fill="#818cf8" />
 }
 
-// The backend sends actual points as real dates ("2015-01-01") and forecast
-// horizon points as "T1", "T2", ... — never mixed up, so this is a safe way
-// to tell which formatting rule applies to a given axis value.
-function isDateLike(period) {
-  return typeof period === 'string' && /^\d{4}-\d{2}-\d{2}/.test(period)
-}
-
-function parseDatePeriod(period) {
-  const date = new Date(period.slice(0, 10))
-  return Number.isNaN(date.getTime()) ? null : date
-}
-
-// Format granularity follows the *actual* span present in the data, never
-// a fixed assumption about the dataset's grain: a two-month upload reads
-// naturally as "Jan 5", a multi-decade one as just the year, and anything
-// in between as "Jan 24" — the same "no unnecessary precision" rule
-// Data Coverage (Priority #8) already applies, extended to per-tick
-// granularity here.
-function formatPeriodTick(period, spanDays) {
-  if (!isDateLike(period)) return period
-  const date = parseDatePeriod(period)
-  if (!date) return period
-  if (spanDays > 365 * 3) return date.toLocaleDateString('en-US', { year: 'numeric' })
-  if (spanDays > 60) return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
-
-function formatTooltipLabel(period) {
-  if (!isDateLike(period)) return period
-  const date = parseDatePeriod(period)
-  return date ? date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : period
-}
-
 function formatValue(value) {
   if (value == null) return '—'
   return Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 })
@@ -70,7 +45,7 @@ function formatValue(value) {
 // One tooltip for the whole chart, so the forecast interval reads as a
 // single "range" row rather than as two unexplained series called
 // forecastLower/forecastUpper.
-function ChartTooltip({ active, payload, label }) {
+function ChartTooltip({ active, payload }) {
   if (!active || !payload?.length) return null
   const point = payload[0]?.payload
   if (!point) return null
@@ -78,7 +53,7 @@ function ChartTooltip({ active, payload, label }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900">
       <p className="mb-1 font-semibold text-slate-700 dark:text-slate-200">
-        {formatTooltipLabel(label)}
+        {formatTooltipLabel(pointLabel(point))}
       </p>
       {point.actual != null && (
         <p className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
@@ -101,53 +76,48 @@ function ChartTooltip({ active, payload, label }) {
   )
 }
 
-// How many axis ticks stay legible before they start overlapping — chosen
-// once, applied via recharts' own `interval` (which only skips *label*
-// rendering; every data point is still plotted and connected).
-const MAX_VISIBLE_TICKS = 10
-// Above this many total points, individual actual-line dot markers start
-// reading as visual noise rather than data — the line itself still shows
-// every point, this only turns off the per-point marker.
+// How many axis ticks stay legible at card width before they overlap.
+// Applied to *labels* only — every data point is plotted and connected
+// regardless of how few ticks survive.
+const MAX_VISIBLE_TICKS = 9
+// Above this many total points, per-point dot markers read as noise
+// rather than as data. The line still contains every point.
 const DOT_DENSITY_THRESHOLD = 60
-// Above this many points the series is too dense to read end to end at
-// card width, so a brush is offered to scrub into any sub-range. Below it
-// the whole series already fits comfortably and a brush is just clutter.
+// Above this many points the series cannot be read end to end at card
+// width, so a brush is offered to scrub into any sub-range.
 const BRUSH_THRESHOLD = 120
+// How much of the tail the brush opens on. The whole series stays
+// scrubbable — this is only the initial window.
+const BRUSH_INITIAL_WINDOW = 120
 
 export default function ActualVsForecastChart({ filters, points = [] }) {
   // The selected horizon point is highlighted on the forecast line; every
-  // other point stays visible but secondary (Section 5.6).
+  // other point stays visible but secondary.
   //
   // `band` is recharts' range-area shape ([low, high]) built from the
-  // forecast interval the backend already sends per point. It was being
-  // sent and silently discarded, which left the forecast drawn as a bare
-  // line with no visible uncertainty at all.
+  // forecast interval the backend sends per point — present for models
+  // that produce one (ARIMA, Prophet), absent for those that do not (the
+  // tree models), which is why it is nulled rather than defaulted.
   const data = points.map((point) => ({
     ...point,
     highlight: point.period === filters.horizon,
     band: point.lower != null && point.upper != null ? [point.lower, point.upper] : null,
   }))
 
-  // Derived from the real data, not assumed: the actual-history points'
-  // own date span decides both the tick date format and how many labels
-  // can fit without overlapping. No points are ever dropped — only which
-  // of them get an axis label is thinned.
-  const actualDates = data
-    .filter((point) => point.actual != null)
-    .map((point) => parseDatePeriod(point.period))
-    .filter(Boolean)
-  const spanDays =
-    actualDates.length > 1
-      ? (Math.max(...actualDates) - Math.min(...actualDates)) / (1000 * 60 * 60 * 24)
-      : 0
-  const tickInterval = data.length > MAX_VISIBLE_TICKS ? Math.ceil(data.length / MAX_VISIBLE_TICKS) - 1 : 0
+  // Every axis decision below is derived from the data itself — the span
+  // it covers and how many points it holds — never from a fixed
+  // assumption about grain or length.
+  const spanDays = historySpanDays(data)
+  const granularity = chooseGranularity(spanDays)
+  const ticks = selectTicks(data, granularity, MAX_VISIBLE_TICKS)
   const showDots = data.length <= DOT_DENSITY_THRESHOLD
   const showBrush = data.length > BRUSH_THRESHOLD
 
-  // Where history ends and the forecast begins — marked once so a long
-  // series still reads as "past | future" at a glance instead of relying
-  // on the reader spotting where the line turns dashed.
-  const forecastStart = data.find((point) => point.forecast != null && point.actual == null)?.period
+  // Where observed history ends. Marked by the backend on the real final
+  // historical timestamp, so this is never a position guess.
+  const boundaryPeriod = data.find((point) => point.boundary)?.period
+
+  const labelByPeriod = new Map(data.map((point) => [point.period, pointLabel(point)]))
 
   // A brush needs its own vertical room; without it the plot area would be
   // squeezed rather than the card growing to fit.
@@ -164,29 +134,43 @@ export default function ActualVsForecastChart({ filters, points = [] }) {
         <ResultsFilterBar {...filters} />
       </div>
 
-      <div className={`w-full ${plotHeight}`}>
+      {/* min-w-0 lets the flex/grid parent shrink this below its content
+          width, which is what keeps a long series from pushing the card
+          into horizontal overflow. */}
+      <div className={`w-full min-w-0 ${plotHeight}`}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={data} margin={{ top: 10, right: 16, left: 4, bottom: 4 }}>
+          {/* Margins leave room for the first/last tick label and the
+              boundary caption instead of letting them clip at the edges;
+              the y-axis reserves its own width rather than borrowing from
+              the plot. */}
+          <ComposedChart data={data} margin={{ top: 16, right: 24, left: 8, bottom: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-slate-100 dark:text-slate-800" />
             <XAxis
               dataKey="period"
               tick={{ fontSize: 12, fill: '#94a3b8' }}
               axisLine={false}
               tickLine={false}
-              interval={tickInterval}
-              minTickGap={20}
-              tickFormatter={(value) => formatPeriodTick(value, spanDays)}
-              padding={{ left: 12, right: 12 }}
+              // Explicit ticks, so which labels appear is decided by
+              // selectTicks (distinct + evenly spread) rather than by a
+              // blind positional interval.
+              ticks={ticks}
+              interval={0}
+              tickMargin={10}
+              minTickGap={16}
+              tickFormatter={(value) => formatLabel(labelByPeriod.get(value) ?? value, granularity)}
+              padding={{ left: 16, right: 16 }}
             />
             <YAxis
               tick={{ fontSize: 12, fill: '#94a3b8' }}
               axisLine={false}
               tickLine={false}
               domain={['auto', 'auto']}
-              width={48}
+              width={56}
+              tickMargin={8}
+              tickFormatter={formatValue}
             />
             <Tooltip content={<ChartTooltip />} />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
 
             {/* Drawn before the lines so the shaded interval sits behind
                 them rather than washing them out. */}
@@ -202,13 +186,13 @@ export default function ActualVsForecastChart({ filters, points = [] }) {
               legendType="none"
             />
 
-            {forecastStart && (
+            {boundaryPeriod && (
               <ReferenceLine
-                x={forecastStart}
+                x={boundaryPeriod}
                 stroke="#94a3b8"
                 strokeDasharray="4 4"
                 label={{
-                  value: 'Forecast',
+                  value: 'Forecast →',
                   position: 'insideTopRight',
                   fontSize: 10,
                   fill: '#94a3b8',
@@ -249,8 +233,8 @@ export default function ActualVsForecastChart({ filters, points = [] }) {
                 travellerWidth={8}
                 stroke="#c7d2fe"
                 fill="#f8fafc"
-                tickFormatter={(value) => formatPeriodTick(value, spanDays)}
-                startIndex={Math.max(0, data.length - 120)}
+                tickFormatter={(value) => formatLabel(labelByPeriod.get(value) ?? value, granularity)}
+                startIndex={Math.max(0, data.length - BRUSH_INITIAL_WINDOW)}
               />
             )}
           </ComposedChart>

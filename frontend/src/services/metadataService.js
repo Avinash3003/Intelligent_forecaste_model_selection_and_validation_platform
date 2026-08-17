@@ -12,3 +12,12 @@ export function validateMetadata({ fileId, dateColumn, targetColumn, keyColumns,
     feature_columns: featureColumns,
   })
 }
+
+// Which candidate models the backend's configured execution mode can
+// actually run. The picker asks rather than assumes: a model whose library
+// is absent from the execution environment would otherwise be offered as a
+// choice and then reported Unavailable by the engine.
+// Returns { execution_mode, models: [{ id, available, reason }] }.
+export function fetchModelAvailability() {
+  return apiClient.get('/metadata/models')
+}

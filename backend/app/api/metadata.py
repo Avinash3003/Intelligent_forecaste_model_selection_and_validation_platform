@@ -8,7 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth.dependencies import require
 from app.auth.models import Permission, Principal
-from app.schemas.metadata import MetadataRequest, MetadataValidationResponse
+from app.config.model_availability import CANDIDATE_MODEL_IDS, unavailable_models
+from app.config.settings import Settings, get_settings
+from app.schemas.metadata import (
+    MetadataRequest,
+    MetadataValidationResponse,
+    ModelAvailability,
+    ModelAvailabilityResponse,
+)
 from app.services.dataset_loader import DatasetLoader
 from app.services.metadata_interpreter import MetadataInterpreter
 from app.services.upload_service import UploadService
@@ -43,3 +50,28 @@ def validate_metadata(
 
     normalized_config = metadata_interpreter.interpret(dataframe, request)
     return validation_engine.validate(dataframe, normalized_config, dataset_name)
+
+
+@router.get("/models", response_model=ModelAvailabilityResponse, summary="Candidate models runnable on this execution mode")
+def get_model_availability(
+    settings: Settings = Depends(get_settings),
+    principal: Principal = Depends(require(Permission.FORECAST_CONFIGURE)),
+) -> ModelAvailabilityResponse:
+    """Which candidate models the configured execution mode can actually run.
+
+    Read by the Configure step so it never offers a model whose library is
+    absent from the environment the run will execute in.
+    """
+    mode = (settings.execution_mode or "local").strip().lower()
+    blocked = unavailable_models(mode)
+    return ModelAvailabilityResponse(
+        execution_mode=mode,
+        models=[
+            ModelAvailability(
+                id=model_id,
+                available=model_id not in blocked,
+                reason=blocked.get(model_id),
+            )
+            for model_id in CANDIDATE_MODEL_IDS
+        ],
+    )

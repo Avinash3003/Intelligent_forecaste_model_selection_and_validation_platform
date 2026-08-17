@@ -11,6 +11,8 @@ reports on (group_id, model_name).
 
 from __future__ import annotations
 
+from calendar import monthrange
+from datetime import date, timedelta
 from typing import Any
 
 from app.orchestration.exceptions import RunNotReadyError
@@ -243,8 +245,13 @@ class ResultService:
         # Candidates the sequential Final Selection loop actually tried and
         # rejected (Section 6.9) — every one of these reached drift
         # validation and failed it, or had no forecast to validate at all.
+        # Keeps the whole entry, not just `reason`: a candidate rejected by
+        # drift validation carries its own drift_statistic/threshold_value
+        # here too (RejectedCandidate.to_dict() in selection_report.py),
+        # which _drift_detail below needs to show real numbers instead of
+        # re-parsing them out of the formatted reason text.
         rejected_reasons = {
-            entry.get("model_name"): entry.get("reason")
+            entry.get("model_name"): entry
             for entry in (winner.get("failure_reasons") or [])
         }
 
@@ -375,12 +382,23 @@ class ResultService:
             )
 
         if name in rejected_reasons:
-            reason = str(rejected_reasons[name])
-            # The reason text itself carries the real statistic/threshold
-            # (drift_validator.py formats them into `detail`) — only
-            # candidates that actually reached the test mention one; a
-            # candidate with no forecast to validate does not.
-            return DriftDetail(evaluated="statistic" in reason.lower(), passed=False, detail=reason)
+            entry = rejected_reasons[name]
+            # entry["drift_statistic"] is None for a candidate that never
+            # reached the test at all (no forward forecast to validate, or
+            # the validation call itself raised) — that is "not evaluated",
+            # not "evaluated and passed". A candidate that did reach the
+            # test and failed carries the same numbers here that `reason`
+            # already states in prose (RejectedCandidate.to_dict() in
+            # selection_report.py mirrors the winner's own drift keys).
+            return DriftDetail(
+                evaluated=entry.get("drift_statistic") is not None,
+                algorithm=entry.get("selected_drift_algorithm"),
+                statistic=entry.get("drift_statistic"),
+                threshold_value=entry.get("dynamic_threshold_value"),
+                threshold_method=entry.get("dynamic_threshold_method"),
+                passed=False,
+                detail=entry.get("reason"),
+            )
 
         return None  # never reached — see `selection_outcome` for why
 
@@ -398,7 +416,7 @@ class ResultService:
             return "Fallback Used" if is_fallback_winner else "Selected"
 
         if name in rejected_reasons:
-            return f"Rejected — {rejected_reasons[name]}"
+            return f"Rejected — {rejected_reasons[name].get('reason')}"
 
         training_status = training.get("status")
         if training_status and training_status != "Trained":
@@ -431,8 +449,9 @@ class ResultService:
             (g for g in result.forecast_groups if g.get("group_id") == group_id),
             {},
         )
-        for date, value in self._full_actual_history(result, group):
-            points.append(ForecastPoint(period=date, actual=value))
+        history = self._full_actual_history(result, group)
+        for date, value in history:
+            points.append(ForecastPoint(period=date, label=date, actual=value))
 
         forecast = winner.get("forecast") or {}
         values = forecast.get("values") or []
@@ -442,12 +461,26 @@ class ResultService:
         # Join the two lines by repeating the last actual as the forecast's
         # first point, so the chart draws one continuous series.
         if points and values:
-            points[-1].forecast = points[-1].actual
+            junction = points[-1]
+            junction.forecast = junction.actual
+            junction.boundary = True
+            # Anchor the interval band at the boundary too, but only for a
+            # model that produces one. The last actual is an observation,
+            # so its interval has zero width — that is a fact about the
+            # data, not an invented bound, and without it the shaded band
+            # starts one step adrift of the line it belongs to. A model
+            # with no intervals (the tree models) keeps None here and stays
+            # band-free, exactly as before.
+            if lower and upper:
+                junction.lower = junction.upper = junction.actual
+
+        forecast_labels = _projected_labels([date for date, _ in history], len(values))
 
         for index, value in enumerate(values):
             points.append(
                 ForecastPoint(
                     period=f"T{index + 1}",
+                    label=forecast_labels[index],
                     forecast=value,
                     lower=lower[index] if index < len(lower) else None,
                     upper=upper[index] if index < len(upper) else None,
@@ -680,3 +713,61 @@ def _derive_key_reason(rejection_reasons: list[str], fallback_used: bool) -> str
         count = len(rejection_reasons)
         return f"Outranked {count} rejected candidate{'s' if count != 1 else ''}"
     return "Highest ranked candidate"
+
+
+# The gap band (in days) that means "these observations are one calendar
+# month apart", so the forecast advances by months rather than by a fixed
+# 30 days and never drifts off month boundaries across a long horizon.
+_MONTHLY_GAP_DAYS = range(26, 36)
+
+
+def _projected_labels(history_dates: list[str], horizon: int) -> list[str | None]:
+    """Calendar dates the forecast's horizon steps land on.
+
+    Continues the observed cadence of the series' own dates — the same
+    "keep the series' grain" rule the engine's own forecasting uses — so
+    the chart's axis stays in real dates past the boundary instead of
+    switching to opaque T-keys. Purely a label: no value is derived from
+    it, and None is returned for every step when the history is too short
+    or unparseable to establish a cadence.
+    """
+    parsed = [_parse_iso_date(value) for value in history_dates]
+    observed = [value for value in parsed if value is not None]
+    if len(observed) < 2 or horizon <= 0:
+        return [None] * horizon
+
+    gaps = sorted(
+        (later - earlier).days for earlier, later in zip(observed, observed[1:]) if later > earlier
+    )
+    if not gaps:
+        return [None] * horizon
+    median_gap = gaps[len(gaps) // 2]
+
+    last = observed[-1]
+    labels: list[str | None] = []
+    for step in range(1, horizon + 1):
+        if median_gap in _MONTHLY_GAP_DAYS:
+            projected = _add_months(last, step)
+        else:
+            projected = last + timedelta(days=median_gap * step)
+        labels.append(projected.isoformat())
+    return labels
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _add_months(start: date, months: int) -> date:
+    """`start` advanced by whole calendar months, clamped to month length —
+    31 Jan plus one month is 28/29 Feb, never an invalid date."""
+    total = start.month - 1 + months
+    year = start.year + total // 12
+    month = total % 12 + 1
+    last_day = monthrange(year, month)[1]
+    return date(year, month, min(start.day, last_day))

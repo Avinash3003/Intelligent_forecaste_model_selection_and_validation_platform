@@ -128,7 +128,16 @@ class ProductionModelSelector:
                     forecast=forecast,
                 )
 
-            rejected.append(RejectedCandidate(candidate.model_name, drift_result.detail))
+            rejected.append(
+                RejectedCandidate(
+                    model_name=candidate.model_name,
+                    reason=drift_result.detail,
+                    algorithm=drift_result.algorithm_selection.algorithm.value,
+                    statistic=round(drift_result.drift_statistic, 6),
+                    threshold_method=drift_result.threshold.method.value,
+                    threshold_value=round(drift_result.threshold.value, 6),
+                )
+            )
 
         # Every ranked candidate failed drift validation, or there were none
         # to begin with — Section 6.9's fallback path.

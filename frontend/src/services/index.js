@@ -1,6 +1,6 @@
 export { apiClient, ApiError } from './apiClient'
 export { uploadDataset, profileDataset, fetchDatasetDateRange } from './uploadService'
-export { validateMetadata } from './metadataService'
+export { validateMetadata, fetchModelAvailability } from './metadataService'
 export {
   cancelDeployment,
   deployRun,
