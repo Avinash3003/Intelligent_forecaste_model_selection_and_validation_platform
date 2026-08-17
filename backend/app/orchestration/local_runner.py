@@ -443,10 +443,22 @@ class LocalRunner(PipelineRunner):
             with self._lock:
                 # A cancel() that raced in before the process existed is
                 # honoured immediately rather than letting the run start.
-                if record.status is JobStatus.CANCELLED:
-                    process.terminate()
-                    return
-                record.process = process
+                raced_cancel = record.status is JobStatus.CANCELLED
+                if not raced_cancel:
+                    record.process = process
+
+            if raced_cancel:
+                # Waited on outside the lock, same as cancel() below: a
+                # syscall must never run while holding it. Without this
+                # wait the child was left unreaped — a zombie until the
+                # whole backend process eventually exits.
+                process.terminate()
+                try:
+                    process.wait(timeout=self._TERMINATE_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=self._TERMINATE_GRACE_SECONDS)
+                return
 
             _, stderr = process.communicate(timeout=self._settings.job_timeout_seconds)
 
@@ -475,6 +487,14 @@ class LocalRunner(PipelineRunner):
 
         except subprocess.TimeoutExpired:
             process.kill()
+            # Reaped here, not left for the OS: an unreaped child stays a
+            # zombie in the process table until this backend process itself
+            # exits, and a deployment that regularly times out runs would
+            # accumulate them for as long as it stays up.
+            try:
+                process.wait(timeout=self._TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
             with self._lock:
                 record.status = JobStatus.FAILED
                 record.error = f"Execution exceeded the configured timeout of {self._settings.job_timeout_seconds}s."

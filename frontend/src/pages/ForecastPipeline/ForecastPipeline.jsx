@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import PageContainer from '../../components/common/PageContainer'
 import StepIndicator from '../../components/common/StepIndicator'
@@ -130,6 +130,14 @@ export default function ForecastPipeline() {
   const [deployError, setDeployError] = useState(null)
   const [deployed, setDeployed] = useState(false)
   const [runId, setRunId] = useState(null)
+  // Bumped on every loadEstimate() call so a response can tell whether it
+  // is still the most recent request — going Next -> Previous -> edit
+  // config -> Next again fires a second estimate before the first
+  // resolves, and isBusy does not block that (estimateLoading is
+  // deliberately excluded from it, since the estimate is advisory and
+  // must never block navigation). Without this guard, whichever response
+  // lands last wins regardless of which config it was computed for.
+  const estimateRequestRef = useRef(0)
 
   const isBusy = uploading || profiling || validating || deploying
 
@@ -287,6 +295,7 @@ export default function ForecastPipeline() {
   // the wrong trade.
   const loadEstimate = async () => {
     if (!fileId) return
+    const requestId = ++estimateRequestRef.current
     setEstimateLoading(true)
     setEstimateError(null)
     try {
@@ -297,11 +306,16 @@ export default function ForecastPipeline() {
         horizon: config.horizon,
         aggregationMethod: aggregationRequired ? aggregationMethod : null,
       })
+      // A newer request has already started (Previous -> edit -> Next
+      // again before this one resolved) — its own response, not this
+      // stale one, owns the estimate/loading state from here.
+      if (requestId !== estimateRequestRef.current) return
       setEstimate(response)
     } catch (err) {
+      if (requestId !== estimateRequestRef.current) return
       setEstimateError(err.message)
     } finally {
-      setEstimateLoading(false)
+      if (requestId === estimateRequestRef.current) setEstimateLoading(false)
     }
   }
 

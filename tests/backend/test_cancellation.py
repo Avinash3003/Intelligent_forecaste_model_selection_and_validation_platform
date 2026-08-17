@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -217,6 +218,37 @@ def test_databricks_cleanup_is_idempotent(dbx_settings, dataset):
 
     assert first_errors == []
     assert second_errors == []
+
+
+def test_databricks_cancel_refuses_a_run_that_already_completed_on_databricks(dbx_settings, dataset):
+    """cancel() must refresh from the workspace before checking terminality.
+
+    A run's in-memory record is only updated when something reads it
+    (DatabricksRunner._refresh's own contract) — if the job finished on
+    Databricks since the last poll, the record can still read RUNNING.
+    Without a refresh first, cancel() would send a (harmless) cancel_run
+    call and then unconditionally delete this completed run's curated
+    dataset, models and forecast export via _cleanup_run_storage, and mark
+    a real success as CANCELLED in MLflow.
+    """
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(dbx_settings, workspace_client=workspace)
+    run_id = runner.submit(_dbx_request(dataset))
+
+    # The job finished successfully on Databricks, but nothing has polled
+    # get_status()/get_result() since — the in-memory record is still
+    # whatever submit() left it as.
+    workspace.jobs._state = SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message="")
+    workspace.files.uploaded[
+        f"/Volumes/forecastiq/forecasting/curated_files/runs/{run_id}/curated.parquet"
+    ] = b"real completed output"
+
+    outcome = runner.cancel(run_id)
+
+    assert outcome.cancelled is False
+    assert workspace.jobs.cancelled == []  # never asked Databricks to cancel a finished run
+    # The completed run's real output survives.
+    assert f"/Volumes/forecastiq/forecasting/curated_files/runs/{run_id}/curated.parquet" in workspace.files.uploaded
 
 
 def test_databricks_started_by_travels_through_the_job_configuration(dbx_settings, dataset):

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,14 @@ _STATUS_MAP = {
 
 DEFAULT_HISTORY_LIMIT = 200
 
+# How long "this run has no summary artifact" is remembered. A *positive*
+# summary is cached forever — a finished run's artifact never changes — but
+# a negative one must expire: a run can legitimately have no summary yet
+# (still executing, or died before the tracking stage) and then gain one.
+# Without this, every caller re-attempted the same failing remote download
+# on every request, which is most of what made estimation slow.
+MISSING_SUMMARY_TTL_SECONDS = 120.0
+
 
 class MLflowHistoryStore:
     """Reads finished-run history from the configured MLflow store."""
@@ -68,6 +78,9 @@ class MLflowHistoryStore:
         # artifact download, and the Results page re-reads the same run on
         # every group/horizon change.
         self._summary_cache: dict[str, dict[str, Any]] = {}
+        # run_id -> monotonic deadline until which "no summary" is taken on
+        # trust instead of re-downloaded. See MISSING_SUMMARY_TTL_SECONDS.
+        self._missing_summaries: dict[str, float] = {}
 
     def is_available(self) -> bool:
         """Whether history can be read. Never raises."""
@@ -111,6 +124,8 @@ class MLflowHistoryStore:
         """
         with self._lock:
             cached = self._summary_cache.get(run_id)
+            if cached is None and self._summary_is_known_missing(run_id):
+                return None
         if cached is not None:
             return cached
 
@@ -120,6 +135,7 @@ class MLflowHistoryStore:
 
         run = self._find_run(client, run_id)
         if run is None:
+            self._remember_missing_summary(run_id)
             return None
 
         try:
@@ -129,11 +145,27 @@ class MLflowHistoryStore:
             # A failed run legitimately has no summary: it died before the
             # tracking stage could log one.
             logger.info("No run summary artifact for run '%s': %s", run_id, exc)
+            self._remember_missing_summary(run_id)
             return None
 
         with self._lock:
             self._summary_cache[run_id] = summary
+            self._missing_summaries.pop(run_id, None)
         return summary
+
+    # Caller must hold self._lock.
+    def _summary_is_known_missing(self, run_id: str) -> bool:
+        deadline = self._missing_summaries.get(run_id)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            del self._missing_summaries[run_id]
+            return False
+        return True
+
+    def _remember_missing_summary(self, run_id: str) -> None:
+        with self._lock:
+            self._missing_summaries[run_id] = time.monotonic() + MISSING_SUMMARY_TTL_SECONDS
 
     def get_listing(self, run_id: str, with_stages: bool = False) -> RunListing | None:
         """One run's history entry, or None.
@@ -250,6 +282,7 @@ class MLflowHistoryStore:
 
         with self._lock:
             self._summary_cache.pop(run_id, None)
+            self._missing_summaries.pop(run_id, None)
         return True
 
     def _get_client(self) -> Any:
@@ -262,6 +295,8 @@ class MLflowHistoryStore:
             logger.warning("mlflow is not installed; run history is unavailable.")
             return None
 
+        self._ensure_databricks_credentials_in_environment()
+
         try:
             client = MlflowClient(tracking_uri=self._tracking_uri)
         except Exception as exc:  # noqa: BLE001
@@ -271,6 +306,38 @@ class MLflowHistoryStore:
         with self._lock:
             self._client = client
         return client
+
+    def _ensure_databricks_credentials_in_environment(self) -> None:
+        """Make this backend's own Databricks credentials visible to MLflow.
+
+        A `tracking_uri` of "databricks" authenticates by reading
+        `DATABRICKS_HOST`/`DATABRICKS_CLIENT_ID`/`DATABRICKS_CLIENT_SECRET`/
+        `DATABRICKS_TOKEN` from the process environment itself — it never
+        reads this app's Settings object, which is how DatabricksRunner's
+        WorkspaceClient authenticates instead (constructed explicitly from
+        Settings fields). The two only agree automatically when Settings
+        was populated from real environment variables with exactly those
+        names; if this deployment's `.env` file provided the credentials
+        (pydantic-settings loads a `.env` file into the Settings object
+        without exporting it to `os.environ`), job submission still works
+        but MLflow's independent credential lookup finds nothing and
+        silently reports history as unavailable — which reads to a user as
+        "my past runs disappeared" with no error anywhere.
+
+        `setdefault` only: an operator's own real environment variable is
+        never overridden, this only fills a gap.
+        """
+        if not self._tracking_uri.strip().lower().startswith("databricks"):
+            return
+
+        for env_name, value in (
+            ("DATABRICKS_HOST", self._settings.databricks_host),
+            ("DATABRICKS_CLIENT_ID", self._settings.databricks_client_id),
+            ("DATABRICKS_CLIENT_SECRET", self._settings.databricks_client_secret),
+            ("DATABRICKS_TOKEN", self._settings.databricks_token),
+        ):
+            if value:
+                os.environ.setdefault(env_name, value)
 
 
 def _iso_from_millis(value: int | None) -> str | None:

@@ -364,6 +364,13 @@ class DatabricksRunner(PipelineRunner):
         cancelled_by_display_name: str | None = None,
     ) -> CancellationOutcome:
         record = self._require_job(run_id)
+        # Without this, a run that finished on Databricks since the last
+        # poll still reads PENDING/RUNNING here (this record is only
+        # updated on read, see _refresh's own docstring) — cancel() would
+        # then proceed to delete a completed run's summary/models/forecast
+        # via _cleanup_run_storage below and overwrite its real MLflow
+        # outcome with CANCELLED.
+        self._refresh(record)
         if record.status not in (JobStatus.PENDING, JobStatus.RUNNING):
             # Already terminal — nothing to do, and nothing to report as a
             # failure. A second cancel() on the same run lands here.
