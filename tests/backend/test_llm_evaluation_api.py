@@ -79,9 +79,11 @@ def test_unauthenticated_caller_cannot_read_the_report(client):
     assert client.get("/results/llmops/evaluation").status_code == 401
 
 
-def test_analyst_cannot_inspect_the_evaluation_report(client):
+def test_analyst_can_read_the_evaluation_report(client):
+    # Read-only exposure of a report file, gated the same way as the rest
+    # of the Observability page — the Analyst role can view it.
     app.dependency_overrides[get_current_principal] = lambda: _principal(Role.ANALYST)
-    assert client.get("/results/llmops/evaluation").status_code == 403
+    assert client.get("/results/llmops/evaluation").status_code == 200
 
 
 def test_no_report_file_yet_is_reported_honestly_not_as_an_error(client, tmp_path):
