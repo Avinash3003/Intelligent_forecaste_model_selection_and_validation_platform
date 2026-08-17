@@ -39,12 +39,26 @@ class ModelDecision(BaseModel):
 
 
 class ForecastPoint(BaseModel):
+    """One point on the Actual vs Forecast chart.
+
+    `period` is the point's identity, not its label: actual points carry
+    their ISO date and forecast points carry "T1".."Tn", which is what the
+    horizon selector matches on. `label` is what the axis should read —
+    for forecast points that is the projected calendar date, so a long
+    series does not switch from dates to opaque T-keys halfway across.
+    """
+
     period: str
+    label: str | None = None
     actual: float | None = None
     forecast: float | None = None
     lower: float | None = None
     upper: float | None = None
     highlight: bool = False
+    # True on the single point where observed history ends and the forecast
+    # begins. Marked here rather than inferred by the chart so the boundary
+    # is the real final historical timestamp, not a position guess.
+    boundary: bool = False
 
 
 class DashboardInsight(BaseModel):

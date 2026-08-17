@@ -1,4 +1,6 @@
+import { useEffect } from 'react'
 import { ShieldQuestion } from 'lucide-react'
+import useModelAvailability from '../../../hooks/useModelAvailability'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import RangeSlider from '../../../components/ui/RangeSlider'
 import Checkbox from '../../../components/ui/Checkbox'
@@ -12,6 +14,24 @@ import {
 } from '../../../data/appConfig'
 
 export default function StepForecastConfiguration({ config, onChange, errors }) {
+  // { modelId: reason } for models the configured execution mode cannot
+  // run — empty when every model is runnable or the lookup failed.
+  const unavailableModels = useModelAvailability()
+
+  // The default selection is "every model", chosen before this component
+  // knows which ones the environment supports. Once it does, anything
+  // unrunnable is dropped: leaving it selected would submit a run that
+  // silently reports the model Unavailable and would have the estimate
+  // charge for work that never happens.
+  useEffect(() => {
+    const blocked = Object.keys(unavailableModels)
+    if (!blocked.length) return
+    const kept = config.selectedModels.filter((id) => !blocked.includes(id))
+    if (kept.length !== config.selectedModels.length) {
+      onChange('selectedModels', kept)
+    }
+  }, [unavailableModels, config.selectedModels, onChange])
+
   const toggleModel = (modelId, checked) => {
     const next = checked
       ? [...config.selectedModels, modelId]
@@ -61,23 +81,35 @@ export default function StepForecastConfiguration({ config, onChange, errors }) 
         subtitle="All candidate models are selected by default — at least one must remain selected"
         action={
           <span className="text-xs font-medium text-slate-400">
-            {config.selectedModels.length} of {forecastModels.length} selected
+            {config.selectedModels.length} of{' '}
+            {forecastModels.filter((model) => !unavailableModels[model.id]).length} selected
           </span>
         }
       >
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {forecastModels.map((model) => {
             const isFallback = model.id === config.fallbackModel
+            // Disabled rather than hidden: a model missing without
+            // explanation reads as a bug, and the reason is worth showing.
+            const unavailableReason = unavailableModels[model.id]
             return (
               <Checkbox
                 key={model.id}
-                checked={config.selectedModels.includes(model.id)}
+                checked={!unavailableReason && config.selectedModels.includes(model.id)}
                 onChange={(checked) => toggleModel(model.id, checked)}
-                label={isFallback ? `${model.name} · also fallback` : model.name}
+                disabled={Boolean(unavailableReason)}
+                label={
+                  unavailableReason
+                    ? `${model.name} · unavailable`
+                    : isFallback
+                      ? `${model.name} · also fallback`
+                      : model.name
+                }
                 description={
-                  isFallback
-                    ? 'Also configured as the fallback baseline for this run.'
-                    : model.description
+                  unavailableReason
+                    || (isFallback
+                      ? 'Also configured as the fallback baseline for this run.'
+                      : model.description)
                 }
               />
             )

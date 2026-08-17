@@ -29,14 +29,39 @@ class FinalSelectionStatus(str, Enum):
 
 @dataclass
 class RejectedCandidate:
-    """One ranked candidate that did not become the production model."""
+    """One ranked candidate that did not become the production model.
+
+    The drift fields are None unless this candidate actually reached and
+    failed drift validation — a candidate with no forward forecast to
+    validate, or one whose validation itself raised, never got a verdict
+    to record. When they are set, they are the same numbers `reason`
+    already states in prose (drift_validator.py formats `detail` from the
+    same DriftValidationResult) — kept here as real fields too so a
+    consumer (the Results dashboard) can show them as data instead of
+    re-parsing formatted text.
+    """
 
     model_name: str
     reason: str
+    algorithm: str | None = None
+    statistic: float | None = None
+    threshold_method: str | None = None
+    threshold_value: float | None = None
 
-    # Serialize to a plain dict
+    # Serialize to a plain dict. Key names mirror ProductionModelResult.
+    # to_dict()'s winner-side drift keys (selected_drift_algorithm,
+    # drift_statistic, dynamic_threshold_method, dynamic_threshold_value)
+    # so a consumer reads a rejected candidate's drift numbers the same
+    # way it reads the winner's.
     def to_dict(self) -> dict[str, Any]:
-        return {"model_name": self.model_name, "reason": self.reason}
+        return {
+            "model_name": self.model_name,
+            "reason": self.reason,
+            "selected_drift_algorithm": self.algorithm,
+            "drift_statistic": self.statistic,
+            "dynamic_threshold_method": self.threshold_method,
+            "dynamic_threshold_value": self.threshold_value,
+        }
 
 
 @dataclass

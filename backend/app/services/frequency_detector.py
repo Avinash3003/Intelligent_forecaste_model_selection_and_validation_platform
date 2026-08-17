@@ -24,8 +24,16 @@ class FrequencyDetector:
     def detect(self, date_series: pd.Series) -> str:
         """One of Daily/Weekly/Monthly/Quarterly/Yearly, or Irregular if the
         spacing is inconsistent. Tolerates unparseable and duplicate values."""
-        parsed = pd.to_datetime(date_series, errors="coerce").dropna()
-        unique_sorted = parsed.drop_duplicates().sort_values()
+        return self.detect_parsed(pd.to_datetime(date_series, errors="coerce"))
+
+    def detect_parsed(self, parsed: pd.Series) -> str:
+        """Same answer as detect(), for a column already parsed to datetimes.
+
+        Exists so a caller that needs the parsed column for other work
+        (DatasetAnalyzer) can parse once and reuse it, instead of paying a
+        second full to_datetime pass just to learn the grain.
+        """
+        unique_sorted = parsed.dropna().drop_duplicates().sort_values()
 
         if len(unique_sorted) < 2:
             return "Irregular"

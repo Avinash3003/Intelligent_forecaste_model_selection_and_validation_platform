@@ -134,3 +134,23 @@ class MetadataValidationResponse(BaseModel):
     forecast_suitability: ForecastSuitability
     ready_for_deployment: bool
     configuration_summary: ForecastConfigurationSummary
+
+
+class ModelAvailability(BaseModel):
+    """Whether one candidate model can run on the configured execution mode.
+
+    The frontend's model picker reads this instead of assuming every
+    registered model is runnable — otherwise it offers a choice the
+    environment will report Unavailable (see app/config/model_availability.py).
+    """
+
+    id: str
+    available: bool
+    # Populated only when available is False, so the picker can explain the
+    # disabled state rather than silently hiding the option.
+    reason: str | None = None
+
+
+class ModelAvailabilityResponse(BaseModel):
+    execution_mode: str
+    models: list[ModelAvailability]

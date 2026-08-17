@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import math
 import statistics
+import threading
+import time
 from dataclasses import dataclass
 
 import pandas as pd
 
+from app.config.model_availability import filter_available, unavailable_models
 from app.config.settings import Settings, get_settings
 from app.orchestration.mlflow_history import MLflowHistoryStore
 from app.schemas.estimation import (
@@ -30,7 +33,7 @@ from app.schemas.estimation import (
     EstimationResponse,
     WorkloadEstimate,
 )
-from app.services.frequency_detector import FrequencyDetector
+from app.services.dataset_analysis import DatasetAnalysis, DatasetAnalyzer
 
 # ---------------------------------------------------------------------
 # Heuristic fallback constants — used only when historical telemetry is
@@ -116,6 +119,22 @@ _HIGH_FACTOR = 1.6
 _HISTORY_SAMPLE_SIZE = 15
 _MIN_RUNS_FOR_CALIBRATION = 3
 
+# How many run summaries the sweep will actually download. Each one is a
+# remote artifact fetch on Databricks, and calibration only ever takes a
+# *median* — past a handful of samples another download buys precision
+# nobody can perceive while costing a full round trip. Scanning still walks
+# up to _HISTORY_SAMPLE_SIZE listings, so runs that turn out to have no
+# summary don't consume the budget; only successful fetches do.
+_CALIBRATION_SAMPLE_TARGET = 6
+
+# How long a computed calibration is reused before the sweep runs again.
+# Calibration only moves when new runs complete, and a forecasting run
+# takes minutes to hours — so re-deriving it per /estimate call re-paid a
+# large network cost for an answer that had not changed. Five minutes is
+# far shorter than the interval between completed runs, so a genuinely new
+# run is picked up long before it could matter to an estimate.
+_CALIBRATION_TTL_SECONDS = 300.0
+
 
 @dataclass
 class _Calibration:
@@ -127,23 +146,54 @@ class _Calibration:
     basis: str  # "heuristic" or "historical (N runs)"
 
 
+@dataclass(frozen=True)
+class _RunHistoryCalibration:
+    """Everything one sweep of MLflow run history yields.
+
+    Both consumers — per-fit timings and measured compute startup — read the
+    *same* recent runs and the *same* summary artifacts. Producing them
+    together is what removes the second full history sweep (and its second
+    round of artifact downloads) from every estimate.
+    """
+
+    calibration: _Calibration
+    # Median non-engine overhead across the sampled runs; None when no
+    # credible sample existed, which is what makes the caller fall back to
+    # the per-mode constant.
+    measured_startup_seconds: float | None
+
+
 class EstimationService:
     """Estimates runtime and compute/LLM cost for a configuration, without running it."""
 
     def __init__(self, settings: Settings | None = None, history: MLflowHistoryStore | None = None) -> None:
         self._settings = settings or get_settings()
         self._history = history or MLflowHistoryStore(self._settings)
-        self._frequency_detector = FrequencyDetector()
+        self._analyzer = DatasetAnalyzer()
+        # Guards the TTL cache below. This service is a process-wide
+        # singleton (see get_estimation_service), so the cache is shared by
+        # every concurrent request rather than per-request.
+        self._calibration_lock = threading.Lock()
+        self._cached_history: _RunHistoryCalibration | None = None
+        self._cached_history_at: float = 0.0
 
     def estimate(self, dataframe: pd.DataFrame, request: EstimationRequest) -> EstimationResponse:
-        dataset = self._dataset_summary(dataframe, request)
-        period_counts = self._period_counts(dataframe, request, dataset)
+        backend = (self._settings.execution_mode or "local").strip().lower()
+
+        # One pass over the dataset. Everything below reads from `analysis`
+        # rather than touching the DataFrame again.
+        analysis = self._analyzer.analyze(dataframe, request.metadata)
+        dataset = self._dataset_summary(analysis, request, backend)
+        period_counts = analysis.period_counts
+
         workload = self._workload(period_counts, dataset)
-        calibration = self._calibrate()
+
+        # One sweep of run history, shared by calibration and startup.
+        history = self._run_history_calibration()
+        calibration = history.calibration
 
         runtime_seconds = self._estimate_runtime_seconds(period_counts, dataset, workload, calibration)
-        backend = (self._settings.execution_mode or "local").strip().lower()
-        startup_seconds = self._startup_seconds(backend)
+        startup_seconds = self._startup_seconds(backend, history.measured_startup_seconds)
 
         low_minutes = (startup_seconds + runtime_seconds * _LOW_FACTOR) / 60.0
         high_minutes = (startup_seconds + runtime_seconds * _HIGH_FACTOR) / 60.0
@@ -186,6 +236,17 @@ class EstimationService:
                 startup_detail = f"~{startup_seconds / 60:.0f} min before the pipeline begins"
             breakdown.append(EstimateComponent(label="Compute startup", detail=startup_detail))
 
+        # Named explicitly rather than silently dropped: a user who ticked
+        # TFT and sees no TFT cost is owed the reason.
+        excluded = self._excluded_models(request, backend)
+        if excluded:
+            breakdown.append(
+                EstimateComponent(
+                    label="Excluded models",
+                    detail=f"{', '.join(sorted(excluded))} — not runnable on this execution mode, so not estimated",
+                )
+            )
+
         return EstimationResponse(
             dataset=dataset,
             workload=workload,
@@ -207,70 +268,29 @@ class EstimationService:
     # Dataset metadata (Objective 2: "must use the ACTUAL uploaded dataset")
     # ------------------------------------------------------------------
 
-    def _dataset_summary(self, dataframe: pd.DataFrame, request: EstimationRequest) -> DatasetMetadataSummary:
-        meta = request.metadata
-        key_columns = [c for c in meta.key_columns if c in dataframe.columns]
-        feature_columns = [c for c in meta.feature_columns if c in dataframe.columns]
-
-        grain = "Unknown"
-        if meta.date_column in dataframe.columns:
-            grain = self._frequency_detector.detect(dataframe[meta.date_column])
-
-        periods_by_group = self._periods_by_group(dataframe, meta.date_column, key_columns)
-        history_length = int(max(periods_by_group.values(), default=0))
-
-        missingness = None
-        if meta.target_column in dataframe.columns:
-            target = pd.to_numeric(dataframe[meta.target_column], errors="coerce")
-            missingness = round(float(target.isna().mean() * 100.0), 2)
-
+    def _dataset_summary(
+        self, analysis: DatasetAnalysis, request: EstimationRequest, backend: str
+    ) -> DatasetMetadataSummary:
+        """The response's dataset block, read entirely from the single
+        analysis pass — this method touches no DataFrame."""
         return DatasetMetadataSummary(
-            rows=int(dataframe.shape[0]),
-            columns=int(dataframe.shape[1]),
-            date_column=meta.date_column,
-            target_column=meta.target_column,
-            feature_columns=feature_columns,
-            key_columns=key_columns,
-            unique_keys=len(periods_by_group) or 1,
-            date_grain=grain,
-            history_length_periods=history_length,
-            missingness_pct=missingness,
+            rows=analysis.rows,
+            columns=analysis.columns,
+            date_column=request.metadata.date_column,
+            target_column=request.metadata.target_column,
+            feature_columns=analysis.feature_columns,
+            key_columns=analysis.key_columns,
+            unique_keys=analysis.unique_keys,
+            date_grain=analysis.date_grain,
+            history_length_periods=analysis.history_length_periods,
+            missingness_pct=analysis.missingness_pct,
             forecast_horizon=request.horizon,
-            selected_models=self._model_ids(request),
+            selected_models=self._model_ids(request, backend),
         )
-
-    def _periods_by_group(
-        self, dataframe: pd.DataFrame, date_column: str, key_columns: list[str]
-    ) -> dict[tuple, int]:
-        """Distinct months per group — what the curated dataset will hold after
-        monthly aggregation, and a better proxy than raw row count."""
-        if date_column not in dataframe.columns:
-            return {}
-
-        dates = pd.to_datetime(dataframe[date_column], errors="coerce")
-        periods = dates.dt.to_period("M")
-
-        if not key_columns:
-            valid = periods.dropna()
-            return {(): int(valid.nunique())} if len(valid) else {}
-
-        try:
-            grouped = periods.groupby([dataframe[c] for c in key_columns]).nunique()
-        except (TypeError, ValueError):
-            return {}
-        return {tuple([key]) if not isinstance(key, tuple) else key: int(count) for key, count in grouped.items()}
 
     # ------------------------------------------------------------------
     # Workload (Objective 2: "derived from the actual workload", not keys x models alone)
     # ------------------------------------------------------------------
-
-    def _period_counts(
-        self, dataframe: pd.DataFrame, request: EstimationRequest, dataset: DatasetMetadataSummary
-    ) -> list[int]:
-        periods_by_group = self._periods_by_group(
-            dataframe, request.metadata.date_column, [c for c in request.metadata.key_columns if c in dataframe.columns]
-        )
-        return list(periods_by_group.values()) or [dataset.history_length_periods]
 
     def _workload(self, period_counts: list[int], dataset: DatasetMetadataSummary) -> WorkloadEstimate:
         models = dataset.selected_models
@@ -313,23 +333,42 @@ class EstimationService:
             llm_calls=groups,
         )
 
-    def _model_ids(self, request: EstimationRequest) -> list[str]:
-        """Selected models, or the whole registry when none were chosen —
-        an empty selection means "train everything" to the engine."""
+    def _model_ids(self, request: EstimationRequest, backend: str) -> list[str]:
+        """Models this run will actually train.
+
+        Selected models, or the whole registry when none were chosen (an
+        empty selection means "train everything" to the engine), minus any
+        the current execution mode cannot run. The availability filter is
+        applied *after* the registry fallback so both paths are filtered,
+        and charging runtime for a model the environment will report
+        Unavailable is exactly the fiction it removes.
+        """
         selected = [model.strip().lower() for model in request.selected_models if model.strip()]
-        return selected or sorted(_MODEL_MIN_OBSERVATIONS)
+        return filter_available(selected or sorted(_MODEL_MIN_OBSERVATIONS), backend)
+
+    def _excluded_models(self, request: EstimationRequest, backend: str) -> list[str]:
+        """Models the user asked for that this execution mode cannot run."""
+        blocked = unavailable_models(backend)
+        return [
+            model.strip().lower()
+            for model in request.selected_models
+            if model.strip().lower() in blocked
+        ]
 
     # ------------------------------------------------------------------
     # Historical calibration (Section 8.5.1)
     # ------------------------------------------------------------------
 
-    def _startup_seconds(self, backend: str) -> float:
+    def _startup_seconds(self, backend: str, measured: float | None) -> float:
         """Seconds spent waiting for compute before stage one.
 
-        Zero locally. In the cloud it is measured from real runs — wall-clock
-        duration minus the engine's own stage time is exactly the time spent
-        outside the engine — falling back to the per-mode constant only when
-        no credible sample exists.
+        Zero locally. In the cloud `measured` is the real figure taken from
+        run history — wall-clock duration minus the engine's own stage time
+        is exactly the time spent outside the engine — and the per-mode
+        constant is used only when no credible sample existed.
+
+        The measurement is passed in rather than fetched here so it comes
+        from the same history sweep calibration used.
         """
         if backend not in ("databricks", "databricks_dcs"):
             return 0.0
@@ -339,57 +378,53 @@ class EstimationService:
             if backend == "databricks_dcs"
             else _SERVERLESS_STARTUP_SECONDS
         )
-
-        measured = self._measured_startup_seconds()
         return measured if measured is not None else default
 
-    def _measured_startup_seconds(self) -> float | None:
-        """Median non-engine overhead across recent completed runs, or None."""
-        samples: list[float] = []
-        try:
-            listings = self._history.list_runs(limit=_HISTORY_SAMPLE_SIZE)
-        except Exception:  # noqa: BLE001 - calibration is best-effort
-            return None
+    def _run_history_calibration(self) -> _RunHistoryCalibration:
+        """The cached history sweep, recomputed only once per TTL.
 
-        for listing in listings:
-            if listing.job_status.value != "Completed" or not listing.duration_seconds:
-                continue
-            try:
-                summary = self._history.get_summary(listing.run_id)
-            except Exception:  # noqa: BLE001
-                continue
-            if not summary:
-                continue
+        Reused across requests because calibration is a property of this
+        deployment's past runs, not of the estimate being asked for. Two
+        estimates a second apart cannot have different history, so making
+        the second one re-download the first one's artifacts was pure cost.
+        """
+        now = time.monotonic()
+        with self._calibration_lock:
+            if self._cached_history is not None and now - self._cached_history_at < _CALIBRATION_TTL_SECONDS:
+                return self._cached_history
 
-            stage_total = _total_stage_seconds(summary)
-            if stage_total is None:
-                continue
+        # Computed outside the lock: it performs network I/O, and blocking
+        # every concurrent estimate behind one slow sweep would reintroduce
+        # the latency this cache exists to remove. A racing second sweep is
+        # harmless — both produce the same answer and the later write wins.
+        computed = self._sweep_run_history()
 
-            overhead = float(listing.duration_seconds) - stage_total
-            if 0.0 <= overhead <= _MAX_CREDIBLE_STARTUP_SECONDS:
-                samples.append(overhead)
+        with self._calibration_lock:
+            self._cached_history = computed
+            self._cached_history_at = time.monotonic()
+        return computed
 
-        if len(samples) < _MIN_RUNS_FOR_CALIBRATION:
-            return None
-        return statistics.median(samples)
-
-    def _calibrate(self) -> _Calibration:
-        """Per-fit and per-call timings measured from recent completed runs.
+    def _sweep_run_history(self) -> _RunHistoryCalibration:
+        """One pass over recent completed runs, yielding both calibrations.
 
         Runs whose summary predates the timing breakdown are skipped — there
-        is nothing to calibrate from data that was never recorded.
+        is nothing to calibrate from data that was never recorded. Every
+        failure mode (MLflow unreachable, no runs, no summary artifact)
+        degrades to the heuristic rather than raising.
         """
         fit_ratios: list[float] = []
         shap_ratios: list[float] = []
         llm_latencies: list[float] = []
         prompt_tokens: list[float] = []
         completion_tokens: list[float] = []
+        startup_samples: list[float] = []
         # Counted separately from `fit_ratios`: a single run can contribute
         # up to two fit-ratio samples (backtest and training), so using
         # len(fit_ratios) as "how many runs was this calibrated from" would
         # both overstate the run count in the label and let two ratios
         # from one single run satisfy the minimum-run gate below.
         runs_used = 0
+        summaries_read = 0
 
         try:
             listings = self._history.list_runs(limit=_HISTORY_SAMPLE_SIZE)
@@ -397,6 +432,8 @@ class EstimationService:
             listings = []
 
         for listing in listings:
+            if summaries_read >= _CALIBRATION_SAMPLE_TARGET:
+                break
             if listing.job_status.value != "Completed":
                 continue
             try:
@@ -405,6 +442,17 @@ class EstimationService:
                 summary = None
             if not summary:
                 continue
+            summaries_read += 1
+
+            # Compute startup, from the same summary rather than a second
+            # fetch. getattr keeps a listing without a recorded duration
+            # (or a stub in a test) from breaking the whole sweep.
+            duration = getattr(listing, "duration_seconds", None)
+            stage_total = _total_stage_seconds(summary)
+            if duration and stage_total is not None:
+                overhead = float(duration) - stage_total
+                if 0.0 <= overhead <= _MAX_CREDIBLE_STARTUP_SECONDS:
+                    startup_samples.append(overhead)
 
             evaluation = summary.get("evaluation_report") or {}
             timing = evaluation.get("timing_breakdown") or {}
@@ -441,8 +489,16 @@ class EstimationService:
                 if trace.get("completion_tokens"):
                     completion_tokens.append(trace["completion_tokens"] / calls)
 
+        # Unchanged gate: startup is only reported as measured when enough
+        # credible samples backed it, exactly as before.
+        measured_startup = (
+            statistics.median(startup_samples)
+            if len(startup_samples) >= _MIN_RUNS_FOR_CALIBRATION
+            else None
+        )
+
         if fit_ratios and runs_used >= _MIN_RUNS_FOR_CALIBRATION:
-            return _Calibration(
+            calibration = _Calibration(
                 seconds_per_fit=statistics.median(fit_ratios),
                 seconds_per_shap=statistics.median(shap_ratios) if shap_ratios else _HEURISTIC_SECONDS_PER_SHAP,
                 seconds_per_llm_call=statistics.median(llm_latencies) if llm_latencies else _HEURISTIC_SECONDS_PER_LLM_CALL,
@@ -450,15 +506,17 @@ class EstimationService:
                 completion_tokens_per_call=statistics.median(completion_tokens) if completion_tokens else _HEURISTIC_COMPLETION_TOKENS_PER_CALL,
                 basis=f"historical telemetry ({runs_used} recent completed run(s))",
             )
+        else:
+            calibration = _Calibration(
+                seconds_per_fit=_DEFAULT_SECONDS_PER_FIT,
+                seconds_per_shap=_HEURISTIC_SECONDS_PER_SHAP,
+                seconds_per_llm_call=_HEURISTIC_SECONDS_PER_LLM_CALL,
+                prompt_tokens_per_call=_HEURISTIC_PROMPT_TOKENS_PER_CALL,
+                completion_tokens_per_call=_HEURISTIC_COMPLETION_TOKENS_PER_CALL,
+                basis="a measured-timing heuristic (not enough completed runs yet for historical calibration)",
+            )
 
-        return _Calibration(
-            seconds_per_fit=_DEFAULT_SECONDS_PER_FIT,
-            seconds_per_shap=_HEURISTIC_SECONDS_PER_SHAP,
-            seconds_per_llm_call=_HEURISTIC_SECONDS_PER_LLM_CALL,
-            prompt_tokens_per_call=_HEURISTIC_PROMPT_TOKENS_PER_CALL,
-            completion_tokens_per_call=_HEURISTIC_COMPLETION_TOKENS_PER_CALL,
-            basis="a measured-timing heuristic (not enough completed runs yet for historical calibration)",
-        )
+        return _RunHistoryCalibration(calibration=calibration, measured_startup_seconds=measured_startup)
 
     # ------------------------------------------------------------------
     # Runtime + cost
