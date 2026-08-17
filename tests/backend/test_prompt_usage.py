@@ -229,6 +229,30 @@ def test_retry_and_fallback_rates_are_computed_from_groups_not_raw_calls():
     assert v2.retry_rate == pytest.approx(1 / 3, abs=1e-4)
 
 
+def test_a_group_with_no_llm_activity_at_all_is_not_counted_as_fallback():
+    """provider="none" is _build_call's marker for a group with no insight
+    and no trace attempts whatsoever — not a group that invoked the LLM
+    path and fell back to a template. It must not inflate fallback_rate
+    (or dilute retry_rate) alongside groups that actually ran."""
+    results = {
+        "run-1": _result(
+            "run-1",
+            groups=[
+                _call("1 | 1", provider="azure_openai", retry_count=0),
+                _call("1 | 2", provider="none", retry_count=0),
+                _call("1 | 3", provider="none", retry_count=0),
+            ],
+        ),
+    }
+    usage = _service([_listing("run-1")], results).get_prompt_usage()
+
+    v2 = usage.versions[0]
+    # Only the one real azure_openai group counts — 0 fallbacks of 1, not
+    # 2 fallbacks of 3.
+    assert v2.fallback_rate == pytest.approx(0.0, abs=1e-4)
+    assert v2.retry_rate == pytest.approx(0.0, abs=1e-4)
+
+
 # ---------------------------------------------------------------------
 # Cost — never fabricated
 # ---------------------------------------------------------------------
@@ -325,11 +349,20 @@ def client():
     app.dependency_overrides.clear()
 
 
-def test_endpoint_requires_model_inspect_permission(client):
-    app.dependency_overrides[get_current_principal] = lambda: _principal(Role.ANALYST)
+def test_an_unassigned_user_is_refused(client):
+    app.dependency_overrides[get_current_principal] = lambda: Principal(subject="user-none", roles=[], permissions=[])
     app.dependency_overrides[get_llmops_service] = lambda: _service([], {})
 
     assert client.get("/results/llmops/prompt-usage").status_code == 403
+
+
+def test_analyst_can_read_prompt_usage(client):
+    # Read-only aggregation of finished runs, gated the same way as the
+    # rest of the Observability page — the Analyst role can view it.
+    app.dependency_overrides[get_current_principal] = lambda: _principal(Role.ANALYST)
+    app.dependency_overrides[get_llmops_service] = lambda: _service([], {})
+
+    assert client.get("/results/llmops/prompt-usage").status_code == 200
 
 
 def test_endpoint_returns_aggregated_versions(client):

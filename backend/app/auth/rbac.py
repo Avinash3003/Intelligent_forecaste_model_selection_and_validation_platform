@@ -9,11 +9,17 @@ from __future__ import annotations
 from app.auth.models import Permission, Role
 
 # Read-only access to finished work. The floor every role stands on.
+# MODEL_INSPECT lives here, not in the practitioner set below: it gates the
+# Experiments (mlflow_view) and Observability (llmops) pages, both of which
+# are read-only views of already-finished runs — the same kind of access as
+# Results, just a different panel of it. It does not grant anything
+# write-shaped; FORECAST_RUN/RUN_CANCEL/etc. stay practitioner-only.
 _VIEWER_PERMISSIONS: frozenset[Permission] = frozenset(
     {
         Permission.DATASET_READ,
         Permission.RUN_READ,
         Permission.RESULTS_READ,
+        Permission.MODEL_INSPECT,
     }
 )
 
@@ -25,7 +31,6 @@ _PRACTITIONER_PERMISSIONS: frozenset[Permission] = _VIEWER_PERMISSIONS | frozens
         Permission.FORECAST_ESTIMATE,
         Permission.FORECAST_RUN,
         Permission.RUN_CANCEL,
-        Permission.MODEL_INSPECT,
     }
 )
 
@@ -33,7 +38,8 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     # Everything a data scientist can do, plus platform configuration.
     Role.ADMIN: _PRACTITIONER_PERMISSIONS | frozenset({Permission.ADMIN_MANAGE}),
     Role.DATA_SCIENTIST: _PRACTITIONER_PERMISSIONS,
-    # Deliberately cannot upload, run, cancel, or inspect model internals.
+    # Deliberately cannot upload, run, or cancel — read-only across every
+    # page, Experiments/Observability included.
     Role.ANALYST: _VIEWER_PERMISSIONS,
 }
 

@@ -5,12 +5,17 @@ from app.auth.models import Permission, Role
 from app.auth.rbac import ROLE_PERMISSIONS, permissions_for
 
 
-def test_analyst_can_view_but_never_execute_or_inspect():
+def test_analyst_can_view_everything_but_never_execute():
     granted = ROLE_PERMISSIONS[Role.ANALYST]
 
     assert Permission.RESULTS_READ in granted
     assert Permission.RUN_READ in granted
     assert Permission.DATASET_READ in granted
+    # Experiments (mlflow_view) and Observability (llmops) are read-only
+    # views of finished runs, gated by MODEL_INSPECT — the Analyst role can
+    # see them like every other page, it just cannot execute or inspect
+    # in a way that changes anything.
+    assert Permission.MODEL_INSPECT in granted
 
     # The whole point of the Analyst role: read finished work, change nothing.
     for denied in (
@@ -18,7 +23,6 @@ def test_analyst_can_view_but_never_execute_or_inspect():
         Permission.FORECAST_RUN,
         Permission.FORECAST_CONFIGURE,
         Permission.RUN_CANCEL,
-        Permission.MODEL_INSPECT,
         Permission.ADMIN_MANAGE,
     ):
         assert denied not in granted, f"Analyst must not hold {denied}"

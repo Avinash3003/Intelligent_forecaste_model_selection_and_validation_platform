@@ -294,11 +294,16 @@ def test_data_scientist_can_read_llmops(client):
     assert len(body["calls"]) == 1
 
 
-def test_analyst_is_refused(client):
+def test_analyst_can_read_llmops(client):
+    # Observability is a read-only view of a finished run's LLM trace, and
+    # the Analyst role can see it like every other page — it just cannot
+    # execute or cancel anything.
     _as_role(Role.ANALYST)
-    _with_fake_service({"run-1": _result("run-1")})
+    _with_fake_service({"run-1": _result("run-1", {"groups": {"1 | 1": _insight_group("1 | 1")}}, {"calls": [_call("1 | 1")]})})
 
-    assert client.get("/results/run-1/llmops").status_code == 403
+    response = client.get("/results/run-1/llmops")
+
+    assert response.status_code == 200
 
 
 def test_unassigned_user_is_refused(client):

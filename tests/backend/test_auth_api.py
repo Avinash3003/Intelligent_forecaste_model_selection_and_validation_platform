@@ -83,12 +83,14 @@ def test_analyst_may_read_run_history(client):
     assert client.get("/deployments").status_code == 200
 
 
-def test_analyst_cannot_inspect_model_internals(client):
+def test_analyst_may_inspect_model_internals(client):
+    # Experiments (mlflow_view) and Observability (llmops/debug) are
+    # read-only views of finished runs, same as Results — the Analyst role
+    # can see them too. Past the permission gate, so an unknown run is a
+    # 404 rather than a 403.
     as_role(Role.ANALYST)
-    # Model internals are a Data Scientist concern; 403 must come before
-    # any 404 for an unknown run, or the guard would leak run existence.
-    assert client.get("/mlflow/runs/whatever").status_code == 403
-    assert client.get("/results/whatever/debug").status_code == 403
+    assert client.get("/mlflow/runs/whatever").status_code == 404
+    assert client.get("/results/whatever/debug").status_code == 404
 
 
 def test_data_scientist_may_inspect_model_internals(client):
