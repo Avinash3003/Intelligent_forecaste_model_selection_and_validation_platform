@@ -78,6 +78,16 @@ class ForecastEnginePipeline:
     # (see `databricks/resources/forecast_job_serverless.yml`). Nothing
     # about a stage's own logic changes for `run_stage()` versus `run()` —
     # this dict only says which stages share a task.
+    #
+    # NAMING CONTRACT — one vocabulary across engine, Databricks and UI.
+    # Each key here is a Databricks `task_key`; the `begin_stage(...)` label
+    # a stage reports (what the UI's stage trail shows) is that key in Title
+    # Case. The nine single-stage groups are exactly 1:1 — `explain_models`
+    # reports "Explain Models", `mlflow_tracking` reports "MLflow Tracking".
+    # Only `load_prepare` and `build_series` fan out to several stages, and
+    # those keep the same two-word shape so the whole trail reads uniformly.
+    # Backend mirror: `backend/app/services/deployment_service.py`'s
+    # PIPELINE_STAGES (kept in sync by tests/backend/test_stage_trail.py).
     STAGE_GROUPS: dict[str, tuple[str, ...]] = {
         "load_prepare": (
             "_load_dataset",
@@ -101,8 +111,8 @@ class ForecastEnginePipeline:
 
     # Which stage group(s) a task loads its checkpoint from. Empty means
     # "start fresh" (the first task); more than one entry is the DAG's one
-    # fork/join — Persist Winning Models and Export Forecasts both descend
-    # from Rank & Select, and Business Insights needs both of their
+    # fork/join — Persist Models and Export Forecasts both descend from
+    # Rank & Select, and Business Insights needs both of their
     # contributions merged (see `pipeline_checkpoint.merge_checkpoints`).
     STAGE_GROUP_PREDECESSORS: dict[str, tuple[str, ...]] = {
         "load_prepare": (),
@@ -422,7 +432,7 @@ class ForecastEnginePipeline:
 
     # Stage 3 — analyse the raw dataset without modifying it
     def _assess_quality(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Assess Data Quality")
+        record = context.begin_stage("Assess Quality")
         try:
             # Runs before preprocessing so the report describes the data
             # exactly as uploaded, and gates it: a dataset judged unsuitable
@@ -478,7 +488,7 @@ class ForecastEnginePipeline:
 
         # The uploaded file is never touched; curated output is filed under
         # the run id so it is always traceable to the run that produced it.
-        record = context.begin_stage("Persist Curated Dataset")
+        record = context.begin_stage("Persist Curated")
         try:
             uri = self._curated_writer.write(
                 context.prepared_dataset, context.run_id, context.dataset_path.name
@@ -497,7 +507,7 @@ class ForecastEnginePipeline:
         # Not user-facing and produces no report: it exists to fail fast if a
         # curated dataset ever reaches training in a state preprocessing
         # should have prevented.
-        record = context.begin_stage("Verify Curated Dataset")
+        record = context.begin_stage("Verify Curated")
         try:
             self._curated_validator.validate(context.prepared_dataset, context.configuration)
             context.complete_stage(record, "Curated dataset integrity verified.")
@@ -507,7 +517,7 @@ class ForecastEnginePipeline:
 
     # Stage 7 — split the curated dataset into per-business-key groups
     def _generate_groups(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Generate Forecast Groups")
+        record = context.begin_stage("Generate Groups")
         try:
             context.groups = self._group_generator.generate(
                 context.prepared_dataset, context.configuration
@@ -522,7 +532,7 @@ class ForecastEnginePipeline:
 
     # Stage 8 — project each group into a forecast-ready series
     def _build_series(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Build Forecast Series")
+        record = context.begin_stage("Build Series")
         try:
             context.series = self._series_builder.build(
                 context.groups, context.configuration, context.frequency
@@ -604,7 +614,7 @@ class ForecastEnginePipeline:
         # failures are captured on the report by the engine itself, never
         # raised, so one model's explainability computation cannot block the
         # rest of its group.
-        record = context.begin_stage("Generate Explainability (SHAP)")
+        record = context.begin_stage("Explain Models")
         try:
             trained = context.training_report.trained_models() if context.training_report else []
             report = self._explainability_generator.generate_all(context.evaluation_report, trained, context.series)
@@ -620,7 +630,7 @@ class ForecastEnginePipeline:
 
     # Stage 12 — rank survivors and select each group's production model
     def _select_production_models(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Rank & Select Production Models")
+        record = context.begin_stage("Rank & Select")
         try:
             # Ranking consumes Stage 11's ExplainabilityReport rather than
             # computing SHAP itself. Ranking and Final Production Model
@@ -650,7 +660,7 @@ class ForecastEnginePipeline:
 
     # Persist the winning fitted model for each forecast key
     def _persist_winning_models(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Persist Winning Models")
+        record = context.begin_stage("Persist Models")
         try:
             # Runs after selection so "the winner" is already decided, and
             # reads the fitted wrapper the training stage kept on its own
@@ -690,7 +700,7 @@ class ForecastEnginePipeline:
 
     # Stage 13 — LLM business insights (Section 6.12)
     def _generate_business_insights(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Generate Business Insights")
+        record = context.begin_stage("Business Insights")
         try:
             # Purely descriptive: the LLM consumes the finished
             # PipelineResult and produces business-readable narrative. It
@@ -741,11 +751,11 @@ class ForecastEnginePipeline:
         # rather than threading Stage 13's instance through, so this object
         # reflects everything produced up to this point, including the
         # insight report.
-        record = context.begin_stage("Track to MLflow")
+        record = context.begin_stage("MLflow Tracking")
         pipeline_result = PipelineResultBuilder().build(context)
 
         # The stage stays *open* across the tracking call, so anything
-        # polling the live-status file sees "Track to MLflow — Running"
+        # polling the live-status file sees "MLflow Tracking — Running"
         # instead of a finished 14-stage trail while artifact logging is
         # still going. That logging is not instant (plots, per-group model
         # registration), and previously the UI showed a run at 100% with no

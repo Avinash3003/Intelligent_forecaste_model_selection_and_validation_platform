@@ -74,7 +74,7 @@ class _FakeHistory:
             },
             "training_report": {"duration_seconds": self._seconds_per_fit * 10, "trained": 10},
             "explainability_report": {"results": [{}] * 5},
-            "stages": [{"name": "Generate Explainability (SHAP)", "duration_seconds": 2.5}],
+            "stages": [{"name": "Explain Models", "duration_seconds": 2.5}],
             "insight_report": {
                 "trace_summary": {
                     "call_count": 10,

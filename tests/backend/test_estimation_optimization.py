@@ -81,7 +81,7 @@ class _CountingHistory:
             "training_report": {"duration_seconds": self._seconds_per_fit * 10, "trained": 10},
             "explainability_report": {"results": [{}] * 5},
             "stages": [
-                {"name": "Generate Explainability (SHAP)", "duration_seconds": 2.5},
+                {"name": "Explain Models", "duration_seconds": 2.5},
                 {"name": "Train Models", "duration_seconds": 500.0},
             ],
             "insight_report": {

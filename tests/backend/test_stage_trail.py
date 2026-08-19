@@ -45,7 +45,7 @@ def test_unreached_stages_are_reported_as_pending_not_omitted():
     reported = [
         {"name": "Load Dataset", "status": "Completed", "started_at": "t0", "completed_at": "t1"},
         {"name": "Detect Frequency", "status": "Completed", "started_at": "t1", "completed_at": "t2"},
-        {"name": "Assess Data Quality", "status": "Running", "started_at": "t2"},
+        {"name": "Assess Quality", "status": "Running", "started_at": "t2"},
     ]
 
     stages = _service()._to_stage_statuses(_listing(reported))
@@ -56,10 +56,10 @@ def test_unreached_stages_are_reported_as_pending_not_omitted():
     by_label = {stage.label: stage for stage in stages}
     assert by_label["Load Dataset"].status == "Completed"
     assert by_label["Load Dataset"].completed_at == "t1"
-    assert by_label["Assess Data Quality"].status == "Running"
+    assert by_label["Assess Quality"].status == "Running"
     # Everything past the running stage is explicitly Pending.
     assert by_label["Train Models"].status == "Pending"
-    assert by_label["Track to MLflow"].status == "Pending"
+    assert by_label["MLflow Tracking"].status == "Pending"
 
 
 def test_progress_is_measured_against_the_whole_pipeline():
@@ -79,6 +79,58 @@ def test_a_finished_run_with_no_trail_reports_no_stages():
     """Seventeen Pending stages for a run that already finished would be a
     fabrication, not a rendering of its shape."""
     assert _service()._to_stage_statuses(_listing([], status=JobStatus.COMPLETED)) == []
+
+
+def test_every_databricks_task_key_titlecases_to_a_real_stage():
+    """The naming contract: the Serverless job's task_keys and the stage
+    trail are one vocabulary, so a task renamed in the YAML without its
+    stage being renamed too is caught here rather than in a demo."""
+    yaml_source = Path("databricks/resources/forecast_job_serverless.yml").read_text()
+    # Task definitions sit at eight spaces; the deeper-indented `task_key`s
+    # under a `depends_on:` are references to them, not new tasks.
+    task_keys = re.findall(r"^ {8}- task_key: (\w+)$", yaml_source, re.MULTILINE)
+
+    assert len(task_keys) == 11, task_keys
+
+    # load_prepare and build_series fan out to several stages; the other
+    # nine are exactly one stage each, named by Title-Casing the key.
+    fan_out = {"load_prepare", "build_series"}
+    # Two keys whose stage spelling is not pure Title Case, both for
+    # readability in the UI rather than any behavioural reason.
+    spelling = {"rank_select": "Rank & Select", "mlflow_tracking": "MLflow Tracking"}
+    for key in task_keys:
+        if key in fan_out:
+            continue
+        expected = spelling.get(key) or key.replace("_", " ").title()
+        assert expected in PIPELINE_STAGES, f"{key} -> {expected!r} is not a stage"
+
+
+def test_stage_names_stay_short_enough_to_read_in_the_trail():
+    """The whole point of the rename: seventeen labels the UI can show
+    without truncating. 'Rank & Select' is the only three-token label and
+    its middle token is one character."""
+    for label in PIPELINE_STAGES:
+        assert len(label) <= 18, f"{label!r} is too long for the stage trail"
+
+
+def test_a_run_recorded_under_the_old_stage_names_still_renders():
+    """Runs completed before the vocabulary was unified are still on disk.
+    Their trails must map onto the current skeleton, not pile up as
+    unknown extras below seventeen Pending stages."""
+    reported = [
+        {"name": "Load Dataset", "status": "Completed"},
+        {"name": "Assess Data Quality", "status": "Completed"},
+        {"name": "Generate Explainability (SHAP)", "status": "Completed"},
+        {"name": "Track to MLflow", "status": "Completed"},
+    ]
+
+    stages = _service()._to_stage_statuses(_listing(reported, status=JobStatus.COMPLETED))
+
+    assert [stage.label for stage in stages] == PIPELINE_STAGES
+    by_label = {stage.label: stage for stage in stages}
+    assert by_label["Assess Quality"].status == "Completed"
+    assert by_label["Explain Models"].status == "Completed"
+    assert by_label["MLflow Tracking"].status == "Completed"
 
 
 def test_an_unrecognised_reported_stage_is_kept_not_dropped():
