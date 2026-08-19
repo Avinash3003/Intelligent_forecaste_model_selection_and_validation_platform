@@ -136,7 +136,6 @@ class DatabricksRunner(PipelineRunner):
         self._client = workspace_client
         # Which reported backend and which deployed Job — everything else
         # (staging, submit/poll/retrieve, error translation) is identical
-        # between Serverless and DCS, which is what lets `DcsRunner` be a
         # three-line subclass instead of a second implementation.
         self._execution_backend = execution_backend
         self._job_name = job_name or settings.databricks_job_name

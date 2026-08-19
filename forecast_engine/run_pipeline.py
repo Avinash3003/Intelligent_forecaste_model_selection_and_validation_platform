@@ -969,7 +969,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Run only this stage group instead of the whole pipeline, checkpointing "
             "PipelineContext via --checkpoint-dir for the next task to resume from. Exists for "
             "the multi-task Databricks Serverless workflow (see forecast_job_serverless.yml); "
-            "omit to run the complete pipeline in one process, as local and DCS execution do."
+            "omit to run the complete pipeline in one process, as local execution does."
         ),
     )
     parser.add_argument(
@@ -998,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     # Databricks-Serverless-only: resolves {{secrets/...}} job-parameter
     # values via dbutils.secrets.get() — see
-    # forecast_engine/core/databricks_secrets.py. A no-op for local/DCS
+    # forecast_engine/core/databricks_secrets.py. A no-op for local
     # execution, which already sets these as real environment variables.
     apply_azure_openai_cli_overrides(args)
 
@@ -1038,7 +1038,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.stage_group is None:
             # The whole pipeline in one process — local execution and the
-            # DCS job, unchanged from before the multi-task workflow existed.
+            # single-task path, unchanged from before the multi-task workflow existed.
             context = pipeline.run(
                 args.dataset,
                 configuration,

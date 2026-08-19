@@ -59,14 +59,13 @@ backend/             # FastAPI
   app/api/           #   Routes — HTTP only, no forecasting logic
   app/auth/          #   Entra ID token validation + the RBAC table
   app/services/      #   Profiling, validation, estimation, results
-  app/orchestration/ #   Pipeline Executor and its Local / Serverless / DCS runners
+  app/orchestration/ #   Pipeline Executor and its Local / Serverless runners
 frontend/            # React (Vite) SPA
   src/auth/          #   MSAL sign-in, permission guards
   src/pages/         #   Wizard, deployments, results, MLflow experiments
-databricks/          # Databricks Asset Bundle — Serverless + DCS job and cluster definitions
+databricks/          # Databricks Asset Bundle — Serverless job definition
 tests/               # backend/ runs on the backend venv, engine/ on the engine venv
 docs/                # PHASE_A_AZURE_SETUP.md, execution-modes.md — manual Azure steps + execution architecture
-Dockerfile           # Dependencies-only image for Databricks Container Services
 pyproject.toml       # Builds forecast_engine into a wheel for DAB
 ```
 
@@ -186,10 +185,6 @@ existing Unity Catalog volume, calls the Jobs API, polls run state, reads the en
 trail back from the volume so the UI shows real progress, and reads `summary.json` back on
 completion.
 
-`EXECUTION_MODE=databricks_dcs` submits to the bundle-deployed **Container Services** job instead —
-the same runner logic against the ACR/Docker image, kept isolated because this subscription cannot
-currently provision DCS-supported compute.
-
 Every mode returns the identical result envelope, so nothing above the executor knows which one ran.
 Retargeting is this one setting changing — no code change.
 
@@ -211,13 +206,10 @@ databricks bundle run forecast_pipeline_serverless -t dev --params \
 config=/Volumes/<catalog>/<schema>/<volume>/runs/manual/forecast_configuration.json
 ```
 
-Deploying uploads and registers **both** the Serverless job (`forecast_pipeline_serverless`) and the
-DCS job (`forecast_pipeline_dcs`) — one bundle, two job resources, one shared wheel. Run the DCS job
-by name instead if `EXECUTION_MODE=databricks_dcs`; it requires a workspace with **Databricks
-Container Services enabled** and classic (non-serverless) compute, which this project's own
-subscription cannot currently provision (see `docs/execution-modes.md`).
+Deploying uploads and registers the Serverless job (`forecast_pipeline_serverless`) — one bundle,
+one job resource, one wheel.
 
-Both jobs take exactly four parameters — `dataset`, `config`, `summary_out`, `live_status_out` — and
+The job takes exactly four parameters — `dataset`, `config`, `summary_out`, `live_status_out` — and
 every per-run value (columns, models, fallback, horizon, run id) travels inside the `config` JSON.
 That is not a style choice: a `python_wheel_task`'s argument list is fixed at deploy time, so an
 unset parameter would reach argparse as `--horizon ""` (a crash) or `--models ""` (a model named
@@ -231,7 +223,7 @@ through GitHub Actions rather than a manual `bundle deploy`. See **`docs/ci-cd.m
 pipeline, required GitHub secrets, and rollback.
 
 Three workflows cover it: `ci.yml` (tests and build validation, also reused as the pre-deploy gate),
-`deploy-databricks.yml` (job definitions and the DCS container image), and `deploy-app.yml` (backend
+`deploy-databricks.yml` (job definitions), and `deploy-app.yml` (backend
 and frontend). Every environment-specific value comes from an encrypted Actions secret, so no
 resource name, hostname or identifier is committed.
 

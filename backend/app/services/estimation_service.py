@@ -96,15 +96,13 @@ _HEURISTIC_SECONDS_PER_LLM_CALL = 2.5
 _FIXED_OVERHEAD_SECONDS = 20.0
 
 # Cloud execution waits for compute before any Python of ours runs; local
-# execution has no such wait. Serverless is the primary cloud path and
-# acquires compute in seconds, not minutes — charging it the same 5-minute
-# classic-cluster figure added ~5 min of pure fiction to every cloud
-# estimate, which is most of why estimates read far longer than the run
-# actually took. Each mode now carries its own figure, and both are
-# superseded by `_calibrate_startup_seconds()` as soon as this deployment
-# has real completed runs to measure instead.
+# execution has no such wait. Serverless acquires compute in seconds, not
+# minutes — charging it a 5-minute classic-cluster figure added ~5 min of
+# pure fiction to every cloud estimate, which is most of why estimates read
+# far longer than the run actually took. Superseded by
+# `_calibrate_startup_seconds()` as soon as this deployment has real
+# completed runs to measure instead.
 _SERVERLESS_STARTUP_SECONDS = 45.0
-_CLASSIC_CLUSTER_STARTUP_SECONDS = 300.0
 
 # Startup is only calibrated from runs whose measured overhead is credible:
 # a negative or absurd gap means the two clocks disagree, not that startup
@@ -371,15 +369,10 @@ class EstimationService:
         The measurement is passed in rather than fetched here so it comes
         from the same history sweep calibration used.
         """
-        if backend not in ("databricks", "databricks_dcs"):
+        if backend != "databricks":
             return 0.0
 
-        default = (
-            _CLASSIC_CLUSTER_STARTUP_SECONDS
-            if backend == "databricks_dcs"
-            else _SERVERLESS_STARTUP_SECONDS
-        )
-        return measured if measured is not None else default
+        return measured if measured is not None else _SERVERLESS_STARTUP_SECONDS
 
     def _run_history_calibration(self) -> _RunHistoryCalibration:
         """The cached history sweep, recomputed only once per TTL.
@@ -562,10 +555,10 @@ class EstimationService:
         databricks_low = databricks_high = None
         databricks_available = False
 
-        # Only priced when running on Databricks (either cloud mode) — local
-        # execution has no cluster cost.
+        # Only priced when running on Databricks — local execution has no
+        # cluster cost.
         rate = self._settings.compute_cost_per_hour
-        if backend in ("databricks", "databricks_dcs") and rate is not None and rate > 0:
+        if backend == "databricks" and rate is not None and rate > 0:
             databricks_low = round(low_minutes / 60.0 * rate, 2)
             databricks_high = round(high_minutes / 60.0 * rate, 2)
             databricks_available = True

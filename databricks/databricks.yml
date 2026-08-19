@@ -1,17 +1,16 @@
 # ForecastIQ — Databricks Asset Bundle
 #
-# Deploys TWO Job resources sharing one forecast_engine wheel:
+# Deploys ONE Job resource:
 #
 #   forecast_job_serverless.yml   Databricks-managed compute, no Docker image.
-#                                  The primary/active cloud execution path.
-#   forecast_job_dcs.yml           DCS Docker image (from ACR) + the wheel.
-#                                  Deployed and ready, kept isolated — this
-#                                  subscription cannot currently provision
-#                                  any DCS-supported node type.
+#                                  The cloud execution path.
 #
-# See docs/execution-modes.md. The Docker image (DCS only) deliberately
-# contains no application code; the wheel (both jobs) deliberately contains
-# no dependencies. Each job joins what it needs at run time.
+# See docs/execution-modes.md. The wheel deliberately contains no
+# dependencies; the job's `environments:` spec resolves them at run time.
+#
+# A second job (Databricks Container Services, Docker image from ACR) used to
+# be deployed alongside this one. It was removed from the active project and
+# preserved under migration_archive/dcs/ — see that folder to restore it.
 
 bundle:
   name: forecastiq
@@ -25,13 +24,6 @@ variables:
     description: Display name of the Serverless Databricks Job (the primary cloud execution path).
     default: forecastiq-forecast-pipeline
 
-  dcs_job_name:
-    description: >-
-      Display name of the DCS Databricks Job. A separate name from job_name
-      (not a suffix computed from it) so the backend's DATABRICKS_JOB_NAME and
-      DATABRICKS_DCS_JOB_NAME can each resolve their own job unambiguously by
-      name, per app/config/settings.py.
-    default: forecastiq-forecast-pipeline-dcs
 
   catalog:
     description: Existing Unity Catalog catalog.
@@ -41,42 +33,14 @@ variables:
     description: Existing Unity Catalog schema.
     default: forecasting
 
-  acr_image:
-    description: >-
-      Fully qualified ACR image, without tag — e.g.
-      myregistry.azurecr.io/forecast-engine.
 
-      Intentionally has no default: the registry name identifies the Azure
-      tenant, so it is supplied by the environment rather than committed.
-      Set BUNDLE_VAR_acr_image (see .env.example) or pass
-      --var="acr_image=...". A missing value fails validation immediately.
 
-  acr_image_tag:
-    description: >-
-      Image tag the DCS job pulls. `latest` by design: CI republishes that
-      tag whenever the image's inputs change, so a new image is picked up
-      without editing a pinned version here. CI also pushes the commit SHA
-      as a second tag, so any deployed image is still traceable to its
-      source — override this with that SHA to pin an exact build.
-    default: latest
 
-  secret_scope:
-    description: >-
-      Databricks secret scope holding ACR and Azure OpenAI credentials.
-      Must exist before deploy — see the Phase 1 report for creation steps.
-    default: forecastiq
-
-  node_type_id:
-    description: Driver node size. 8 vCPU / 32 GB to match the project requirement.
-    default: Standard_D8s_v5
 
   volume:
     description: Existing Unity Catalog external volume holding datasets and run output.
     default: forecast_files
 
-  spark_version:
-    description: Databricks Runtime version for the job cluster.
-    default: 15.4.x-scala2.12
 
   mlflow_experiment:
     description: MLflow experiment path in the Databricks workspace.
@@ -177,25 +141,6 @@ targets:
       azure_openai_api_key: "{{secrets/forecastiq/azure-openai-api-key}}"
       azure_openai_deployment: "{{secrets/forecastiq/azure-openai-deployment}}"
 
-      # Dev/integration override ONLY — the benchmark default stays Standard_D8s_v5
-      # above and must be used for any real performance evaluation.
-      #
-      # This subscription is capped at 4 total regional vCPUs in eastus, and every
-      # D/DS/E/F v2-v5 4-vCPU SKU is NotAvailableForSubscription there (verified via
-      # `az vm list-skus`, restriction type Location + all three Zones). The v7
-      # families are the only unrestricted 4-vCPU SKUs with non-zero quota, so the
-      # smoke test runs on F4as_v7 (4 vCPU / 16 GB, general-purpose CPU, no GPU).
-      # 4 vCPU / 16 GB, fits the 4-vCPU regional quota, and is one of the 39 node
-      # types Databricks Container Services accepts.
-      #
-      # BLOCKED AS OF NOW: this subscription reports NotAvailableForSubscription
-      # for ALL 39 DCS-supported node types, in eastus and in eastus2/centralus/
-      # westus2 — so this is a subscription authorization issue, not quota and not
-      # regional capacity. The v6/v7 families this subscription *can* use (e.g.
-      # Standard_F4as_v7) are rejected by DCS as unsupported node types. This value
-      # is therefore the correct target the moment the subscription is unblocked.
-      node_type_id: Standard_D4s_v5
-
   prod:
     mode: production
     workspace:
@@ -226,6 +171,3 @@ targets:
       azure_openai_endpoint: "{{secrets/forecastiq/azure-openai-endpoint}}"
       azure_openai_api_key: "{{secrets/forecastiq/azure-openai-api-key}}"
       azure_openai_deployment: "{{secrets/forecastiq/azure-openai-deployment}}"
-      # node_type_id intentionally NOT overridden here — production keeps the
-      # top-level default (Standard_D8s_v5), unlike dev's quota-constrained
-      # override above.

@@ -5,7 +5,7 @@ parameters, and a wheel task has no cluster env vars to use — so the value
 arrives at the CLI still in template form. dbutils.secrets.get() is the only
 supported way to read the real value from running code.
 
-Only Serverless hits this; local runs and DCS set real environment variables.
+Only Serverless hits this; local runs set real environment variables.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _resolve_databricks_secret_template(value: str) -> str:
     # Deliberately local: `databricks.sdk.runtime` constructs a live
     # `dbutils` at import time, which fails outside real Databricks
     # compute — a module-level import here would break every local run,
-    # every DCS run, and every test that imports this module.
+    # every local run, and every test that imports this module.
     from databricks.sdk.runtime import dbutils
 
     return dbutils.secrets.get(scope=scope, key=key)

@@ -3,10 +3,7 @@
 # The primary cloud execution path (see docs/execution-modes.md): no VM,
 # no Docker image, no ACR pull — Databricks-managed compute resolves the
 # wheel's dependencies from the `environments:` spec below. Same wheel,
-# same entry point, same four-parameter contract as forecast_job_dcs.yml —
-# the only thing that differs above the runtime boundary is which compute
-# layer runs it, and (as of this multi-task DAG) how many tasks that
-# compute runs it as.
+# same entry point, same four-parameter contract.
 #
 # ELEVEN tasks, not one — reflecting the engine's own stage dependencies,
 # not visual effect:
@@ -61,15 +58,13 @@ resources:
         11-task DAG on Databricks Serverless compute, with Persist Models and
         Export Forecasts running in parallel after Rank & Select.
 
-      # Identical four-parameter contract to forecast_job_dcs.yml plus one
-      # addition (checkpoint_dir) this multi-task DAG needs — see that file
-      # for why per-run values travel in `config` rather than as flat job
-      # parameters. Kept in lockstep on purpose: the backend's
-      # DatabricksRunner (parameterized to target either job — see
-      # app/orchestration/databricks_runner.py) builds the same
-      # job_parameters dict for both, and never needs to know this job has
-      # eleven tasks instead of one — `checkpoint_dir` has a default here
-      # exactly like `summary_out`/`live_status_out` already do.
+      # Four parameters plus one addition (checkpoint_dir) this multi-task
+      # DAG needs. Per-run values travel in `config` rather than as flat job
+      # parameters. The backend's
+      # DatabricksRunner (app/orchestration/databricks_runner.py) builds the
+      # job_parameters dict and never needs to know this job has eleven tasks
+      # instead of one — `checkpoint_dir` has a default here exactly like
+      # `summary_out`/`live_status_out` already do.
       parameters:
         - name: dataset
           # --dataset. No default: a forgotten `--params` must fail loudly,
@@ -96,8 +91,7 @@ resources:
 
         # AZURE_OPENAI_* — only business_insights actually calls Azure
         # OpenAI, so only that task's parameters reference these (see
-        # below). Same `${var.azure_openai_*}` values the DCS job sets
-        # directly via spark_env_vars — each resolves through this
+        # below). Each resolves through this
         # bundle's existing `{{secrets/forecastiq/...}}` reference in the
         # target's variable override, never a literal here. Databricks
         # does not resolve that reference in job parameters the way it
@@ -399,13 +393,11 @@ resources:
               # Built and uploaded by this bundle — never uploaded by hand.
               - ../../dist/*.whl
 
-              # Everything the DCS Docker image would otherwise provide.
               # Versions copied verbatim from forecast_engine/requirements.txt.
               #
               # torch / pytorch-forecasting (TFT) are deliberately omitted:
               # ~900 MB, and proven here (forecast_job_smoke.yml) to be worth
-              # avoiding on serverless. This is a real capability gap versus
-              # DCS, not an oversight — see docs/execution-modes.md. The
+              # avoiding on serverless. See docs/execution-modes.md. The
               # engine already reports TFT "Unavailable" and continues
               # rather than failing when a model can't run, so this costs
               # one model class, not the run.
@@ -434,8 +426,7 @@ resources:
       # MLflow tracking: Databricks compute (serverless included) defaults
       # `MLFLOW_TRACKING_URI` to its own managed store with no environment
       # variable needed — this is standard MLflow-on-Databricks behavior,
-      # not something this job configures. What the DCS job's
-      # `spark_env_vars` sets explicitly and this job still CANNOT set:
+      # not something this job configures. What this job still CANNOT set:
       #   - MLFLOW_REGISTRY_URI=databricks-uc (Unity Catalog model registry)
       # `python_wheel_task` on serverless has no `spark_env_vars` equivalent
       # available in this bundle's Databricks CLI version (verified against

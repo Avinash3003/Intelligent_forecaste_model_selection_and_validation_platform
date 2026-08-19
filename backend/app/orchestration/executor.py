@@ -6,7 +6,6 @@ from functools import lru_cache
 
 from app.config.settings import Settings, get_settings
 from app.orchestration.databricks_runner import DatabricksRunner
-from app.orchestration.dcs_runner import DcsRunner
 from app.orchestration.exceptions import RunnerConfigurationError
 from app.orchestration.local_runner import LocalRunner
 from app.orchestration.runner_base import PipelineRunner
@@ -74,8 +73,6 @@ def build_runner(settings: Settings) -> PipelineRunner:
 
     if mode is ExecutionBackend.DATABRICKS:
         return DatabricksRunner(settings)
-    if mode is ExecutionBackend.DATABRICKS_DCS:
-        return DcsRunner(settings)
     return LocalRunner(settings)
 
 

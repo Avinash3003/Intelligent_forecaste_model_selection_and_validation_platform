@@ -3,7 +3,7 @@
 Root cause: `mlflow_tracking_uri` defaulted to a local sqlite file
 regardless of execution mode. For `execution_mode=local` that is correct —
 the engine subprocess runs on the same box and writes there too. For
-`execution_mode=databricks(_dcs)` it is wrong: the engine runs as a
+`execution_mode=databricks` it is wrong: the engine runs as a
 Databricks job and writes to the workspace's managed MLflow store, which
 that sqlite file never touches. A backend that never separately set
 MLFLOW_TRACKING_URI therefore read a store the engine never wrote to —
@@ -44,10 +44,6 @@ def test_databricks_mode_defaults_to_the_workspace_managed_store():
     settings = Settings(execution_mode="databricks")
     assert settings.mlflow_tracking_uri_resolved == "databricks"
 
-
-def test_databricks_dcs_mode_also_defaults_to_the_workspace_managed_store():
-    settings = Settings(execution_mode="databricks_dcs")
-    assert settings.mlflow_tracking_uri_resolved == "databricks"
 
 
 def test_an_explicitly_configured_uri_is_never_overridden():

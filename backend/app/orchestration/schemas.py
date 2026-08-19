@@ -27,7 +27,6 @@ class ExecutionBackend(str, Enum):
 
     LOCAL = "local"
     DATABRICKS = "databricks"
-    DATABRICKS_DCS = "databricks_dcs"
 
 
 class PipelineExecutionRequest(BaseModel):
