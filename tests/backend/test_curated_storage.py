@@ -14,7 +14,6 @@ import pytest
 
 from app.config.settings import Settings
 from app.orchestration.databricks_runner import DatabricksRunner
-from app.orchestration.dcs_runner import DcsRunner
 from app.orchestration.schemas import PipelineExecutionRequest
 from app.services.dataset_preview_service import DatasetPreviewService
 
@@ -137,16 +136,6 @@ def test_curated_volume_is_separate_from_the_uploads_volume(settings, dataset):
     )
 
 
-def test_dcs_mode_uses_the_same_curated_contract(settings, dataset):
-    """DCS must not need a storage design of its own."""
-    workspace = _FakeWorkspace()
-    dcs_settings = settings.model_copy(update={"execution_mode": "databricks_dcs"})
-    runner = DcsRunner(dcs_settings, workspace_client=workspace)
-    run_id = runner.submit(_request(dataset))
-
-    root = _submitted_config(workspace, run_id)["curated_storage"]["root_dir"]
-    assert root == "/Volumes/cat/sch/curated_files/runs"
-
 
 def test_existing_run_file_layout_is_unchanged(settings, dataset):
     # The curated addition must not disturb the four job parameters.
@@ -246,11 +235,3 @@ def test_models_use_their_own_volume_not_the_curated_one(settings, dataset):
     assert config["curated_storage"]["root_dir"].startswith("/Volumes/cat/sch/curated_files/")
 
 
-def test_dcs_mode_uses_the_same_models_volume(settings, dataset):
-    workspace = _FakeWorkspace()
-    dcs_settings = settings.model_copy(update={"execution_mode": "databricks_dcs"})
-    runner = DcsRunner(dcs_settings, workspace_client=workspace)
-    run_id = runner.submit(_request(dataset))
-
-    root = _submitted_config(workspace, run_id)["model_storage"]["root_dir"]
-    assert root == "/Volumes/cat/sch/models_files/runs"

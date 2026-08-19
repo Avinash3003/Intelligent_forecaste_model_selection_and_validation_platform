@@ -117,12 +117,12 @@ jobs:
   #
   # Skips cleanly (not a failure) unless EVERY input it needs is configured
   # — a fork PR (where GitHub never exposes secrets at all), or a repository
-  # that simply has not wired these up yet. Checking all four rather than
-  # just the host matters: the bundle's `acr_image` and
-  # `cicd_service_principal_id` deliberately have no defaults, so a partial
-  # configuration fails validation for a reason that has nothing to do with
-  # the change under test. Every other job above still gates the PR; only
-  # this one ever touches a live workspace, and only optionally.
+  # that simply has not wired these up yet. Checking all three rather than
+  # just the host matters: the bundle's `cicd_service_principal_id`
+  # deliberately has no default, so a partial configuration fails validation
+  # for a reason that has nothing to do with the change under test. Every
+  # other job above still gates the PR; only this one ever touches a live
+  # workspace, and only optionally.
   # ---------------------------------------------------------------------
   databricks-bundle-validate:
     name: Databricks bundle validation (dev)
@@ -142,15 +142,13 @@ jobs:
           DBX_HOST: ${{ secrets.DATABRICKS_HOST }}
           DBX_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DBX_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          DBX_ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
         run: |
           # Trim surrounding whitespace/newlines before judging anything.
           host=$(printf '%s' "$DBX_HOST" | tr -d '[:space:]')
           cid=$(printf '%s' "$DBX_CLIENT_ID" | tr -d '[:space:]')
           csec=$(printf '%s' "$DBX_CLIENT_SECRET" | tr -d '[:space:]')
-          acr=$(printf '%s' "$DBX_ACR_IMAGE" | tr -d '[:space:]')
 
-          if [ -z "$host" ] || [ -z "$cid" ] || [ -z "$csec" ] || [ -z "$acr" ]; then
+          if [ -z "$host" ] || [ -z "$cid" ] || [ -z "$csec" ]; then
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -162,15 +160,11 @@ jobs:
           esac
           [ ${#cid} -ne 36 ] && problems="$problems\n  - DATABRICKS_CLIENT_ID should be a 36-character application id (got ${#cid} characters)"
           [ ${#csec} -lt 20 ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET looks truncated (only ${#csec} characters)"
-          case "$acr" in
-            *:*) problems="$problems\n  - ACR_IMAGE must not include a tag; the bundle appends one itself";;
-          esac
           # A pasted value that differs from its trimmed form carries stray
           # whitespace, which the CLI takes literally.
           [ "$DBX_HOST" != "$host" ] && problems="$problems\n  - DATABRICKS_HOST has leading/trailing whitespace"
           [ "$DBX_CLIENT_ID" != "$cid" ] && problems="$problems\n  - DATABRICKS_CLIENT_ID has leading/trailing whitespace"
           [ "$DBX_CLIENT_SECRET" != "$csec" ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET has leading/trailing whitespace"
-          [ "$DBX_ACR_IMAGE" != "$acr" ] && problems="$problems\n  - ACR_IMAGE has leading/trailing whitespace"
 
           if [ -n "$problems" ]; then
             printf 'Databricks configuration is present but malformed:%b\n' "$problems"
@@ -215,7 +209,6 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
         # On failure the CLI's own message is re-emitted as an annotation, so
         # the reason shows on the run summary instead of only inside the full
@@ -236,4 +229,4 @@ jobs:
         run: |
           echo "Skipping bundle validation: this repository does not have all of"
           echo "DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET"
-          echo "and ACR_IMAGE configured as Actions secrets."
+          echo "configured as Actions secrets."

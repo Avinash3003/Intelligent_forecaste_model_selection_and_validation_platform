@@ -379,14 +379,6 @@ def test_local_execution_still_estimates_tft():
     assert "tft" in estimate.dataset.selected_models
 
 
-def test_dcs_execution_still_estimates_tft():
-    """Only the Serverless environment spec omits torch; DCS ships it."""
-    df = _frame(groups=3, months_per_group=72)
-    estimate = _service(Settings(execution_mode="databricks_dcs"), _CountingHistory(n_runs=0)).estimate(
-        df, _request(models=("tft",))
-    )
-    assert "tft" in estimate.dataset.selected_models
-
 
 def test_the_registry_default_is_also_filtered_by_execution_mode():
     """An empty selection means "everything" — and everything must still

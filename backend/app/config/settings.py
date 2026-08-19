@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     max_upload_size_mb: int = 200
 
-    # Where runs execute: "local" (subprocess), "databricks" (Serverless),
-    # or "databricks_dcs" (Container Services). Changing environments is this
-    # one value; an unknown value fails loudly at startup.
+    # Where runs execute: "local" (subprocess) or "databricks" (Serverless).
+    # Changing environments is this one value; an unknown value fails loudly
+    # at startup.
     execution_mode: str = "local"
 
     # Where forecast_engine and its venv live, relative to the working
@@ -98,11 +98,6 @@ class Settings(BaseSettings):
     databricks_job_name: str = "forecastiq-forecast-pipeline"
     # Set to pin an exact job id and skip the name lookup entirely.
     databricks_job_id: int | None = None
-
-    # The DCS job. Deliberately separate from the Serverless one above so
-    # redeploying either never repoints the other.
-    databricks_dcs_job_name: str = "forecastiq-forecast-pipeline-dcs"
-    databricks_dcs_job_id: int | None = None
 
     # UC volume over the ADLS uploads container: staged datasets and run output.
     databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
@@ -202,7 +197,7 @@ class Settings(BaseSettings):
           explicit MLFLOW_TRACKING_URI, so it falls through to its own
           sqlite default (mlflow.db next to forecast_engine/). Matching
           that path is what lets both processes open the same file.
-        - databricks / databricks_dcs: the engine runs as a Databricks job,
+        - databricks: the engine runs as a Databricks job,
           where MLflow's own unset-default resolves to the workspace's
           managed tracking store (see forecast_job_serverless.yml's note on
           this) — never the sqlite file above, which that job never
@@ -218,7 +213,7 @@ class Settings(BaseSettings):
         configured = (self.mlflow_tracking_uri or "").strip()
         if configured:
             return configured
-        if (self.execution_mode or "").strip().lower() in ("databricks", "databricks_dcs"):
+        if (self.execution_mode or "").strip().lower() == "databricks":
             return "databricks"
         return f"sqlite:///{self.engine_working_dir / 'mlflow.db'}"
 

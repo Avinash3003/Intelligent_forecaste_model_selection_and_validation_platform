@@ -26,9 +26,8 @@ def test_serverless_can_run_every_other_candidate():
         assert model not in blocked
 
 
-def test_local_and_dcs_can_run_everything():
+def test_local_can_run_everything():
     assert unavailable_models("local") == {}
-    assert unavailable_models("databricks_dcs") == {}
 
 
 def test_an_unknown_mode_is_assumed_capable():

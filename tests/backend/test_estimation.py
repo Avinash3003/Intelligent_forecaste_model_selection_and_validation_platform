@@ -228,17 +228,6 @@ def test_databricks_execution_adds_cluster_startup_time():
     assert any("startup" in item.label.lower() for item in cloud.breakdown)
 
 
-def test_databricks_dcs_execution_also_adds_cluster_startup_time():
-    df = _frame(groups=3, months_per_group=36)
-    local = _service(Settings(execution_mode="local")).estimate(df, _request())
-    dcs = _service(Settings(execution_mode="databricks_dcs")).estimate(df, _request())
-    assert dcs.estimated_minutes_low > local.estimated_minutes_low
-
-
-# ---------------------------------------------------------------------
-# Cost — never fabricated, always split, always a range
-# ---------------------------------------------------------------------
-
 
 def test_databricks_cost_is_unavailable_without_a_configured_rate():
     df = _frame(groups=5, months_per_group=36)
@@ -262,13 +251,6 @@ def test_databricks_cost_is_not_charged_for_local_execution():
     estimate = _service(settings).estimate(df, _request())
     assert estimate.cost.databricks_cost_available is False
 
-
-def test_databricks_cost_is_also_computed_for_dcs_execution():
-    df = _frame(groups=10, months_per_group=36)
-    settings = Settings(execution_mode="databricks_dcs", compute_cost_per_hour=8.0)
-    estimate = _service(settings).estimate(df, _request())
-    assert estimate.cost.databricks_cost_available is True
-    assert 0 < estimate.cost.databricks_cost_low <= estimate.cost.databricks_cost_high
 
 
 def test_llm_cost_is_unavailable_without_configured_pricing():

@@ -12,12 +12,7 @@ name: Deploy Databricks Bundle (Production)
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      force_image_build:
-        description: "Rebuild and push the DCS container image even if its inputs did not change"
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 # Never two production deploys racing each other; never cancel one that's
 # already writing to the workspace mid-flight.
@@ -35,78 +30,6 @@ jobs:
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
-  # Stage 2: the DCS container image.
-  #
-  # Deliberately NOT rebuilt on every deploy. The image carries dependencies
-  # only — no application code, which ships in the wheel — so it changes
-  # only when the Dockerfile or the engine's requirements change. Those are
-  # multi-GB layers (torch, prophet, shap), so rebuilding them on an
-  # unrelated code push would add ~20 minutes to every deployment and
-  # produce a byte-identical image.
-  #
-  # Pushes two tags: the commit SHA, so any image can be traced back to the
-  # exact source that produced it, and `latest`, which is what the bundle
-  # points DCS at — that is what makes a new image picked up automatically
-  # without editing a pinned tag by hand.
-  build-image:
-    name: Build and push DCS image (only when its inputs change)
-    needs: tests
-    runs-on: ubuntu-latest
-    environment: production
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Decide whether the image needs rebuilding
-        id: decide
-        run: |
-          if [ "${{ github.event.inputs.force_image_build }}" = "true" ]; then
-            echo "Forced by manual dispatch."
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only HEAD^ HEAD 2>/dev/null || echo "")
-          if echo "$changed" | grep -qE '^(Dockerfile|\.dockerignore|forecast_engine/requirements\.txt)$'; then
-            echo "Image inputs changed:"; echo "$changed" | grep -E '^(Dockerfile|\.dockerignore|forecast_engine/requirements\.txt)$'
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No image input changed — reusing the image already in the registry."
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: azure/login@v2
-        if: steps.decide.outputs.build == 'true'
-        with:
-          client-id: ${{ secrets.DATABRICKS_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # Authenticates docker to the registry using the same service
-      # principal everything else uses (it holds AcrPush) — no registry
-      # admin user, and no registry password stored in GitHub.
-      # The image reference is read from the environment rather than
-      # interpolated into the command, so neither it nor the registry name
-      # derived from it is ever rendered into the executed command line.
-      - name: Sign in to the container registry
-        if: steps.decide.outputs.build == 'true'
-        env:
-          ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
-        run: az acr login --name "${ACR_IMAGE%%.*}"
-
-      - name: Build and push
-        if: steps.decide.outputs.build == 'true'
-        env:
-          ACR_IMAGE: ${{ secrets.ACR_IMAGE }}
-          IMAGE_SHA: ${{ github.sha }}
-        run: |
-          docker build -t "$ACR_IMAGE:$IMAGE_SHA" -t "$ACR_IMAGE:latest" .
-          docker push "$ACR_IMAGE:$IMAGE_SHA"
-          docker push "$ACR_IMAGE:latest"
-
   # Stages 3-5: build the wheel, validate the PRODUCTION target
   # specifically, then deploy it. Every Databricks-facing step in this job
   # names `-t prod` explicitly — nothing here can silently fall back to
@@ -114,7 +37,7 @@ jobs:
   # `-t`.
   deploy-databricks:
     name: Build, validate and deploy (prod)
-    needs: [tests, build-image]
+    needs: tests
     runs-on: ubuntu-latest
     # A GitHub Environment named "production" — lets this deployment be
     # gated with required reviewers / a wait timer in repo settings without
@@ -133,8 +56,8 @@ jobs:
       # Stage 2: build forecast_engine wheel. The same one-line command
       # databricks.yml's own `artifacts.forecast_engine_wheel.build` runs —
       # built explicitly here so `bundle validate` (which does not invoke
-      # the artifact build step itself) has a wheel to check the DCS job's
-      # `libraries: whl:` glob against. `bundle deploy` below rebuilds this
+      # the artifact build step itself) has a wheel to validate against.
+      # `bundle deploy` below rebuilds this
       # same wheel again itself; harmless, and identical to what running
       # `databricks bundle deploy` locally already does.
       - name: Build forecast_engine wheel
@@ -157,14 +80,11 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
         run: databricks bundle validate -t prod
 
-      # Stage 4/5: deploy — updates both job definitions (Serverless and
-      # DCS; DCS stays deployed-but-inactive per the existing subscription
-      # limitation, unchanged from before this phase) and uploads the
-      # wheel. Never runs the forecast job itself.
+      # Stage 4/5: deploy — updates the Serverless job definition and
+      # uploads the wheel. Never runs the forecast job itself.
       - name: databricks bundle deploy -t prod
         working-directory: databricks
         env:
@@ -175,7 +95,6 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-          BUNDLE_VAR_acr_image: ${{ secrets.ACR_IMAGE }}
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
         run: databricks bundle deploy -t prod
 
