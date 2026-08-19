@@ -38,6 +38,7 @@ from app.schemas.results import (
 )
 from app.services.confidence import compute_confidence
 from app.services.dataset_preview_service import DatasetPreviewService, get_dataset_preview_service
+from app.services.reference_window import recent_reference_slice
 
 MAX_SHAP_DRIVERS = 8
 
@@ -163,9 +164,19 @@ class ResultService:
         # a small, unrepresentative slice of the real variation, so a model
         # whose forecast happened to match the last two years could outscore
         # a genuinely more accurate one. Stability must be judged against
-        # the same history the model was actually fitted on.
+        # the same history the model was actually fitted on — but "the same
+        # history" is then narrowed to a recent reference window (below):
+        # on a series spanning multiple price/volume regimes (gold, crypto,
+        # even ordinary demand after a structural shift), a forecast that
+        # correctly continues the CURRENT regime can look "unstable" next to
+        # decades of a since-departed one purely because most of the full
+        # series' variation happened at a different level. This mirrors the
+        # same reference-window fix applied in forward validation and drift
+        # (forecast_engine/s06_evaluation/reference_window.py) — the
+        # confidence formula/weights themselves are unchanged, only which
+        # slice of history feeds the stability input.
         group = next((g for g in result.forecast_groups if g.get("group_id") == group_id), {})
-        history_values = [
+        full_history_values = [
             value for _, value in self._full_actual_history(result, group)
             if isinstance(value, (int, float))
         ]
@@ -173,6 +184,11 @@ class ResultService:
             value for value in ((winner.get("forecast") or {}).get("values") or [])
             if isinstance(value, (int, float))
         ]
+        history_values = recent_reference_slice(
+            full_history_values,
+            (result.run_metadata or {}).get("frequency"),
+            len(forecast_values),
+        )
 
         # A fallback never runs drift validation (Section 6.9) — its
         # statistic/threshold are passed as None rather than whatever the

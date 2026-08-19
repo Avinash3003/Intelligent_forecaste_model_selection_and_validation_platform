@@ -29,8 +29,41 @@ def population_stability_index(reference: np.ndarray, current: np.ndarray, bins:
     if edges.size < 2:
         return 0.0
 
-    ref_counts, _ = np.histogram(reference, bins=edges)
-    cur_counts, _ = np.histogram(current, bins=edges)
+    # `edges` covers only the reference's own [min, max]: np.histogram
+    # silently drops any `current` value outside that range rather than
+    # counting it, which the Laplace smoothing below then reads as
+    # "uniform, no signal" — understating PSI for the most extreme
+    # forecasts, the one case this statistic most needs to catch.
+    #
+    # Fixed here with a single open bin on each side (edges[0] -> -inf,
+    # edges[-1] -> +inf) rather than graduated tail bins that grow with
+    # how far out `current` reaches. A graduated approach was tried and
+    # rejected: Laplace smoothing's denominator is `count + total_bins`,
+    # so adding more bins to cover a MORE extreme value shrinks that
+    # value's own smoothed proportion — the exact same raw concentration
+    # (e.g. all 12 forecast points in one bin) reads as a WEAKER signal
+    # the more bins were needed to reach it, understating the most
+    # extreme forecasts even more than the original bug did. A single
+    # fixed open bin per side never grows, so it carries no such penalty:
+    # it does not further rank "72" against "300" (both simply "outside
+    # the reference's observed range", which is the most a bin-membership
+    # statistic can honestly claim about either), but it never
+    # UNDERSTATES an extreme value relative to an ordinary in-range one,
+    # which is the actual bug being fixed. Finer magnitude discrimination
+    # for continuous, well-sampled data is what KS/Wasserstein are for —
+    # algorithm_selector.py already routes to them instead of PSI in
+    # exactly that situation; PSI is only selected here for the small or
+    # low-cardinality histories where that finer ranking is not
+    # statistically meaningful in the first place.
+    #
+    # Reference-side binning is unaffected either way: nothing in
+    # `reference` was ever beyond its own min/max to begin with.
+    bin_edges = edges.copy()
+    bin_edges[0] = -np.inf
+    bin_edges[-1] = np.inf
+
+    ref_counts, _ = np.histogram(reference, bins=bin_edges)
+    cur_counts, _ = np.histogram(current, bins=bin_edges)
 
     # Laplace smoothing avoids a divide-by-zero when a bin is empty on
     # either side — an unpopulated bin should count as "small", not crash.

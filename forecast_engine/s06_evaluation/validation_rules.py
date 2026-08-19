@@ -30,6 +30,19 @@ class ValidationRule(ABC):
     rule_id: str = "rule"
     rule_name: str = "Validation Rule"
 
+    # Whether ForwardForecastValidator should hand this rule the recent
+    # reference window (reference_window.py) instead of the series' full
+    # history. True only for the rules that judge the forecast's LEVEL
+    # against a historical band (volatility ratio, percentile/IQR bounds,
+    # variance ratio) — comparisons that are misleading once a series has
+    # genuinely moved to a new regime, since most of a long history's mass
+    # can sit at a price/volume level the series has already left behind.
+    # Rules that judge whether the model retained the series' SHAPE (trend,
+    # seasonality) rather than its level default to False and are
+    # unaffected — a regime change does not excuse a forecast that drops a
+    # real trend or seasonal pattern.
+    uses_reference_window: bool = False
+
     # Whether configuration has this rule switched on
     @abstractmethod
     def is_enabled(self) -> bool: ...
@@ -89,6 +102,7 @@ class ExcessiveVolatilityRule(ValidationRule):
 
     rule_id = "excessive_volatility"
     rule_name = "Excessive Volatility"
+    uses_reference_window = True
 
     # Store overfitting rule thresholds
     def __init__(self, config: OverfittingRulesConfig) -> None:
@@ -125,6 +139,7 @@ class PercentileSpikeRule(ValidationRule):
 
     rule_id = "percentile_spike"
     rule_name = "Unrealistic Spikes"
+    uses_reference_window = True
 
     # Store overfitting rule thresholds
     def __init__(self, config: OverfittingRulesConfig) -> None:
@@ -167,6 +182,7 @@ class IqrBoundsRule(ValidationRule):
 
     rule_id = "iqr_bounds"
     rule_name = "Historical Bound Violation"
+    uses_reference_window = True
 
     # Store overfitting rule thresholds
     def __init__(self, config: OverfittingRulesConfig) -> None:
@@ -248,6 +264,7 @@ class ForecastVarianceRule(ValidationRule):
 
     rule_id = "forecast_variance"
     rule_name = "High Forecast Variance"
+    uses_reference_window = True
 
     # Store overfitting rule thresholds
     def __init__(self, config: OverfittingRulesConfig) -> None:
@@ -289,6 +306,16 @@ class FlatForecastRule(ValidationRule):
 
     rule_id = "flat_forecast"
     rule_name = "Flat Forecast"
+    # Judges a VARIABILITY SCALE ratio (forecast std vs history std), not a
+    # shape/pattern, so it belongs on the reference window for the same
+    # reason the overfitting band rules do: a series that has changed level
+    # has a full-history std inflated by the level shift ITSELF, not by
+    # period-to-period variability. Measured against that, a forecast
+    # correctly tracking the current regime's own (smaller, absolute)
+    # variation looks artificially "flat". A genuinely flat forecast still
+    # fails either way — its std is ~0, so the ratio stays ~0 regardless of
+    # which denominator is used.
+    uses_reference_window = True
 
     # Store underfitting rule thresholds
     def __init__(self, config: UnderfittingRulesConfig) -> None:
@@ -328,6 +355,14 @@ class ExcessiveSmoothingRule(ValidationRule):
 
     rule_id = "excessive_smoothing"
     rule_name = "Excessive Smoothing"
+    # Same variability-scale ratio as FlatForecastRule, just a laxer
+    # threshold — windowed for the identical reason. Real evidence: on the
+    # gold run, LightGBM (WMAPE 4.00%, the run's most accurate model) and
+    # XGBoost (5.21%) were eliminated here at full-history ratios of 0.135
+    # and 0.106 against a 0.15 floor; against the window they are 0.210 and
+    # 0.165 and correctly survive, while ARIMA (genuinely near-flat) still
+    # fails at 0.035.
+    uses_reference_window = True
 
     # Store underfitting rule thresholds
     def __init__(self, config: UnderfittingRulesConfig) -> None:
@@ -366,6 +401,21 @@ class MissingSeasonalityRule(ValidationRule):
 
     rule_id = "missing_seasonality"
     rule_name = "Missing Seasonality"
+    # Windowed because of the GATE below, not the range comparison (which
+    # already used `history[-period:]`, i.e. was already recent). The gate
+    # is `_autocorrelation(history, period) >= 0.3`, and autocorrelation on
+    # non-detrended data conflates trend with seasonality: any sustained
+    # trend raises autocorrelation at EVERY lag, so a trending non-seasonal
+    # series is spuriously judged "seasonal" and then required to produce a
+    # seasonal swing it never had. Real evidence: gold (no annual
+    # seasonality) scores 0.707 on full history vs 0.004 on the window,
+    # while genuinely seasonal series stay correctly detected — airline
+    # passengers 0.486 and Time Series Practice 0.661 on the window, both
+    # still above the 0.3 gate. The window is guaranteed to span at least
+    # two seasonal cycles by construction (reference_window.py's
+    # SEASONAL_CYCLES = 2), so the `len(history) < period * 2` guard below
+    # is not weakened by windowing.
+    uses_reference_window = True
 
     # Store underfitting rule thresholds
     def __init__(self, config: UnderfittingRulesConfig) -> None:

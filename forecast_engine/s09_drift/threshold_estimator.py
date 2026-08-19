@@ -48,19 +48,29 @@ def _percentile_null(
 def _bootstrap_null(
     history: np.ndarray, statistic_fn: DriftStatistic, config: ThresholdEstimationConfig, rng: np.random.Generator
 ) -> list[float]:
-    # Standard bootstrap construction of a statistic's null distribution:
-    # resample with replacement, split in half, score the two halves against
-    # each other. Repeating this many times characterizes how large the
-    # statistic gets from sampling noise alone.
+    # Split chronologically FIRST, then resample within each side — not a
+    # full reshuffle of `history` before splitting. A full reshuffle turns
+    # both "halves" into two random draws from the same pool, which erases
+    # whatever the earlier and later parts of `history` actually looked
+    # like relative to each other; the resulting null answers "how large is
+    # this statistic between two random samples of one pool," not "how
+    # large does it normally get between this window's own earlier and
+    # later periods" — the comparison Drift Validation itself is actually
+    # making (a temporally later forecast vs. this window's history).
+    # Splitting by time first, then resampling only within each half,
+    # keeps that temporal structure while still producing as many
+    # resampled iterations as before.
     n = history.size
     half = max(1, n // 2)
-    samples = []
+    earlier, later = history[:half], history[half:]
+    if earlier.size == 0 or later.size == 0:
+        return []
 
+    samples = []
     for _ in range(config.bootstrap_iterations):
-        resampled = rng.choice(history, size=n, replace=True)
-        a, b = resampled[:half], resampled[half:]
-        if a.size and b.size:
-            samples.append(statistic_fn(a, b))
+        a = rng.choice(earlier, size=earlier.size, replace=True)
+        b = rng.choice(later, size=later.size, replace=True)
+        samples.append(statistic_fn(a, b))
     return samples
 
 

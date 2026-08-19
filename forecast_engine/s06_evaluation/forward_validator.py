@@ -18,6 +18,7 @@ from forecast_engine.s06_evaluation.evaluation_report import (
     ForwardValidationResult,
     RuleOutcome,
 )
+from forecast_engine.s06_evaluation.reference_window import recent_reference_slice
 from forecast_engine.s06_evaluation.validation_rules import (
     AbnormalGrowthRule,
     ExcessiveSmoothingRule,
@@ -69,11 +70,23 @@ class ForwardForecastValidator:
             result.skipped_reason = "Forecast contains no values to validate."
             return result
 
+        # The subset of rules that judge the forecast's LEVEL against a
+        # historical band (ValidationRule.uses_reference_window) are handed
+        # this recent, single-regime slice instead of the full series — see
+        # reference_window.py for why. Rules that judge the forecast's
+        # SHAPE (trend/seasonality retention) still receive the full
+        # series unchanged: a regime change does not excuse a model that
+        # drops a real trend or seasonal pattern.
+        reference_history = recent_reference_slice(
+            history, series.frequency, values.size, self._config.min_history_for_validation
+        )
+
         # Every rule runs even after a failure, so the user sees all the
         # reasons a model was rejected rather than only the first.
         for rule in self._rules:
             try:
-                result.rule_outcomes.append(rule.evaluate(history, values))
+                rule_history = reference_history if rule.uses_reference_window else history
+                result.rule_outcomes.append(rule.evaluate(rule_history, values))
             except Exception as exc:  # noqa: BLE001 - a broken rule must not eliminate a model
                 # A rule that cannot be computed abstains: eliminating a
                 # model because our own check malfunctioned would be wrong.
