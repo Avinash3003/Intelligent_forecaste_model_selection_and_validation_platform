@@ -18,7 +18,7 @@ import { formatIST } from '../utils/formatDateTime'
  * @param options.completedOnly  Only offer runs that finished — Experiments
  *   and Observability read artifacts that a running job has not written yet.
  */
-export function useDatasetRunFilter(runs, { completedOnly = false } = {}) {
+export function useDatasetRunFilter(runs, { completedOnly = false, initialRun = '' } = {}) {
   const usable = useMemo(
     () => (completedOnly ? runs.filter((run) => run.status === 'Completed') : runs),
     [runs, completedOnly]
@@ -55,9 +55,27 @@ export function useDatasetRunFilter(runs, { completedOnly = false } = {}) {
     [usable, dataset]
   )
 
+  // A run id handed in by the caller (e.g. ?run=... when arriving from the
+  // Results page's MLflow card) wins the initial selection, and pulls its
+  // own dataset into view so the run is actually reachable in the dropdowns.
+  // Applied once: after that the user's own selections take over, so this
+  // never fights them.
+  const [initialApplied, setInitialApplied] = useState(false)
+  useEffect(() => {
+    if (initialApplied || !initialRun || !usable.length) return
+    const match = usable.find((item) => item.id === initialRun)
+    if (match) {
+      setDataset(match.dataset)
+      setRun(match.id)
+    }
+    setInitialApplied(true)
+  }, [initialRun, usable, initialApplied])
+
   // Default to the most recent dataset, and re-home the selection if the
   // current one disappears (a filter change, a refreshed run list).
   useEffect(() => {
+    // Don't default the dataset out from under a pending initial run.
+    if (initialRun && !initialApplied) return
     if (!datasetOptions.length) {
       if (dataset) setDataset('')
       return
@@ -65,10 +83,11 @@ export function useDatasetRunFilter(runs, { completedOnly = false } = {}) {
     if (!datasetOptions.some((option) => option.value === dataset)) {
       setDataset(datasetOptions[0].value)
     }
-  }, [datasetOptions, dataset])
+  }, [datasetOptions, dataset, initialRun, initialApplied])
 
   // Keep the run selection valid for whatever dataset is now selected.
   useEffect(() => {
+    if (initialRun && !initialApplied) return
     if (!runOptions.length) {
       if (run) setRun('')
       return
@@ -76,7 +95,7 @@ export function useDatasetRunFilter(runs, { completedOnly = false } = {}) {
     if (!runOptions.some((option) => option.value === run)) {
       setRun(runOptions[0].value)
     }
-  }, [runOptions, run])
+  }, [runOptions, run, initialRun, initialApplied])
 
   return { dataset, setDataset, datasetOptions, run, setRun, runOptions }
 }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.config.settings import Settings, get_settings
 from app.orchestration.exceptions import RunNotReadyError
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.schemas import JobStatus, PipelineExecutionResult
@@ -20,13 +21,21 @@ from app.schemas.mlflow_view import (
     PerKeyOutcome,
     TuningInfo,
 )
+from app.services.databricks_links import mlflow_run_url
 
 
 class MLflowViewService:
     """Builds the MLflow Experiments page payload for one run."""
 
-    def __init__(self, executor: PipelineExecutor | None = None) -> None:
+    def __init__(
+        self,
+        executor: PipelineExecutor | None = None,
+        settings: Settings | None = None,
+    ) -> None:
         self._executor = executor or get_pipeline_executor()
+        # Only read for the Databricks workspace host behind the "Open in
+        # Databricks" deep link; injectable so a test can vary it.
+        self._settings = settings or get_settings()
 
     def get_run(self, run_id: str) -> MLflowRunDetail:
         result = self._executor.get_result(run_id)
@@ -51,6 +60,12 @@ class MLflowViewService:
             mlflow_run_id=tracking.get("run_id"),
             experiment=tracking.get("experiment_name"),
             tracking_uri=tracking.get("tracking_uri"),
+            databricks_run_url=mlflow_run_url(
+                self._settings.databricks_host,
+                tracking.get("experiment_id"),
+                tracking.get("run_id"),
+                tracking.get("tracking_uri"),
+            ),
             status=tracking.get("status"),
             dataset=meta.get("dataset_path"),
             summary=MLflowRunSummary(

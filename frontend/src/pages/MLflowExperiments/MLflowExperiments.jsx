@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { FlaskConical, AlertCircle } from 'lucide-react'
 import PageContainer from '../../components/common/PageContainer'
 import SectionContainer from '../../components/layout/SectionContainer'
@@ -11,6 +12,7 @@ import { useDatasetRunFilter } from '../../hooks/useDatasetRunFilter'
 import { fetchDeployments, fetchMLflowRun } from '../../services'
 import { fallbackModelOptions, forecastModels } from '../../data/appConfig'
 import { cn } from '../../utils/cn'
+import OpenInDatabricksLink from '../../components/ui/OpenInDatabricksLink'
 
 // Display names the platform already defines (appConfig.js) rather than a
 // second hardcoded label set — `xgboost` -> "XGBoost", `seasonal_naive` ->
@@ -340,9 +342,12 @@ export default function MLflowExperiments() {
   // Dataset -> Run, the same dependent pair the Results page uses. Only
   // completed runs are offered: a run still executing has not written the
   // tracking record this page reads.
+  // ?run=<id> arrives from the Results page's MLflow card, so "View run
+  // details" lands on that exact run instead of the most recent one.
+  const [searchParams] = useSearchParams()
   const { dataset, setDataset, datasetOptions, run, setRun, runOptions } = useDatasetRunFilter(
     deployments,
-    { completedOnly: true }
+    { completedOnly: true, initialRun: searchParams.get('run') || '' }
   )
   const runs = runOptions
 
@@ -439,8 +444,15 @@ export default function MLflowExperiments() {
           </div>
 
           {/* Tracking identity — the ids an auditor needs to find this run in
-              MLflow itself, rather than a restatement of the forecast. */}
+              MLflow itself, rather than a restatement of the forecast. The
+              Databricks deep link sits here for the same reason, and renders
+              only when the backend could build a correct URL. */}
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            {detail.databricks_run_url ? (
+              <div className="mb-3 flex justify-end">
+                <OpenInDatabricksLink url={detail.databricks_run_url} />
+              </div>
+            ) : null}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 ['MLflow run', detail.mlflow_run_id],
