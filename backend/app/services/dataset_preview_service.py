@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from app.config.settings import Settings, get_settings
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.schemas.dataset_preview import DatasetPreview
 from app.services.derived_feature_registry import (
@@ -43,8 +44,15 @@ _CACHE_CAPACITY = 5
 class DatasetPreviewService:
     """Reads a run's curated dataset, one page of rows at a time."""
 
-    def __init__(self, executor: PipelineExecutor | None = None) -> None:
+    def __init__(
+        self,
+        executor: PipelineExecutor | None = None,
+        settings: Settings | None = None,
+    ) -> None:
         self._executor = executor or get_pipeline_executor()
+        # Read only to rebuild a durable volume path when the recorded one no
+        # longer resolves; injectable so a test can vary the mode/roots.
+        self._settings = settings or get_settings()
         self._cache: "OrderedDict[str, tuple[list[str], list[list[str]]]]" = OrderedDict()
         # This service is a process-wide singleton (get_dataset_preview_
         # service) and FastAPI runs sync path operations like get_preview()
@@ -96,7 +104,7 @@ class DatasetPreviewService:
         if not uri:
             return None
 
-        text = self._read(uri)
+        text = self._read(uri, run_id)
         if text is None:
             return None
 
@@ -120,12 +128,56 @@ class DatasetPreviewService:
                 self._cache.popitem(last=False)
         return columns, rows
 
-    def _read(self, uri: str) -> str | None:
-        """The curated file, local disk first, then the workspace client."""
-        path = Path(uri)
-        if path.is_file():
-            return path.read_text(encoding="utf-8", errors="replace")
-        return self._read_remote(uri)
+    def _read(self, uri: str, run_id: str | None = None) -> str | None:
+        """The curated file, from the first location that actually yields it.
+
+        A run records the absolute path its curated file was written to. That
+        path is durable for a cloud run (a UC volume) and for a local run (the
+        API host's own disk) — but a path recorded by an *earlier* deployment
+        can be stale: App Service runs the app from a per-build /tmp
+        directory, so an absolute path captured under one build no longer
+        exists under the next.
+
+        Rather than fail, each candidate below is tried in turn: the recorded
+        path first (the common case, and the only one local runs use), then —
+        for cloud runs — the path the same file would occupy in the configured
+        curated volume today. That makes resolution survive a restart, a
+        redeploy and a new process, without changing where anything is
+        written.
+        """
+        for candidate in self._candidate_uris(uri, run_id):
+            path = Path(candidate)
+            if path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace")
+            contents = self._read_remote(candidate)
+            if contents is not None:
+                return contents
+        return None
+
+    def _candidate_uris(self, uri: str, run_id: str | None) -> list[str]:
+        """The recorded location, then the durable one it maps to today.
+
+        Local execution gets exactly one candidate — its recorded path is the
+        authoritative location and there is no volume to fall back to, so
+        local behaviour is unchanged.
+        """
+        candidates = [uri]
+
+        mode = (self._settings.execution_mode or "local").strip().lower()
+        if mode != "databricks" or not run_id:
+            return candidates
+
+        # The curated writer lays files out as <root>/runs/<run_id>/<file>
+        # (see DatabricksRunner._curated_root), so the filename plus the
+        # configured root is enough to rebuild today's location. Nothing here
+        # is hardcoded to a workspace: the root comes from settings.
+        root = (self._settings.databricks_curated_volumes_root or "").rstrip("/")
+        filename = Path(uri).name
+        if root and filename:
+            rebuilt = f"{root}/runs/{run_id}/{filename}"
+            if rebuilt != uri:
+                candidates.append(rebuilt)
+        return candidates
 
     def _read_remote(self, uri: str) -> str | None:
         # Only a Databricks-backed runner can reach a UC Volume; a local
