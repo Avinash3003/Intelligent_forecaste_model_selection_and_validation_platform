@@ -15,6 +15,7 @@ from calendar import monthrange
 from datetime import date, timedelta
 from typing import Any
 
+from app.config.settings import Settings, get_settings
 from app.orchestration.exceptions import RunNotReadyError
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.schemas import JobStatus, PipelineExecutionResult
@@ -37,6 +38,7 @@ from app.schemas.results import (
     UnderlyingMetrics,
 )
 from app.services.confidence import compute_confidence
+from app.services.databricks_links import mlflow_run_url
 from app.services.dataset_preview_service import DatasetPreviewService, get_dataset_preview_service
 from app.services.reference_window import recent_reference_slice
 
@@ -50,8 +52,12 @@ class ResultService:
         self,
         executor: PipelineExecutor | None = None,
         dataset_preview_service: DatasetPreviewService | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._executor = executor or get_pipeline_executor()
+        # Only read for the Databricks workspace host behind the "Open in
+        # Databricks" deep link; injectable so a test can vary it.
+        self._settings = settings or get_settings()
         # The "Actual vs Forecast" chart's actual-history line reads the
         # full curated dataset through this — the same already-persisted,
         # already-cached file the "Curated dataset" preview panel reads —
@@ -671,6 +677,15 @@ class ResultService:
             status=info.get("status"),
             tracking_uri=info.get("tracking_uri"),
             models_registered=info.get("models_registered"),
+            # `experiment_id` rather than the display name: the Databricks
+            # route addresses an experiment by id. Returns None whenever a
+            # correct URL cannot be built, which is what hides the action.
+            databricks_run_url=mlflow_run_url(
+                self._settings.databricks_host,
+                info.get("experiment_id"),
+                info.get("run_id"),
+                info.get("tracking_uri"),
+            ),
         )
 
     def _llm_trace(self, result: PipelineExecutionResult) -> LLMTraceSummary:

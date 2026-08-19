@@ -78,6 +78,9 @@ class MLflowRunDetail(BaseModel):
     mlflow_run_id: str | None = None
     experiment: str | None = None
     tracking_uri: str | None = None
+    # Deep link to this run in the Databricks MLflow UI, or None when one
+    # cannot be built. See app/services/databricks_links.py.
+    databricks_run_url: str | None = None
     status: str | None = None
     dataset: str | None = None
     summary: MLflowRunSummary

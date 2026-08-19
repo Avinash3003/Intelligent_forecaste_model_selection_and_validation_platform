@@ -113,6 +113,7 @@ function normalizeResults(response) {
       status: response.mlflow_run.status,
       trackingUri: response.mlflow_run.tracking_uri,
       modelsRegistered: response.mlflow_run.models_registered,
+      databricksRunUrl: response.mlflow_run.databricks_run_url,
     },
   }
 }
@@ -492,7 +493,7 @@ export default function Results() {
         )}
 
         <CollapsibleSection title="MLflow run">
-          <MLflowRunCard run={results.mlflowRun} />
+          <MLflowRunCard run={results.mlflowRun} resultRunId={results.runId} />
         </CollapsibleSection>
 
         <CollapsibleSection title="Developer debug">
