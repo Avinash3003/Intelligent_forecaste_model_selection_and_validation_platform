@@ -7,7 +7,7 @@ task, checkpointing `PipelineContext` between them via
 These tests cover the refactor itself, not any pipeline stage's own logic
 (that is already covered elsewhere): that `STAGE_GROUPS` still runs the
 exact same stages `run()` does, that checkpointing round-trips a context,
-that the one fork/join (Persist Winning Models / Export Forecasts) merges
+that the one fork/join (Persist Models / Export Forecasts) merges
 correctly, and that running the whole pipeline task-by-task produces the
 same result as running it in one process.
 """
@@ -151,14 +151,14 @@ def test_merge_never_clobbers_bases_own_field_with_an_empty_one():
 
 def test_merge_appends_the_other_branchs_stage_record_once():
     base = _context()
-    base.stages = [StageRecord(name="Rank & Select Production Models"), StageRecord(name="Persist Winning Models")]
+    base.stages = [StageRecord(name="Rank & Select"), StageRecord(name="Persist Models")]
     other = _context()
-    other.stages = [StageRecord(name="Rank & Select Production Models"), StageRecord(name="Export Forecasts")]
+    other.stages = [StageRecord(name="Rank & Select"), StageRecord(name="Export Forecasts")]
 
     merge_checkpoints(base, other)
 
     names = [stage.name for stage in base.stages]
-    assert names == ["Rank & Select Production Models", "Persist Winning Models", "Export Forecasts"]
+    assert names == ["Rank & Select", "Persist Models", "Export Forecasts"]
 
 
 def test_merge_unions_metadata_without_overwriting_bases_keys():
@@ -370,7 +370,7 @@ def test_running_task_by_task_matches_running_in_one_process(tmp_path, _pipeline
     baseline_stage_names = {stage["name"] for stage in baseline_summary["stages"]}
     staged_stage_names = {stage["name"] for stage in staged_summary["stages"]}
     assert staged_stage_names == baseline_stage_names
-    assert "Persist Winning Models" in staged_stage_names
+    assert "Persist Models" in staged_stage_names
     assert "Export Forecasts" in staged_stage_names
 
 

@@ -17,6 +17,15 @@
 #         -> export_forecasts +-> business_insights -> mirror_artifacts
 #                             /                          -> mlflow_tracking
 #
+# These task_keys ARE the pipeline's vocabulary: the stage each task
+# reports to the UI is its task_key in Title Case (`explain_models` ->
+# "Explain Models"), so a run reads the same in the Databricks DAG, the
+# engine's stage trail and the UI. Nine tasks are 1:1 with one stage;
+# load_prepare and build_series fan out to several (see
+# run_pipeline.py's STAGE_GROUPS and backend/app/services/
+# pipeline_stages.py). Renaming a task_key here means renaming its stage
+# in both of those places too.
+#
 # persist_models and export_forecasts are the one genuine parallel branch:
 # `run_pipeline.py`'s `_persist_winning_models` and `_export_forecasts`
 # both read only Rank & Select's output and write to disjoint context
@@ -49,8 +58,8 @@ resources:
       description: >-
         Runs the forecast_engine pipeline (load -> preprocess -> train -> evaluate
         -> explain -> rank -> drift-gate -> select -> insights -> MLflow) as an
-        11-task DAG on Databricks Serverless compute, with Persist Winning Models
-        and Export Forecasts running in parallel after Rank & Select.
+        11-task DAG on Databricks Serverless compute, with Persist Models and
+        Export Forecasts running in parallel after Rank & Select.
 
       # Identical four-parameter contract to forecast_job_dcs.yml plus one
       # addition (checkpoint_dir) this multi-task DAG needs — see that file

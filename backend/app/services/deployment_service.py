@@ -6,36 +6,13 @@ from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.exceptions import UnknownRunError
 from app.orchestration.schemas import JobStatus, PipelineExecutionRequest, RunListing
 from app.schemas.deployment import DeploymentRequest, DeploymentResponse, DeploymentStatus, StageStatus
-from app.services.upload_service import UploadService
 
-# The forecast_engine's own stage names, in execution order — the complete
-# set, matching `run_pipeline.py`'s `begin_stage(...)` calls one for one.
-# This is both the shape rendered for a run that has not reported a trail
-# yet AND the skeleton a live run's reported stages are merged onto, so the
-# UI always shows the whole pipeline with the stages not yet reached marked
-# Pending rather than silently omitted.
-#
-# Keep in sync with run_pipeline.py: it is also the progress denominator, so
-# a missing entry here overstates how far along every run is.
-PIPELINE_STAGES = [
-    "Load Dataset",
-    "Detect Frequency",
-    "Assess Data Quality",
-    "Preprocess Dataset",
-    "Persist Curated Dataset",
-    "Verify Curated Dataset",
-    "Generate Forecast Groups",
-    "Build Forecast Series",
-    "Train Models",
-    "Evaluate Models",
-    "Generate Explainability (SHAP)",
-    "Rank & Select Production Models",
-    "Persist Winning Models",
-    "Export Forecasts",
-    "Generate Business Insights",
-    "Mirror Artifacts",
-    "Track to MLflow",
-]
+# The pipeline's stage vocabulary lives in pipeline_stages.py — shared with
+# estimation, which needs the same names without importing the executor
+# stack. Imported (not redefined) here because this module has always been
+# where callers and tests reach for PIPELINE_STAGES.
+from app.services.pipeline_stages import PIPELINE_STAGES, canonical_stage_name
+from app.services.upload_service import UploadService
 
 _TERMINAL_STATUSES = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
 
@@ -151,7 +128,7 @@ class DeploymentService:
         unreached stages visible as Pending instead of dropping them.
         """
         reported = {
-            stage.get("name"): stage
+            canonical_stage_name(stage["name"]): stage
             for stage in (listing.stages or [])
             if stage.get("name")
         }

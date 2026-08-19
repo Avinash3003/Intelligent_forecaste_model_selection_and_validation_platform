@@ -216,7 +216,7 @@ class ResultsResponse(BaseModel):
     group_id: str | None = None
     groups: list[GroupOption] = Field(default_factory=list)
     horizon_points: list[str] = Field(default_factory=list)
-    # The dataset's own observed date coverage (Assess Data Quality,
+    # The dataset's own observed date coverage (Assess Quality,
     # computed from its date column) — not the upload or run time. Either
     # both set or both None; never a fabricated partial range.
     dataset_date_range_start: str | None = None

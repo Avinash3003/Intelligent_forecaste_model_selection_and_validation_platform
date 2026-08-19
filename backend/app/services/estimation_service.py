@@ -34,6 +34,7 @@ from app.schemas.estimation import (
     WorkloadEstimate,
 )
 from app.services.dataset_analysis import DatasetAnalysis, DatasetAnalyzer
+from app.services.pipeline_stages import canonical_stage_name
 
 # ---------------------------------------------------------------------
 # Heuristic fallback constants — used only when historical telemetry is
@@ -473,7 +474,7 @@ class EstimationService:
             if used_this_run:
                 runs_used += 1
 
-            explainability = _stage_duration(summary, "Generate Explainability (SHAP)")
+            explainability = _stage_duration(summary, "Explain Models")
             explainability_report = summary.get("explainability_report") or {}
             surviving = len(explainability_report.get("results") or [])
             if explainability and surviving:
@@ -623,8 +624,12 @@ def _backtest_window_count(
 
 
 def _stage_duration(summary: dict, stage_name: str) -> float | None:
+    # Calibration reads historical summaries, which may predate the unified
+    # stage vocabulary — match on the canonical name so a run recorded as
+    # "Generate Explainability (SHAP)" still calibrates "Explain Models".
     for stage in summary.get("stages") or []:
-        if stage.get("name") == stage_name:
+        name = stage.get("name")
+        if name and canonical_stage_name(name) == stage_name:
             return stage.get("duration_seconds")
     return None
 

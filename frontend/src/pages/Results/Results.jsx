@@ -547,7 +547,7 @@ export default function Results() {
       )}
 
       {/* The selected run's own dataset date coverage — computed from the
-          dataset's real date column (Assess Data Quality), never the
+          dataset's real date column (Assess Quality), never the
           upload/run time. Tied to `results`, not a separate state, so
           switching Dataset/Run clears it immediately with everything else
           and it is never stale from a previous selection. */}
