@@ -448,11 +448,13 @@ export default function MLflowExperiments() {
               Databricks deep link sits here for the same reason, and renders
               only when the backend could build a correct URL. */}
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            {/* "Open in Databricks" hidden — see MLflowRunCard.jsx for why.
             {detail.databricks_run_url ? (
               <div className="mb-3 flex justify-end">
                 <OpenInDatabricksLink url={detail.databricks_run_url} />
               </div>
             ) : null}
+            */}
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 ['MLflow run', detail.mlflow_run_id],
