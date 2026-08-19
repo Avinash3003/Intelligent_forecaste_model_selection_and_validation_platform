@@ -188,6 +188,12 @@ class MLflowRunInfo(BaseModel):
     status: str | None = None
     tracking_uri: str | None = None
     models_registered: int | None = None
+    # Deep link to this run in the Databricks MLflow UI, or None when one
+    # cannot be built (no workspace host configured, missing experiment/run
+    # id, or a run tracked to a local store). The UI shows the "Open in
+    # Databricks" action only when this is set, so the rest of the MLflow
+    # record still renders when the link is unavailable.
+    databricks_run_url: str | None = None
 
 
 class LLMTraceSummary(BaseModel):
