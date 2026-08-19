@@ -22,6 +22,7 @@ import numpy as np
 from forecast_engine.config.drift_config import DriftValidationConfig
 from forecast_engine.s01_preprocessing.series_builder import ForecastSeries
 from forecast_engine.s06_evaluation.evaluation_report import ForwardForecast
+from forecast_engine.s06_evaluation.reference_window import recent_reference_slice
 from forecast_engine.s09_drift.algorithm_selector import DriftAlgorithmSelector
 from forecast_engine.s09_drift.drift_algorithms import DRIFT_ALGORITHMS
 from forecast_engine.s09_drift.drift_report import (
@@ -63,9 +64,9 @@ class DriftValidator:
     def _extract_distributions(
         self, series: ForecastSeries, forecast: ForwardForecast
     ) -> tuple[np.ndarray, np.ndarray]:
-        history = np.asarray(series.frame[series.target_column].to_numpy(), dtype=float)
-        history = history[np.isfinite(history)]
-        if history.size == 0:
+        full_history = np.asarray(series.frame[series.target_column].to_numpy(), dtype=float)
+        full_history = full_history[np.isfinite(full_history)]
+        if full_history.size == 0:
             raise ValueError("Series has no finite historical observations to validate drift against.")
 
         current = np.asarray(forecast.values, dtype=float)
@@ -73,6 +74,15 @@ class DriftValidator:
         if current.size == 0:
             raise ValueError("Forecast has no finite values to validate.")
 
+        # A recent, single-regime slice, not the entire series — the whole
+        # history would judge a forecast against price/volume levels the
+        # series may have long since moved past (reference_window.py). This
+        # same `history` return value also feeds algorithm selection and
+        # threshold estimation below, so the comparison population and the
+        # threshold's calibration population are always drawn from the
+        # identical window — deliberately, so the two stay statistically
+        # consistent with each other.
+        history = recent_reference_slice(full_history, series.frequency, current.size)
         return history, current
 
     # Stage 1 — Dynamic Drift Selection (Section 6.7).
