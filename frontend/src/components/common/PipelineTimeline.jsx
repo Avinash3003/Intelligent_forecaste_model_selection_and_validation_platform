@@ -1,6 +1,6 @@
 import { CheckCircle2, Loader2, Circle, XCircle } from 'lucide-react'
 import { cn } from '../../utils/cn'
-import { formatDuration, formatISTTime, secondsBetween } from '../../utils/formatDateTime'
+import { formatISTTime } from '../../utils/formatDateTime'
 
 const statusConfig = {
   Completed: {
@@ -63,9 +63,6 @@ export default function PipelineTimeline({ stages }) {
                   <>
                     {' · started '}
                     {formatISTTime(stage.startedAt)}
-                    {stage.completedAt && (
-                      <> · took {formatDuration(secondsBetween(stage.startedAt, stage.completedAt))}</>
-                    )}
                   </>
                 )}
               </p>

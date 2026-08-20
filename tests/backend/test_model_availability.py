@@ -1,9 +1,10 @@
-"""A model is only offered when the execution mode can actually run it.
+"""What the picker offers, per execution mode.
 
-The Serverless job's environment spec deliberately omits torch and
-pytorch-forecasting, so TFT is Unavailable there. Before this, the picker
-offered it anyway and the estimator charged its per-fit weight for work
-that never happened.
+Nothing is currently blocked: TFT is deliberately still offered even where
+its dependencies are absent, and is dropped at submission instead — see
+tests/backend/test_tft_offered_but_not_executed.py for that half. This table
+remains the mechanism for genuinely hiding a model, so these tests keep its
+behaviour pinned for the next thing that needs it.
 """
 
 from app.config.model_availability import (
@@ -14,10 +15,8 @@ from app.config.model_availability import (
 )
 
 
-def test_serverless_cannot_run_tft():
-    blocked = unavailable_models("databricks")
-    assert "tft" in blocked
-    assert "torch" in blocked["tft"]
+def test_nothing_is_currently_blocked_on_serverless():
+    assert unavailable_models("databricks") == {}
 
 
 def test_serverless_can_run_every_other_candidate():
@@ -36,7 +35,9 @@ def test_an_unknown_mode_is_assumed_capable():
 
 
 def test_mode_matching_is_case_and_whitespace_insensitive():
-    assert "tft" in unavailable_models("  DataBricks ")
+    """No entries today, but the lookup must still normalise the mode — a
+    future block would otherwise miss "  DataBricks "."""
+    assert unavailable_models("  DataBricks ") == unavailable_models("databricks")
 
 
 def test_none_defaults_to_local():
@@ -45,13 +46,14 @@ def test_none_defaults_to_local():
 
 def test_filter_available_preserves_order():
     models = ["arima", "tft", "lightgbm"]
-    assert filter_available(models, "databricks") == ["arima", "lightgbm"]
+    # Nothing is blocked, so every mode keeps the list intact and in order.
+    assert filter_available(models, "databricks") == models
     assert filter_available(models, "local") == models
 
 
 def test_is_model_available_reads_the_same_table():
     assert is_model_available("tft", "local") is True
-    assert is_model_available("tft", "databricks") is False
+    assert is_model_available("tft", "databricks") is True
     assert is_model_available("arima", "databricks") is True
 
 

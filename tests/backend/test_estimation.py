@@ -216,7 +216,9 @@ def test_more_groups_take_longer():
 def test_a_heavier_model_mix_takes_longer():
     df = _frame(groups=10, months_per_group=36)
     light = _service().estimate(df, _request(models=("seasonal_naive",)))
-    heavy = _service().estimate(df, _request(models=("tft",)))
+    # Prophet, not TFT: TFT is offered but never executed, so it is stripped
+    # from the workload and would estimate as no work at all.
+    heavy = _service().estimate(df, _request(models=("prophet",)))
     assert heavy.estimated_minutes_high > light.estimated_minutes_high
 
 

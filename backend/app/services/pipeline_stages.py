@@ -77,3 +77,51 @@ def canonical_stage_name(name: str) -> str:
     stage unconditionally rather than branching on which era produced it.
     """
     return _LEGACY_STAGE_NAMES.get(name, name)
+
+
+# ----------------------------------------------------------------------
+# Display phases
+# ----------------------------------------------------------------------
+#
+# PIPELINE_STAGES above is the ENGINE's contract — seventeen stages, kept in
+# lockstep with `begin_stage(...)` and verified by tests. It is the right
+# granularity for a checkpoint boundary and the wrong one for a person: a
+# seventeen-row trail is hard to talk through, and most rows are sub-second
+# bookkeeping nobody needs to see.
+#
+# These seven phases are a VIEW over those stages, for the UI only. Nothing
+# reports against them and no engine or Databricks task is renamed to match —
+# the DAG keeps its own task_keys, deliberately, because the two serve
+# different audiences.
+#
+# Every one of the seventeen stages belongs to exactly one phase, checked by
+# tests, so a stage can never quietly vanish from the trail.
+PIPELINE_PHASES: list[tuple[str, tuple[str, ...]]] = [
+    ("Load & Prepare", (
+        "Load Dataset",
+        "Detect Frequency",
+        "Assess Quality",
+        "Preprocess Dataset",
+        "Persist Curated",
+        "Verify Curated",
+    )),
+    ("Build Series", ("Generate Groups", "Build Series")),
+    ("Train Models", ("Train Models",)),
+    ("Evaluate Models", ("Evaluate Models",)),
+    ("Explain Models", ("Explain Models",)),
+    ("Rank & Select", ("Rank & Select",)),
+    ("Publish Results", (
+        "Persist Models",
+        "Export Forecasts",
+        "Business Insights",
+        "Mirror Artifacts",
+        "MLflow Tracking",
+    )),
+]
+
+PHASE_LABELS: list[str] = [label for label, _ in PIPELINE_PHASES]
+
+# Which phase a given engine stage rolls up into.
+STAGE_TO_PHASE: dict[str, str] = {
+    stage: label for label, stages in PIPELINE_PHASES for stage in stages
+}

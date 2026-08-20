@@ -79,7 +79,15 @@ export default function StepReviewDeploy({
 
       {/* The estimate leads: it is the one thing on this screen a user has
           not already seen in an earlier step. */}
+      {/* Runtime/cost estimate temporarily hidden. It made entering this
+          step slow — the call sweeps run history and re-reads summary
+          artifacts — and on larger datasets it timed out rather than
+          answering. The run itself never depended on it (it was advisory
+          only), so nothing else changes by not showing it. Restore by
+          uncommenting this and the `loadEstimate()` call in
+          ForecastPipeline.jsx.
       <EstimateCard estimate={estimate} loading={estimateLoading} error={estimateError} />
+      */}
 
       <SectionContainer title="Run configuration">
         <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 lg:grid-cols-3">
