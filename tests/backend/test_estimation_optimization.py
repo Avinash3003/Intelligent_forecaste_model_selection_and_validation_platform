@@ -350,33 +350,39 @@ def test_serverless_excludes_tft_from_the_estimated_workload():
     assert estimate.workload.model_evaluations == 4
 
 
-def test_serverless_explains_why_a_model_was_excluded():
+def test_a_silently_skipped_model_is_not_charged_runtime():
+    """TFT is offered in the picker but never executed, so the estimate must
+    not bill for it — the same fiction the availability filter removes."""
     df = _frame(groups=2, months_per_group=72)
     estimate = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0)).estimate(
         df, _request(models=("tft", "arima"))
     )
-    excluded = [item for item in estimate.breakdown if item.label == "Excluded models"]
-    assert excluded and "tft" in excluded[0].detail
+    assert "tft" not in estimate.dataset.selected_models
+    assert "arima" in estimate.dataset.selected_models
 
 
-def test_excluding_tft_lowers_the_serverless_estimate():
+def test_dropping_tft_lowers_the_estimated_workload():
+    """TFT is the heaviest per-fit weight, so not running it must show up as
+    less estimated work than a selection that is actually executed."""
     df = _frame(groups=5, months_per_group=72)
-    request = _request(models=("tft", "lightgbm"))
+    svc = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0))
 
-    serverless = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0)).estimate(df, request)
-    local = _service(Settings(execution_mode="local"), _CountingHistory(n_runs=0)).estimate(df, request)
+    with_tft = svc.estimate(df, _request(models=("tft", "lightgbm")))
+    two_real = svc.estimate(df, _request(models=("arima", "lightgbm")))
 
-    # TFT is the heaviest per-fit weight in the table, so dropping it must
-    # move the estimate down even though serverless also adds startup time.
-    assert serverless.workload.model_evaluations < local.workload.model_evaluations
+    assert with_tft.workload.model_evaluations < two_real.workload.model_evaluations
 
 
-def test_local_execution_still_estimates_tft():
+def test_tft_is_skipped_in_local_execution_too():
+    """The skip is unconditional, not mode-dependent: a model that is offered
+    but never run must estimate the same way everywhere, or local and cloud
+    would quote different numbers for identical work."""
     df = _frame(groups=3, months_per_group=72)
     estimate = _service(Settings(execution_mode="local"), _CountingHistory(n_runs=0)).estimate(
         df, _request(models=("tft", "lightgbm"))
     )
-    assert "tft" in estimate.dataset.selected_models
+    assert "tft" not in estimate.dataset.selected_models
+    assert "lightgbm" in estimate.dataset.selected_models
 
 
 

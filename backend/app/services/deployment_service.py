@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.auth.models import Principal
+from app.config.model_availability import strip_silently_skipped
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.exceptions import UnknownRunError
 from app.orchestration.schemas import JobStatus, PipelineExecutionRequest, RunListing
@@ -11,10 +12,17 @@ from app.schemas.deployment import DeploymentRequest, DeploymentResponse, Deploy
 # estimation, which needs the same names without importing the executor
 # stack. Imported (not redefined) here because this module has always been
 # where callers and tests reach for PIPELINE_STAGES.
-from app.services.pipeline_stages import PIPELINE_STAGES, canonical_stage_name
+from app.services.pipeline_stages import (
+    PIPELINE_PHASES,
+    PIPELINE_STAGES,
+    STAGE_TO_PHASE,
+    canonical_stage_name,
+)
 from app.services.upload_service import UploadService
 
 _TERMINAL_STATUSES = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+
+_PIPELINE_STAGE_SET = frozenset(PIPELINE_STAGES)
 
 
 def build_execution_request(
@@ -30,7 +38,10 @@ def build_execution_request(
         dataset_path=str(dataset_path),
         dataset_name=request.dataset_name,
         forecast_configuration=request.metadata.model_dump(),
-        selected_models=request.selected_models or None,
+        # TFT is offered in the picker but never executed — see
+        # model_availability.SILENTLY_SKIPPED_MODELS. Stripped here, the one
+        # place every mode's request is built, so no runner has to know.
+        selected_models=strip_silently_skipped(request.selected_models) or None,
         fallback_model=request.fallback_model,
         horizon=request.horizon,
         derived_features=request.derived_features,
@@ -83,7 +94,17 @@ class DeploymentService:
 
     def _to_deployment_status(self, listing: RunListing) -> DeploymentStatus:
         stages = self._to_stage_statuses(listing)
-        completed_stages = sum(1 for stage in stages if stage.status == "Completed")
+
+        # Counted against the ENGINE's stages, not the seven display phases:
+        # the phases are a view for reading, and using them here would move
+        # progress in jumps of a seventh — and would sit wrongly against the
+        # seventeen-stage denominator below.
+        completed_stages = sum(
+            1
+            for stage in (listing.stages or [])
+            if canonical_stage_name(stage.get("name", "")) in _PIPELINE_STAGE_SET
+            and stage.get("status") == "Completed"
+        )
 
         # A completed run is 100% by definition. A still-running run's live
         # stage trail only contains stages *begun so far* — it grows one
@@ -124,8 +145,11 @@ class DeploymentService:
         """The stage trail, always covering the whole pipeline.
 
         The engine reports a stage only once it begins it, so a live run's
-        trail grows one entry at a time. Merging it onto PIPELINE_STAGES keeps
-        unreached stages visible as Pending instead of dropping them.
+        trail grows one entry at a time. Its seventeen stages are rolled up
+        into the seven display phases (pipeline_stages.PIPELINE_PHASES) —
+        unreached phases stay visible as Pending rather than being dropped,
+        and progress is still counted against the seventeen real stages so it
+        does not jump in sevenths.
         """
         reported = {
             canonical_stage_name(stage["name"]): stage
@@ -134,24 +158,52 @@ class DeploymentService:
         }
 
         # A terminal run with no trail at all has nothing to show — inventing
-        # seventeen Pending stages for a finished run would be a lie.
+        # seven Pending phases for a finished run would be a lie.
         if not reported and listing.job_status in _TERMINAL_STATUSES:
             return []
 
-        merged = [
-            StageStatus(
-                label=label,
-                status=(reported.get(label) or {}).get("status", "Pending"),
-                started_at=(reported.get(label) or {}).get("started_at"),
-                completed_at=(reported.get(label) or {}).get("completed_at"),
-            )
-            for label in PIPELINE_STAGES
-        ]
+        # Rolled up to the seven display phases. A phase spans from the
+        # first of its stages to start until the last to finish, so the
+        # elapsed time it reports is real wall clock — including the
+        # orchestration gaps BETWEEN its stages, which on the 11-task
+        # Serverless DAG are most of the run. Reporting each stage's own
+        # engine time instead made a 7-minute run read as ~54 seconds.
+        phases: list[StageStatus] = []
+        for label, stage_names in PIPELINE_PHASES:
+            members = [reported[n] for n in stage_names if n in reported]
 
-        # A stage the engine reported that this list does not know about
-        # (a renamed or newly added stage) is appended rather than dropped,
-        # so the trail can never silently lose real, recorded execution.
-        merged.extend(
+            if not members:
+                phases.append(StageStatus(label=label, status="Pending"))
+                continue
+
+            starts = sorted(m["started_at"] for m in members if m.get("started_at"))
+            ends = [m.get("completed_at") for m in members]
+            statuses = [m.get("status", "Pending") for m in members]
+
+            # A phase is only Completed once every stage in it is, and is
+            # Failed the moment any is — a half-finished phase must never
+            # render as done.
+            if "Failed" in statuses:
+                status = "Failed"
+            elif len(members) == len(stage_names) and all(s == "Completed" for s in statuses):
+                status = "Completed"
+            else:
+                status = "Running"
+
+            phases.append(
+                StageStatus(
+                    label=label,
+                    status=status,
+                    started_at=starts[0] if starts else None,
+                    completed_at=max(e for e in ends if e) if status == "Completed" and any(ends) else None,
+                )
+            )
+
+        # A stage the engine reported that no phase claims (a newly added or
+        # renamed stage) is appended as its own row rather than dropped, so
+        # the trail can never silently lose real, recorded execution — the
+        # same guarantee the flat seventeen-row trail gave.
+        phases.extend(
             StageStatus(
                 label=name,
                 status=stage.get("status", "Pending"),
@@ -159,9 +211,10 @@ class DeploymentService:
                 completed_at=stage.get("completed_at"),
             )
             for name, stage in reported.items()
-            if name not in set(PIPELINE_STAGES)
+            if name not in STAGE_TO_PHASE
         )
-        return merged
+
+        return phases
 
 
 # Human-readable run duration, measured live while a run is still going

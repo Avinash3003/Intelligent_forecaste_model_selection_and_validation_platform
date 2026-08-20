@@ -15,6 +15,7 @@ from pathlib import Path
 
 from app.orchestration.schemas import JobStatus, RunListing
 from app.services.deployment_service import PIPELINE_STAGES, DeploymentService
+from app.services.pipeline_stages import PHASE_LABELS
 
 
 def _listing(stages: list[dict], status: JobStatus = JobStatus.RUNNING) -> RunListing:
@@ -50,16 +51,19 @@ def test_unreached_stages_are_reported_as_pending_not_omitted():
 
     stages = _service()._to_stage_statuses(_listing(reported))
 
-    # The whole pipeline is described, not just the part reached so far.
-    assert [stage.label for stage in stages] == PIPELINE_STAGES
+    # The whole pipeline is described as seven phases, not just the part
+    # reached so far.
+    assert [stage.label for stage in stages] == PHASE_LABELS
 
     by_label = {stage.label: stage for stage in stages}
-    assert by_label["Load Dataset"].status == "Completed"
-    assert by_label["Load Dataset"].completed_at == "t1"
-    assert by_label["Assess Quality"].status == "Running"
-    # Everything past the running stage is explicitly Pending.
+    # Load & Prepare owns six stages; three are reported and one is still
+    # Running, so the phase is Running — never Completed on a partial.
+    assert by_label["Load & Prepare"].status == "Running"
+    assert by_label["Load & Prepare"].started_at == "t0"
+    assert by_label["Load & Prepare"].completed_at is None
+    # Everything past it is explicitly Pending.
     assert by_label["Train Models"].status == "Pending"
-    assert by_label["MLflow Tracking"].status == "Pending"
+    assert by_label["Publish Results"].status == "Pending"
 
 
 def test_progress_is_measured_against_the_whole_pipeline():
@@ -69,10 +73,11 @@ def test_progress_is_measured_against_the_whole_pipeline():
 
     status = _service()._to_deployment_status(_listing(reported))
 
-    # 6 of 17 completed — not 6 of the 6 reported, and not 6 of a
-    # short-by-three canonical list.
+    # Progress still counts the ENGINE's seventeen stages, so it moves
+    # smoothly rather than in jumps of a seventh: 6 of 17, not 1 of 7.
     assert status.progress == round(6 / len(PIPELINE_STAGES) * 100)
-    assert status.current_stage == PIPELINE_STAGES[5]
+    # The trail itself reads in phases, so the current step is a phase name.
+    assert status.current_stage == "Load & Prepare"
 
 
 def test_a_finished_run_with_no_trail_reports_no_stages():
@@ -115,8 +120,8 @@ def test_stage_names_stay_short_enough_to_read_in_the_trail():
 
 def test_a_run_recorded_under_the_old_stage_names_still_renders():
     """Runs completed before the vocabulary was unified are still on disk.
-    Their trails must map onto the current skeleton, not pile up as
-    unknown extras below seventeen Pending stages."""
+    Their trails must map onto the current phases, not pile up as unknown
+    extras below seven Pending ones."""
     reported = [
         {"name": "Load Dataset", "status": "Completed"},
         {"name": "Assess Data Quality", "status": "Completed"},
@@ -126,11 +131,17 @@ def test_a_run_recorded_under_the_old_stage_names_still_renders():
 
     stages = _service()._to_stage_statuses(_listing(reported, status=JobStatus.COMPLETED))
 
-    assert [stage.label for stage in stages] == PIPELINE_STAGES
+    assert [stage.label for stage in stages] == PHASE_LABELS
     by_label = {stage.label: stage for stage in stages}
-    assert by_label["Assess Quality"].status == "Completed"
+    # The legacy names resolved into their phases rather than appearing as
+    # unknown extras: Explain Models is a whole phase and reported complete,
+    # while Load & Prepare saw only 2 of its 6 stages so it is not.
     assert by_label["Explain Models"].status == "Completed"
-    assert by_label["MLflow Tracking"].status == "Completed"
+    assert by_label["Load & Prepare"].status == "Running"
+    # No legacy name leaked through as its own row.
+    assert "Assess Data Quality" not in by_label
+    assert "Generate Explainability (SHAP)" not in by_label
+    assert "Track to MLflow" not in by_label
 
 
 def test_an_unrecognised_reported_stage_is_kept_not_dropped():
@@ -141,5 +152,5 @@ def test_an_unrecognised_reported_stage_is_kept_not_dropped():
 
     labels = [stage.label for stage in _service()._to_stage_statuses(_listing(reported))]
 
-    assert labels[: len(PIPELINE_STAGES)] == PIPELINE_STAGES
+    assert labels[: len(PHASE_LABELS)] == PHASE_LABELS
     assert "Some New Stage" in labels

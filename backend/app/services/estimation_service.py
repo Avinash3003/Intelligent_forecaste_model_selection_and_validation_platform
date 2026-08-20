@@ -22,7 +22,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.config.model_availability import filter_available, unavailable_models
+from app.config.model_availability import (
+    filter_available,
+    strip_silently_skipped,
+    unavailable_models,
+)
 from app.config.settings import Settings, get_settings
 from app.orchestration.mlflow_history import MLflowHistoryStore
 from app.schemas.estimation import (
@@ -96,13 +100,24 @@ _HEURISTIC_SECONDS_PER_LLM_CALL = 2.5
 _FIXED_OVERHEAD_SECONDS = 20.0
 
 # Cloud execution waits for compute before any Python of ours runs; local
-# execution has no such wait. Serverless acquires compute in seconds, not
-# minutes — charging it a 5-minute classic-cluster figure added ~5 min of
-# pure fiction to every cloud estimate, which is most of why estimates read
-# far longer than the run actually took. Superseded by
-# `_calibrate_startup_seconds()` as soon as this deployment has real
-# completed runs to measure instead.
-_SERVERLESS_STARTUP_SECONDS = 45.0
+# execution has no such wait.
+#
+# Serverless is not one wait but ELEVEN. The pipeline is deployed as an
+# 11-task DAG (forecast_job_serverless.yml), and every task acquires its own
+# compute and re-loads the checkpointed context, so the run pays that cost
+# once per task rather than once per run. Charging a single startup here is
+# what made a fresh deployment quote "1-3 min" for a run that took 6-7:
+# measured against a real run, the engine's own stage time totalled ~54s of
+# a ~7 min wall clock, leaving ~33s per task of orchestration the estimate
+# was not accounting for at all.
+#
+# Both figures are fallbacks only. `_calibrate_startup_seconds()` measures
+# wall-clock minus engine time from real history — which already captures
+# every task's startup — and takes over as soon as this deployment has
+# completed runs to learn from.
+_SERVERLESS_TASK_STARTUP_SECONDS = 33.0
+_SERVERLESS_TASK_COUNT = 11
+_SERVERLESS_STARTUP_SECONDS = _SERVERLESS_TASK_STARTUP_SECONDS * _SERVERLESS_TASK_COUNT
 
 # Startup is only calibrated from runs whose measured overhead is credible:
 # a negative or absurd gap means the two clocks disagree, not that startup
@@ -343,7 +358,12 @@ class EstimationService:
         Unavailable is exactly the fiction it removes.
         """
         selected = [model.strip().lower() for model in request.selected_models if model.strip()]
-        return filter_available(selected or sorted(_MODEL_MIN_OBSERVATIONS), backend)
+        available = filter_available(selected or sorted(_MODEL_MIN_OBSERVATIONS), backend)
+        # Also drop models that are offered but never executed (TFT — see
+        # model_availability.SILENTLY_SKIPPED_MODELS). Charging runtime for
+        # work that will not happen is the same fiction the availability
+        # filter above exists to remove.
+        return strip_silently_skipped(available) or []
 
     def _excluded_models(self, request: EstimationRequest, backend: str) -> list[str]:
         """Models the user asked for that this execution mode cannot run."""

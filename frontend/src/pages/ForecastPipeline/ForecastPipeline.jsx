@@ -362,10 +362,10 @@ export default function ForecastPipeline() {
       setErrors(configErrors)
       if (Object.keys(configErrors).length > 0) return
 
-      // The estimate is fetched on entry to step 5 rather than on a button
-      // press: it is the reason that step exists, so making the user ask
-      // for it would be an extra click before the only new information.
-      loadEstimate()
+      // Estimate temporarily disabled — see StepReviewDeploy.jsx. The call
+      // is what made entering this step slow (and, on larger datasets, fail
+      // outright), so it is skipped rather than fired and ignored.
+      // loadEstimate()
       advanceTo(5)
       return
     }

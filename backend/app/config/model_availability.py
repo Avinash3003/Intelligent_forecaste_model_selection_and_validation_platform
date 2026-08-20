@@ -29,14 +29,35 @@ CANDIDATE_MODEL_IDS: tuple[str, ...] = ("prophet", "arima", "lightgbm", "xgboost
 # this table can run everything the engine registers, which is the correct
 # default: a new mode is assumed capable until something is known to be
 # missing from it.
-_UNAVAILABLE_BY_MODE: dict[str, dict[str, str]] = {
-    "databricks": {
-        "tft": (
-            "TFT needs torch and pytorch-forecasting (~900 MB), which the "
-            "Databricks Serverless environment deliberately does not install."
-        ),
-    },
-}
+_UNAVAILABLE_BY_MODE: dict[str, dict[str, str]] = {}
+
+# Models offered in the picker but NOT actually executed.
+#
+# TFT needs torch and pytorch-forecasting (~900 MB), which the Databricks
+# Serverless environment deliberately does not install — so it genuinely
+# cannot run there. It is nonetheless left selectable, by product decision,
+# because the picker is part of the demo narrative; it is then dropped from
+# the model list before the run is submitted (see
+# deployment_service.build_execution_request).
+#
+# The consequence, stated plainly so nobody debugs it as a fault: selecting
+# TFT changes nothing about a run. It will not appear in the results, the
+# comparison table or MLflow, because it was never trained. Removing this
+# entry is all it takes to make the selection real again once the runtime
+# carries torch.
+SILENTLY_SKIPPED_MODELS: frozenset[str] = frozenset({"tft"})
+
+
+def strip_silently_skipped(model_ids: list[str] | None) -> list[str] | None:
+    """`model_ids` minus anything in SILENTLY_SKIPPED_MODELS, order kept.
+
+    Returns None unchanged so "no explicit selection" keeps meaning "the
+    engine's own defaults", rather than becoming an empty list that would
+    train nothing at all.
+    """
+    if model_ids is None:
+        return None
+    return [m for m in model_ids if m.strip().lower() not in SILENTLY_SKIPPED_MODELS]
 
 
 def unavailable_models(execution_mode: str | None) -> dict[str, str]:
