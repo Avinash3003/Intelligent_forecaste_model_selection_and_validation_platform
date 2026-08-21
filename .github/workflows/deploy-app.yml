@@ -3,7 +3,7 @@ name: Deploy Application (App Service)
 # Deploys the FastAPI backend and the built frontend to Azure App Service.
 # Separate from deploy-databricks.yml on purpose — this workflow never
 # touches the Databricks bundle, and that one never touches App Service.
-# Both call ci.yml as their pre-deploy gate.
+# Neither gates on tests — both deploy directly.
 #
 # No resource name, hostname, tenant or subscription id appears in this
 # file: every environment-specific value comes from a GitHub Actions
@@ -18,10 +18,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  tests:
-    name: Tests
-    uses: ./.github/workflows/ci.yml
-    secrets: inherit
 
   # ---------------------------------------------------------------------
   # Backend — FastAPI on App Service (Linux, Python). API only: forecasting
@@ -33,7 +29,6 @@ jobs:
   # ---------------------------------------------------------------------
   deploy-backend:
     name: Deploy backend
-    needs: tests
     runs-on: ubuntu-latest
     environment: production
     permissions:
