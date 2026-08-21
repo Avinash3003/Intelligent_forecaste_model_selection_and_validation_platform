@@ -56,6 +56,20 @@ _STATUS_MAP = {
 
 DEFAULT_HISTORY_LIMIT = 200
 
+# `max_results` is a PAGE SIZE, not a total, and a Databricks-hosted
+# tracking server picks its own page size regardless of what is asked for —
+# observed returning 1 run on the first page and 2 on the second for a
+# three-run experiment. A single `search_runs` call therefore returns an
+# arbitrary prefix of the history, so every caller must follow `.token`
+# until it is empty. Not following it is invisible on a file-backed store
+# (which answers in one page) and silently hides every older run in cloud
+# mode — the whole dataset dropdown collapses to the most recent run.
+#
+# The page loop is bounded as well as token-driven: a server that kept
+# handing back a token would otherwise spin forever. 200 pages is far more
+# than DEFAULT_HISTORY_LIMIT can consume even at one run per page.
+_MAX_SEARCH_PAGES = 200
+
 # How long "this run has no summary artifact" is remembered. A *positive*
 # summary is cached forever — a finished run's artifact never changes — but
 # a negative one must expire: a run can legitimately have no summary yet
@@ -100,9 +114,10 @@ class MLflowHistoryStore:
             experiment = client.get_experiment_by_name(self._experiment_name)
             if experiment is None:
                 return []
-            runs = client.search_runs(
-                [experiment.experiment_id],
-                max_results=limit,
+            runs = self._search_runs(
+                client,
+                experiment.experiment_id,
+                limit=limit,
                 order_by=["attributes.start_time DESC"],
             )
         except Exception as exc:  # noqa: BLE001 - history is best-effort
@@ -198,15 +213,60 @@ class MLflowHistoryStore:
             experiment = client.get_experiment_by_name(self._experiment_name)
             if experiment is None:
                 return None
-            runs = client.search_runs(
-                [experiment.experiment_id],
+            # Paged for the same reason list_runs is, and it matters more
+            # here: a miss is not "one run missing from a table" but "this
+            # run has no data", which is what the Results page renders when
+            # the summary cannot be found. A filtered search still answers
+            # in pages, so an empty first page carrying a token is a match
+            # not yet reached — not an absent run.
+            runs = self._search_runs(
+                client,
+                experiment.experiment_id,
+                limit=1,
                 filter_string=f"tags.{RUN_ID_TAG} = '{run_id}'",
-                max_results=1,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not look up run '%s' in MLflow: %s", run_id, exc)
             return None
         return runs[0] if runs else None
+
+    @staticmethod
+    def _search_runs(
+        client: Any,
+        experiment_id: str,
+        *,
+        limit: int,
+        filter_string: str = "",
+        order_by: list[str] | None = None,
+    ) -> list[Any]:
+        """`client.search_runs`, following pagination to `limit` runs.
+
+        See `_MAX_SEARCH_PAGES` for why a single call is not enough against
+        a Databricks-hosted tracking server. Ordering is preserved: pages
+        arrive in the server's own order and are concatenated in sequence.
+        """
+        collected: list[Any] = []
+        token: str | None = None
+
+        for _ in range(_MAX_SEARCH_PAGES):
+            page = client.search_runs(
+                [experiment_id],
+                filter_string=filter_string,
+                max_results=limit - len(collected),
+                order_by=order_by,
+                page_token=token,
+            )
+            collected.extend(page)
+            if len(collected) >= limit:
+                break
+            # A PagedList carries `.token`; a plain list (a stub, or an SDK
+            # that does not page) has none, which ends the loop after one
+            # call exactly as the old single-call behaviour did.
+            token = getattr(page, "token", None)
+            if not token:
+                break
+
+        return collected[:limit]
 
     def _to_listing(self, run: Any) -> RunListing | None:
         tags = run.data.tags or {}
