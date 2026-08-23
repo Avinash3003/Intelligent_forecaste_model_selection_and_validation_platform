@@ -1,11 +1,8 @@
 name: CI
 
-# One fast smoke check. The full backend and forecast-engine suites were
-# removed deliberately; this runs the single remaining test so a broken
-# import still shows up on a PR, without adding minutes to a deploy.
-#
-# Still exposed as `workflow_call` so the deploy workflows *can* call it,
-# but neither does today — both deploy directly.
+# Tests and build validation — pull requests and pushes to main. Also
+# `workflow_call`, so deploy-databricks.yml can run these exact checks as
+# its own pre-deploy gate instead of duplicating any of them.
 on:
   pull_request:
     branches: [main]
@@ -13,13 +10,21 @@ on:
     branches: [main]
   workflow_call: {}
 
+# A newer push/PR update supersedes an in-flight CI run for the same ref —
+# no reason to keep testing a commit that's already been replaced.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  smoke:
-    name: Smoke test
+  # ---------------------------------------------------------------------
+  # 1. Backend tests — no forecast_engine import, no Databricks/Azure
+  # credentials. LocalRunner/DatabricksRunner both treat forecast_engine as
+  # an external process, never an in-process import, so the backend's own
+  # test suite needs only its own dependencies.
+  # ---------------------------------------------------------------------
+  backend-tests:
+    name: Backend tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,5 +36,197 @@ jobs:
       - name: Install backend dependencies
         run: pip install -r backend/requirements.txt pytest
 
-      - name: Run smoke test
-        run: pytest tests -q
+      - name: Run backend tests
+        run: pytest tests/backend -q
+
+  # ---------------------------------------------------------------------
+  # 2. Forecast-engine tests — installs the package via pyproject.toml's
+  # `all` extra (models, explainability, llm, tracking). TFT/torch is
+  # deliberately excluded from `all` already — no test in tests/engine/
+  # exercises it, so CI stays fast without losing coverage.
+  # ---------------------------------------------------------------------
+  engine-tests:
+    name: Forecast-engine tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install forecast_engine (all extras except TFT)
+        run: pip install -e ".[all]" pytest
+
+      - name: Run forecast-engine tests
+        run: pytest tests/engine -q
+
+  # ---------------------------------------------------------------------
+  # 3. Frontend build
+  # ---------------------------------------------------------------------
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+  # ---------------------------------------------------------------------
+  # 4. Python/package validation — builds the identical wheel the
+  # Databricks bundle builds (databricks/databricks.yml's own artifact
+  # command), then sanity-imports it from a clean environment. Not a
+  # second packaging mechanism: same one-line pip command DAB itself runs.
+  # ---------------------------------------------------------------------
+  package-validate:
+    name: Python package validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build forecast_engine wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - name: Install the built wheel into a clean environment and import it
+        run: |
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install dist/*.whl
+          /tmp/wheel-check/bin/python -c "import forecast_engine; print(forecast_engine.__name__, 'imports cleanly')"
+
+  # ---------------------------------------------------------------------
+  # 5. Databricks bundle validation — schema/config only, never deploys or
+  # runs anything. Targets `dev`, never `prod`: this is a cheap structural
+  # check on every PR/push, not a production gate (deploy-databricks.yml
+  # runs its own `-t prod` validate immediately before its own deploy).
+  #
+  # Skips cleanly (not a failure) unless EVERY input it needs is configured
+  # — a fork PR (where GitHub never exposes secrets at all), or a repository
+  # that simply has not wired these up yet. Checking all three rather than
+  # just the host matters: the bundle's `cicd_service_principal_id`
+  # deliberately has no default, so a partial configuration fails validation
+  # for a reason that has nothing to do with the change under test. Every
+  # other job above still gates the PR; only this one ever touches a live
+  # workspace, and only optionally.
+  # ---------------------------------------------------------------------
+  databricks-bundle-validate:
+    name: Databricks bundle validation (dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Values are read from the environment and only ever measured or
+      # shape-checked — never printed. A secret that is present but
+      # malformed (a stray newline from a paste, a truncated value, an
+      # image reference carrying a tag) otherwise surfaces much later as an
+      # opaque "cannot configure default credentials" from the CLI, which
+      # says nothing about which value is at fault.
+      - name: Check Databricks configuration is complete
+        id: creds
+        env:
+          DBX_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DBX_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DBX_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+        run: |
+          # Trim surrounding whitespace/newlines before judging anything.
+          host=$(printf '%s' "$DBX_HOST" | tr -d '[:space:]')
+          cid=$(printf '%s' "$DBX_CLIENT_ID" | tr -d '[:space:]')
+          csec=$(printf '%s' "$DBX_CLIENT_SECRET" | tr -d '[:space:]')
+
+          if [ -z "$host" ] || [ -z "$cid" ] || [ -z "$csec" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          problems=""
+          case "$host" in
+            https://*.azuredatabricks.net) ;;
+            *) problems="$problems\n  - DATABRICKS_HOST must look like https://adb-<id>.<n>.azuredatabricks.net (no trailing slash or path)";;
+          esac
+          [ ${#cid} -ne 36 ] && problems="$problems\n  - DATABRICKS_CLIENT_ID should be a 36-character application id (got ${#cid} characters)"
+          [ ${#csec} -lt 20 ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET looks truncated (only ${#csec} characters)"
+          # A pasted value that differs from its trimmed form carries stray
+          # whitespace, which the CLI takes literally.
+          [ "$DBX_HOST" != "$host" ] && problems="$problems\n  - DATABRICKS_HOST has leading/trailing whitespace"
+          [ "$DBX_CLIENT_ID" != "$cid" ] && problems="$problems\n  - DATABRICKS_CLIENT_ID has leading/trailing whitespace"
+          [ "$DBX_CLIENT_SECRET" != "$csec" ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET has leading/trailing whitespace"
+
+          if [ -n "$problems" ]; then
+            printf 'Databricks configuration is present but malformed:%b\n' "$problems"
+            echo "::error title=Databricks secrets are malformed::$(printf '%b' "$problems" | tr '\n' ' ')"
+            exit 1
+          fi
+
+          # Identity fingerprints, so a configured value can be compared with
+          # the one known to work without either being revealed. A truncated
+          # SHA-256 of a high-entropy credential is not reversible, and for
+          # the client secret it is directly comparable to the `secret_hash`
+          # Databricks itself records for that service principal.
+          fp() { printf '%s' "$1" | sha256sum | cut -c1-8; }
+          echo "::notice title=Databricks credential fingerprints::HOST len=${#host} fp=$(fp "$host") | CLIENT_ID len=${#cid} fp=$(fp "$cid") | CLIENT_SECRET len=${#csec} fp=$(fp "$csec")"
+
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.creds.outputs.available == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Build forecast_engine wheel
+        if: steps.creds.outputs.available == 'true'
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+
+      - uses: databricks/setup-cli@v1.11.0
+        if: steps.creds.outputs.available == 'true'
+        with:
+          # The action tag does not pin the CLI; `version` defaults to
+          # latest. Pinned to the version the bundle is validated against.
+          version: 1.11.0
+
+      - name: databricks bundle validate -t dev
+        if: steps.creds.outputs.available == 'true'
+        working-directory: databricks
+        env:
+          # The service principal authenticates with a Databricks OAuth
+          # secret, so the provider is named rather than left to the
+          # CLI's default resolution, which varies between versions.
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+        # On failure the CLI's own message is re-emitted as an annotation, so
+        # the reason shows on the run summary instead of only inside the full
+        # log. GitHub masks registered secret values in annotations exactly as
+        # it does in logs, so nothing sensitive is surfaced by doing this.
+        run: |
+          set +e
+          output=$(databricks bundle validate -t dev 2>&1)
+          code=$?
+          echo "$output"
+          if [ "$code" -ne 0 ]; then
+            echo "::error title=bundle validate -t dev failed::$(echo "$output" | tr '\n' ' ' | tail -c 900)"
+          fi
+          exit "$code"
+
+      - name: Skipped — Databricks configuration incomplete
+        if: steps.creds.outputs.available != 'true'
+        run: |
+          echo "Skipping bundle validation: this repository does not have all of"
+          echo "DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET"
+          echo "configured as Actions secrets."
