@@ -21,9 +21,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Deploys directly — no test gate. ci.yml runs a smoke test on push/PR
-  # but is deliberately NOT a dependency here, so a deploy is never held up
-  # by it.
+  # Stage 1: tests — the identical CI checks (backend, forecast_engine,
+  # frontend build, package validation, dev bundle validation), reused via
+  # workflow_call rather than duplicated. A deploy never proceeds on code
+  # that doesn't pass what every PR is already held to.
+  tests:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   # Stages 3-5: build the wheel, validate the PRODUCTION target
   # specifically, then deploy it. Every Databricks-facing step in this job
@@ -32,6 +37,7 @@ jobs:
   # `-t`.
   deploy-databricks:
     name: Build, validate and deploy (prod)
+    needs: tests
     runs-on: ubuntu-latest
     # A GitHub Environment named "production" — lets this deployment be
     # gated with required reviewers / a wait timer in repo settings without
@@ -48,7 +54,12 @@ jobs:
           python-version: "3.12"
 
       # Stage 2: build forecast_engine wheel. The same one-line command
-    
+      # databricks.yml's own `artifacts.forecast_engine_wheel.build` runs —
+      # built explicitly here so `bundle validate` (which does not invoke
+      # the artifact build step itself) has a wheel to validate against.
+      # `bundle deploy` below rebuilds this
+      # same wheel again itself; harmless, and identical to what running
+      # `databricks bundle deploy` locally already does.
       - name: Build forecast_engine wheel
         run: python -m pip wheel . --no-deps --wheel-dir dist
 
