@@ -6,8 +6,11 @@ here rather than requiring an editable install of each.
 """
 
 import os
+import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,3 +33,37 @@ os.environ.setdefault("FORECAST_ENGINE_ROOT", str(ROOT / "forecast_engine"))
 os.environ.setdefault("FORECAST_ENGINE_PYTHON", sys.executable)
 # Never write staged uploads into the working tree during a test run.
 os.environ.setdefault("UPLOAD_DIR", str(ROOT / ".pytest-uploads"))
+
+
+@pytest.fixture(scope="session")
+def _migrated_mlflow_db(tmp_path_factory) -> Path:
+    """One migrated MLflow SQLite store, built once for the whole session.
+
+    MLflow runs its Alembic migrations the first time it connects to a new
+    SQLite file — measured at ~4s, and paid again for every new file, since
+    nothing about it is cached across databases. A suite that gives each
+    test a fresh store therefore spends most of its runtime migrating
+    schemas rather than exercising code.
+
+    Built once here and copied per test by `mlflow_db` below. Importing
+    mlflow lazily keeps a suite that never touches it free of the cost.
+    """
+    path = tmp_path_factory.mktemp("mlflow-template") / "mlflow.db"
+    from mlflow.tracking import MlflowClient
+
+    # Any store read initializes the schema; this is the cheapest one.
+    MlflowClient(tracking_uri=f"sqlite:///{path}").search_experiments()
+    return path
+
+
+@pytest.fixture
+def mlflow_db(_migrated_mlflow_db, tmp_path) -> Path:
+    """A per-test MLflow SQLite store that is already migrated.
+
+    Isolation is identical to creating one from scratch — every test still
+    gets its own file, under its own `tmp_path`, and may write to it
+    freely — but the migrations are copied rather than re-run.
+    """
+    path = tmp_path / "mlflow.db"
+    shutil.copyfile(_migrated_mlflow_db, path)
+    return path

@@ -130,8 +130,7 @@ this cannot ship as an unauthenticated deployment.
 ### Tests
 
 ```bash
-backend/.venv/bin/python -m pytest tests/backend -q          # auth, RBAC, estimation, runner
-forecast_engine/.venv/bin/python -m pytest tests/engine -q   # engine CLI contract
+backend/.venv/bin/python -m pytest tests -q                  # smoke: app imports and serves
 ```
 
 Or drive the engine directly, with no web layer:

@@ -43,14 +43,14 @@ from test_databricks_runner import _FakeWorkspace, _request as _dbx_request  # n
 
 
 @pytest.fixture
-def local_settings(tmp_path):
+def local_settings(tmp_path, mlflow_db):
     engine_root = tmp_path / "forecast_engine"
     (engine_root / ".venv" / "bin").mkdir(parents=True)
     (engine_root / ".venv" / "bin" / "python").write_text("#!/bin/sh\n")
     return Settings(
         forecast_engine_root=str(engine_root),
         upload_dir=str(tmp_path / "uploads"),
-        mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
+        mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
     )
 
 
@@ -159,14 +159,14 @@ def test_local_started_by_and_cancelled_by_round_trip_through_run_listing(local_
 
 
 @pytest.fixture
-def dbx_settings(tmp_path):
+def dbx_settings(tmp_path, mlflow_db):
     return Settings(
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="test-token",
         databricks_volumes_root="/Volumes/forecastiq/forecasting/forecast_files",
         upload_dir=str(tmp_path / "uploads"),
-        mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
+        mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
     )
 
 
@@ -278,9 +278,9 @@ def test_databricks_started_by_travels_through_the_job_configuration(dbx_setting
 
 
 @pytest.fixture
-def mlflow_settings(tmp_path):
+def mlflow_settings(tmp_path, mlflow_db):
     return Settings(
-        mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
+        mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
         mlflow_experiment_name="/forecast-engine-test",
         upload_dir=str(tmp_path / "uploads"),
     )

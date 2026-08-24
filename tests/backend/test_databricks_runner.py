@@ -101,14 +101,14 @@ class _FakeWorkspace:
 
 
 @pytest.fixture
-def settings(tmp_path):
+def settings(tmp_path, mlflow_db):
     return Settings(
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="test-token",
         databricks_volumes_root="/Volumes/forecastiq/forecasting/forecast_files",
         upload_dir=str(tmp_path / "uploads"),
-        mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
+        mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
     )
 
 
