@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from app.config.settings import Settings
 from app.orchestration.exceptions import ExecutionError, RunNotReadyError, UnknownRunError
@@ -105,6 +109,28 @@ def _engine_parameters(parameters: dict[str, str]) -> list[str]:
         "--live-status-out", parameters["live_status_out"],
         "--parallel-keys",
     ]
+
+
+# Matches the "-cpu-ml" or "-ml" infix an ML-runtime preset's version
+# string carries, e.g. "15.4.x-cpu-ml-scala2.12" -> "15.4.x-scala2.12".
+# Verified against this project's own live cluster: the same DBR line
+# (15.4) is offered as both "15.4.x-cpu-ml-scala2.12" (an ML-runtime
+# preset) and "15.4.x-scala2.12" (this project's real all-purpose cluster,
+# confirmed running with use_ml_runtime=True set independently of the
+# string) — so stripping the infix is a mechanical, verified transform, not
+# a guess at Databricks' naming scheme.
+_ML_RUNTIME_INFIX_RE = re.compile(r"-(?:cpu-)?ml(?=-|$)")
+
+
+def _standard_runtime_version(runtime_key: str) -> str:
+    """The Standard (non-ML) equivalent of an ML-runtime version string.
+
+    A Docker Container Services image supplies its own Python/dependency
+    stack in place of the ML runtime's — pairing the two is
+    self-contradictory, so a cluster carrying `docker_image` must use the
+    plain Standard runtime line underneath it instead.
+    """
+    return _ML_RUNTIME_INFIX_RE.sub("", runtime_key)
 
 
 def map_run_state(life_cycle_state: str | None, result_state: str | None) -> JobStatus:
@@ -662,6 +688,18 @@ class DatabricksRunner(PipelineRunner):
     # never comes from anywhere but settings, so there is nothing here for a
     # caller to override with its own value — the same guarantee
     # `_require_compute` already gives the cluster id and node type.
+    #
+    # Attaching the image alone is not sufficient. `spark_version` still
+    # comes from an ML-runtime preset (compute_presets.RUNTIME_PRESETS), and
+    # pairing an ML runtime with a Docker image is self-contradictory — the
+    # image supplies the Python/dependency stack specifically INSTEAD OF the
+    # ML runtime's own, and `use_ml_runtime` left unset resolves True from
+    # that version string. So when DCS is on, this also downgrades the
+    # version to its Standard (non-ML) equivalent and turns the flag off
+    # explicitly — the same transformation observed on this project's own
+    # cluster, whose real, live spark_version is "15.4.x-scala2.12" with
+    # use_ml_runtime True set independently, proving the two are separate
+    # controls rather than one being derived from the other.
     def _attach_docker_image(self, cluster: Any, compute_sdk: Any) -> None:
         url = (self._settings.databricks_docker_image_url or "").strip()
         if not url:
@@ -675,6 +713,21 @@ class DatabricksRunner(PipelineRunner):
             else None
         )
         cluster.docker_image = compute_sdk.DockerImage(url=url, basic_auth=basic_auth)
+        cluster.spark_version = _standard_runtime_version(cluster.spark_version)
+        cluster.use_ml_runtime = False
+        # A job-triggered SINGLE_USER cluster's run-as identity: this backend's
+        # own service principal, the same one every other Databricks call in
+        # this process authenticates as.
+        owner = self._current_user_name()
+        if owner:
+            cluster.single_user_name = owner
+
+    def _current_user_name(self) -> str | None:
+        try:
+            return self._workspace.current_user.me().user_name
+        except Exception as exc:  # noqa: BLE001 - the cluster can still be attempted
+            logger.warning("Could not resolve current user for cluster single_user_name: %s", exc)
+            return None
 
     def _engine_libraries(self, compute_sdk: Any) -> list[Any]:
         wheel = (self._settings.databricks_engine_wheel_path or "").strip()

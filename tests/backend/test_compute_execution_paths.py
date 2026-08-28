@@ -46,10 +46,16 @@ class _FakeJobs:
         )
 
 
+class _FakeCurrentUser:
+    def me(self):
+        return SimpleNamespace(user_name="sp-forecastiq-cicd")
+
+
 class _FakeWorkspace:
     def __init__(self) -> None:
         self.files = _FakeFiles()
         self.jobs = _FakeJobs()
+        self.current_user = _FakeCurrentUser()
 
 
 @pytest.fixture
@@ -187,6 +193,51 @@ def test_new_compute_attaches_the_configured_docker_image(settings, dataset):
     # Every other field is untouched -- DCS is additive, not a rewrite.
     assert cluster.node_type_id == "Standard_E8ads_v7"
     assert cluster.num_workers == 3
+
+
+def test_dcs_downgrades_the_runtime_to_its_standard_non_ml_equivalent(settings, dataset):
+    """Pairing an ML runtime with a Docker image is self-contradictory: the
+    image supplies the Python/dependency stack INSTEAD OF the ML runtime's
+    own. docker_image alone is not enough -- the version string and the
+    use_ml_runtime flag must both say so too."""
+    dcs_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+    )
+    workspace = _FakeWorkspace()
+    DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+    cluster = _submitted_task(workspace).new_cluster
+
+    # NEW_COMPUTE selects "16.4.x-cpu-ml-scala2.12" -- an ML runtime preset.
+    assert cluster.spark_version == "16.4.x-scala2.12"
+    assert cluster.use_ml_runtime is False
+
+
+def test_dcs_sets_the_single_user_name_for_the_job_triggered_cluster(settings, dataset):
+    """A SINGLE_USER cluster this backend creates for one run should be
+    scoped to the identity actually running it -- the same service
+    principal every other Databricks call in this process authenticates
+    as, resolved the same way compute_service's own probe already does."""
+    dcs_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+    )
+    workspace = _FakeWorkspace()
+    DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.single_user_name == "sp-forecastiq-cicd"
+
+
+def test_without_dcs_the_runtime_and_ml_flag_are_left_alone(settings, dataset):
+    """The fix only applies when a Docker image is actually attached --
+    the plain ML-runtime path (DCS off) must render byte-identical to
+    before this change."""
+    workspace = _FakeWorkspace()
+    DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.spark_version == "16.4.x-cpu-ml-scala2.12"
+    assert cluster.use_ml_runtime is None
+    assert cluster.single_user_name is None
 
 
 def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):

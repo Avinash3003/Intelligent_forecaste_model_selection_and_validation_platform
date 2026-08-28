@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -313,7 +314,10 @@ def test_capping_threads_does_not_disturb_the_pythonpath_entry(monkeypatch):
 
     env = _worker_runtime_env()["env_vars"]
 
-    assert env["PYTHONPATH"].endswith("tech_demo") or "tech_demo" in env["PYTHONPATH"]
+    # The engine's own parent directory -- not a specific checkout-folder
+    # name, which differs between a developer's clone and a CI runner.
+    engine_parent = str(Path(__file__).resolve().parents[2])
+    assert env["PYTHONPATH"] == engine_parent
     assert env["OMP_NUM_THREADS"] == "1"
 
 

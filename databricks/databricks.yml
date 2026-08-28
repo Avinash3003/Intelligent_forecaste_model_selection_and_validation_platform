@@ -18,9 +18,18 @@ variables:
   existing_cluster_id:
     description: >-
       Cluster id of an ALREADY EXISTING all-purpose cluster for the key-parallel
-      job. Nothing here ever creates a cluster. Empty by default so a prod
-      deploy is unaffected; the dev target's job is the only consumer.
-    default: ""
+      job. Nothing here ever creates a cluster.
+      Override with --var or BUNDLE_VAR_existing_cluster_id before actually
+      running this dev-only job. The default below is a deliberately
+      invalid placeholder, not a real cluster: `bundle validate` requires
+      one of job_cluster_key/environment_key/existing_cluster_id/new_cluster
+      to be genuinely non-empty (an empty string fails validation as
+      "missing"), so this can't default to blank the way every other
+      optional variable here does — it still fails loudly and clearly
+      ("cluster does not exist") if actually deployed and run unoverridden.
+      Never reaches prod: this variable has no consumer outside the dev
+      target's job resource below.
+    default: "REPLACE_WITH_REAL_CLUSTER_ID"
 
 
   catalog:
