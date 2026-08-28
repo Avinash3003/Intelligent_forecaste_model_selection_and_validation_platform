@@ -55,6 +55,21 @@ class DebugSummary(BaseModel):
     execution_duration_seconds: float | None = None
     stages: list[dict] = Field(default_factory=list)
 
+    # The Ray key-level execution telemetry (executor, ray_cpus,
+    # max_concurrent_keys, wall_seconds, key_spans), lifted out of
+    # `raw_result.execution_summary.metadata` into a named field.
+    #
+    # It already reached the browser inside `raw_result` — but only at a
+    # four-level-deep path into a payload whose whole purpose is being an
+    # unmodified dump. Naming it here lets the parallel-execution view read
+    # one documented field instead of coupling itself to the envelope's
+    # internal shape.
+    #
+    # None for a sequential run, a run that predates this telemetry, or one
+    # that has not reached Train Models yet — all three mean "nothing to
+    # show", never an error.
+    key_execution: dict | None = None
+
     # The complete, unmodified result envelope this summary was built from
     # — Section 5.7's "show underlying metrics" principle applied to the
     # whole run, not just one panel, for full traceability on demand.

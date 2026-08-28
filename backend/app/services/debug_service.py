@@ -82,6 +82,7 @@ class DebugService:
             artifact_locations=[ArtifactLocation(name=name, path=path) for name, path in KNOWN_ARTIFACT_PATHS],
             execution_duration_seconds=result.duration_seconds,
             stages=(result.execution_summary or {}).get("stages") or [],
+            key_execution=((result.execution_summary or {}).get("metadata") or {}).get("key_execution"),
             # mode="json" so nested enums (JobStatus, ExecutionBackend) are
             # already plain strings — this dict is embedded as-is in the
             # response, not re-validated through any model.

@@ -227,6 +227,67 @@ def test_one_failing_key_does_not_lose_the_others(series_collection, workflow_co
 
 
 @requires_ray
+def test_key_spans_record_one_entry_per_succeeded_key(series_collection, workflow_config):
+    """The observability contract: a span per key, not per task-slot, so a
+    UI can draw exactly one bar per forecast key."""
+    reports, telemetry = _execute_with_ray(series_collection, workflow_config)
+
+    spans = telemetry["key_spans"]
+    assert {s["group_id"] for s in spans} == {s.group_id for s in series_collection}
+    assert len(spans) == len(series_collection)
+
+
+@requires_ray
+def test_key_spans_carry_a_resolvable_worker_and_node_id(series_collection, workflow_config):
+    """worker_id/node_id are what turns a timestamp into proof of
+    parallelism -- without them two overlapping spans could just as well be
+    the same worker, measured wrong."""
+    _, telemetry = _execute_with_ray(series_collection, workflow_config)
+
+    for span in telemetry["key_spans"]:
+        assert span["worker_id"]
+        assert span["node_id"]
+        assert isinstance(span["worker_id"], str)
+        assert isinstance(span["node_id"], str)
+
+
+@requires_ray
+def test_key_spans_are_offsets_from_run_start_not_raw_timestamps(series_collection, workflow_config):
+    """A UI renders these as a Gantt chart from x=0, not as epoch time."""
+    _, telemetry = _execute_with_ray(series_collection, workflow_config)
+
+    for span in telemetry["key_spans"]:
+        assert span["start"] >= 0.0
+        assert span["end"] >= span["start"]
+        # Well inside a single test run's real wall-clock budget -- catches
+        # an accidental raw time.time() (a ~1.7-billion-second epoch value)
+        # slipping back in.
+        assert span["end"] < 300.0
+
+
+@requires_ray
+def test_a_failed_key_has_no_fabricated_span(series_collection, workflow_config):
+    """A key with no result tuple to read a timing from must be absent,
+    never reported with a made-up start/end."""
+    broken = [*series_collection]
+    broken[1] = _PoisonSeries(series_collection[1].group_id)
+
+    _, telemetry = _execute_with_ray(broken, workflow_config)
+
+    failed_group = series_collection[1].group_id
+    assert failed_group not in {s["group_id"] for s in telemetry["key_spans"]}
+    assert len(telemetry["key_spans"]) == telemetry["keys_succeeded"]
+
+
+def test_sequential_execution_reports_no_key_spans(series_collection, workflow_config):
+    """key_spans is a Ray-only concept -- the sequential fallback has no
+    worker/node distribution to report, and must not fabricate one."""
+    _, telemetry = _execute_sequentially(series_collection, workflow_config)
+
+    assert "key_spans" not in telemetry
+
+
+@requires_ray
 def test_ray_returns_a_usable_fitted_arima(series_collection):
     """A fitted ARIMA has to survive the trip back from the worker.
 

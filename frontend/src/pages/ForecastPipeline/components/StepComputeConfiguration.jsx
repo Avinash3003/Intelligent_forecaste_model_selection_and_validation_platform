@@ -292,7 +292,12 @@ export default function StepComputeConfiguration({
                   Validate configuration
                 </Button>
               </div>
-              <ValidationBanner state={validation.state} message={validation.message} />
+              <ValidationBanner
+                state={validation.state}
+                message={validation.message}
+                idleText="Check this configuration against Databricks before continuing."
+                busyText="Checking this configuration against Databricks…"
+              />
             </div>
           </div>
         ) : (

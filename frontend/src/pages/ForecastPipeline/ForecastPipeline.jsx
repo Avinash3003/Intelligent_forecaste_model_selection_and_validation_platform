@@ -421,10 +421,21 @@ export default function ForecastPipeline() {
     }
   }
 
+  // `quick`: the fast checks only — Databricks connectivity, auth, config
+  // syntax, runtime/access-mode compatibility, and the workspace's real
+  // node catalog and vCPU quota for the selected machine type. Seconds, not
+  // minutes, because it provisions nothing.
+  //
+  // The deep create-probe (which starts a real cluster and can take several
+  // minutes) is deliberately NOT what this button runs: a wizard step that
+  // blocks for minutes reads as a hung app, and it previously exceeded the
+  // request timeout and surfaced as "the request took too long to respond"
+  // while the backend was still legitimately working. That probe is its own
+  // explicit, asynchronous action instead — see handleProbeCompute.
   const handleValidateCompute = async () => {
     setComputeValidation({ state: 'validating', message: '' })
     try {
-      const result = await validateCompute(compute)
+      const result = await validateCompute(compute, { quick: true })
       setComputeValidation({
         state: result.valid ? 'valid' : 'invalid',
         message: result.message,

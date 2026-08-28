@@ -102,6 +102,12 @@ def _execute_with_ray(
         _start_ray()
 
     started = time.perf_counter()
+    # A wall-clock reference alongside the monotonic one above:
+    # `task_started`/`task_finished` below are wall-clock (time.time()),
+    # since perf_counter has no fixed epoch and cannot be compared across
+    # processes — every Ray worker is its own process. This is the anchor
+    # every key_span's offset is measured from.
+    run_started_wall = time.time()
     cpus = ray.cluster_resources().get("CPU", 0)
 
     # Shared once rather than serialized into every task.
@@ -113,15 +119,28 @@ def _execute_with_ray(
     by_group: dict[str, KeyReports] = {}
     failures: dict[str, str] = {}
     spans: list[tuple[float, float]] = []
+    # One entry per key that actually completed — a failed key has no
+    # result tuple to read a span from, so it is simply absent here rather
+    # than reported with a fabricated timing.
+    key_spans: list[dict[str, Any]] = []
 
     waiting = list(pending)
     while waiting:
         done, waiting = ray.wait(waiting, num_returns=1)
         group_id = pending[done[0]]
         try:
-            payload, task_started, task_finished = ray.get(done[0])
+            payload, task_started, task_finished, worker_id, node_id = ray.get(done[0])
             by_group[group_id] = pickle.loads(payload)
             spans.append((task_started, task_finished))
+            key_spans.append(
+                {
+                    "group_id": group_id,
+                    "worker_id": worker_id,
+                    "node_id": node_id,
+                    "start": round(task_started - run_started_wall, 3),
+                    "end": round(task_finished - run_started_wall, 3),
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - collected results are already safe
             failures[group_id] = f"{type(exc).__name__}: {exc}"
             logger.exception("Key %s failed in its Ray task", group_id)
@@ -140,6 +159,12 @@ def _execute_with_ray(
         "failures": failures,
         "max_concurrent_keys": _peak_overlap(spans),
         "wall_seconds": round(time.perf_counter() - started, 3),
+        # Multi-node caveat: on Ray-on-Spark, each key_span's start/end is
+        # wall-clock time on whichever node ran that key, offset against the
+        # DRIVER's run_started_wall — accurate to node-to-node clock skew
+        # (sub-second under NTP; exact on the single-node path, where every
+        # worker shares the driver's clock).
+        "key_spans": key_spans,
     }
 
 
@@ -247,7 +272,9 @@ def _worker_runtime_env() -> dict[str, Any]:
 
 
 # Asks for one CPU, so Ray's own scheduler decides the concurrency
-def _remote_run_key(series: ForecastSeries, config: KeyWorkflowConfig) -> tuple[bytes, float, float]:
+def _remote_run_key(
+    series: ForecastSeries, config: KeyWorkflowConfig
+) -> tuple[bytes, float, float, str, str]:
     task_started = time.time()
     # Ray shares its object store's memory rather than copying it, so arrays
     # arrive read-only in both directions and the Cython in statsmodels
@@ -257,7 +284,24 @@ def _remote_run_key(series: ForecastSeries, config: KeyWorkflowConfig) -> tuple[
     # second half, a fitted ARIMA cannot be read back at all.
     series = replace(series, frame=series.frame.copy())
     reports = run_key(series, config)
-    return pickle.dumps(reports, protocol=pickle.HIGHEST_PROTOCOL), task_started, time.time()
+    # Which worker/node actually ran this key — the one thing that turns a
+    # start/end timestamp into proof of parallelism rather than just
+    # duration. Read from inside the task: it is only meaningful here,
+    # never on the driver. Imported locally, matching every other Ray
+    # import in this module — this function must stay importable (as a
+    # plain function, never called) where Ray is not installed.
+    import ray
+
+    context = ray.get_runtime_context()
+    worker_id = context.get_worker_id()
+    node_id = context.get_node_id()
+    return (
+        pickle.dumps(reports, protocol=pickle.HIGHEST_PROTOCOL),
+        task_started,
+        time.time(),
+        worker_id,
+        node_id,
+    )
 
 
 # Most tasks that were ever running at the same instant

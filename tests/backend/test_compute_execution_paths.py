@@ -198,8 +198,14 @@ def test_new_compute_attaches_the_configured_docker_image(settings, dataset):
 def test_dcs_downgrades_the_runtime_to_its_standard_non_ml_equivalent(settings, dataset):
     """Pairing an ML runtime with a Docker image is self-contradictory: the
     image supplies the Python/dependency stack INSTEAD OF the ML runtime's
-    own. docker_image alone is not enough -- the version string and the
-    use_ml_runtime flag must both say so too."""
+    own. docker_image alone is not enough -- the version string must say so
+    too.
+
+    use_ml_runtime is deliberately never set here -- verified against a real
+    jobs.submit call, which rejects the field outright when set explicitly
+    without a `kind` ("use_ml_runtime is not allowed with unspecified
+    kind"). Leaving it unset and downgrading spark_version alone submits
+    cleanly; Databricks infers the flag from the version string."""
     dcs_settings = settings.model_copy(
         update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
     )
@@ -209,7 +215,7 @@ def test_dcs_downgrades_the_runtime_to_its_standard_non_ml_equivalent(settings, 
 
     # NEW_COMPUTE selects "16.4.x-cpu-ml-scala2.12" -- an ML runtime preset.
     assert cluster.spark_version == "16.4.x-scala2.12"
-    assert cluster.use_ml_runtime is False
+    assert cluster.use_ml_runtime is None
 
 
 def test_dcs_sets_the_single_user_name_for_the_job_triggered_cluster(settings, dataset):

@@ -693,13 +693,18 @@ class DatabricksRunner(PipelineRunner):
     # comes from an ML-runtime preset (compute_presets.RUNTIME_PRESETS), and
     # pairing an ML runtime with a Docker image is self-contradictory — the
     # image supplies the Python/dependency stack specifically INSTEAD OF the
-    # ML runtime's own, and `use_ml_runtime` left unset resolves True from
-    # that version string. So when DCS is on, this also downgrades the
-    # version to its Standard (non-ML) equivalent and turns the flag off
-    # explicitly — the same transformation observed on this project's own
-    # cluster, whose real, live spark_version is "15.4.x-scala2.12" with
-    # use_ml_runtime True set independently, proving the two are separate
-    # controls rather than one being derived from the other.
+    # ML runtime's own. So when DCS is on, this also downgrades the version
+    # to its Standard (non-ML) equivalent.
+    #
+    # `use_ml_runtime` is deliberately left untouched, not forced to False —
+    # verified against the real Jobs API (a live `jobs.submit` call), which
+    # rejects the field outright when set explicitly on a spec with no
+    # `kind`: "use_ml_runtime is not allowed with unspecified kind." Setting
+    # `kind` (currently only `CLASSIC_PREVIEW`) is a bigger, preview-feature
+    # decision this fix has no reason to force. Leaving the field unset and
+    # downgrading only `spark_version` submits cleanly — Databricks infers
+    # use_ml_runtime from the version string the same way it does for an ML
+    # runtime, confirmed by that same live submission succeeding.
     def _attach_docker_image(self, cluster: Any, compute_sdk: Any) -> None:
         url = (self._settings.databricks_docker_image_url or "").strip()
         if not url:
@@ -714,7 +719,6 @@ class DatabricksRunner(PipelineRunner):
         )
         cluster.docker_image = compute_sdk.DockerImage(url=url, basic_auth=basic_auth)
         cluster.spark_version = _standard_runtime_version(cluster.spark_version)
-        cluster.use_ml_runtime = False
         # A job-triggered SINGLE_USER cluster's run-as identity: this backend's
         # own service principal, the same one every other Databricks call in
         # this process authenticates as.

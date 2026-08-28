@@ -16,6 +16,7 @@ import DatasetPreviewPanel from './components/DatasetPreviewPanel'
 import UnderlyingMetricsPanel from './components/UnderlyingMetricsPanel'
 import MLflowRunCard from './components/MLflowRunCard'
 import DebugPanel from './components/DebugPanel'
+import PipelineExecutionGraph from './components/PipelineExecutionGraph'
 import { useRunStatusPolling } from '../../hooks/useRunStatusPolling'
 import { fetchDeployments, fetchResults, isTerminalStatus } from '../../services'
 import { formatDateRange, formatIST } from '../../utils/formatDateTime'
@@ -498,6 +499,8 @@ export default function Results() {
             </div>
           </CollapsibleSection>
         )}
+
+        <PipelineExecutionGraph runId={run} />
 
         <CollapsibleSection title="MLflow run">
           <MLflowRunCard run={results.mlflowRun} resultRunId={results.runId} />
