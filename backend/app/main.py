@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import (
     auth,
+    compute,
     deployment,
     estimation,
     execution,
@@ -81,6 +82,7 @@ app.include_router(upload.router)
 app.include_router(profile.router)
 app.include_router(metadata.router)
 app.include_router(estimation.router)
+app.include_router(compute.router)
 app.include_router(deployment.router)
 app.include_router(execution.router)
 app.include_router(results.router)

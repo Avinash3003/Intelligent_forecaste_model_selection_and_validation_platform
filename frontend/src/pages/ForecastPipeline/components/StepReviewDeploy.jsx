@@ -20,10 +20,34 @@ function Field({ label, value }) {
   )
 }
 
+// One line describing the compute this run will use.
+function describeCompute(compute, existingCompute) {
+  if (compute.mode === 'existing_compute') {
+    return {
+      mode: 'Existing compute',
+      machine: existingCompute?.nodeTypeId ?? '—',
+      runtime: existingCompute?.runtime ?? '—',
+      workers: existingCompute?.singleNode ? 'Single node' : `${existingCompute?.numWorkers ?? 0} worker(s)`,
+    }
+  }
+  return {
+    mode: 'New job compute',
+    machine: compute.nodeTypeId || '—',
+    runtime: compute.runtimeKey || '—',
+    workers: compute.autoscale
+      ? `Autoscale ${compute.minWorkers}–${compute.maxWorkers}`
+      : compute.numWorkers === 0
+        ? 'Single node'
+        : `${compute.numWorkers} worker(s)`,
+  }
+}
+
 export default function StepReviewDeploy({
   file,
   mapping,
   config,
+  compute,
+  existingCompute,
   deployed,
   deployError,
   runId,
@@ -33,6 +57,7 @@ export default function StepReviewDeploy({
 }) {
   const navigate = useNavigate()
 
+  const computeSummary = compute ? describeCompute(compute, existingCompute) : null
   const selectedModelNames = forecastModels
     .filter((m) => config.selectedModels.includes(m.id))
     .map((m) => m.name)
@@ -116,6 +141,17 @@ export default function StepReviewDeploy({
           </div>
         </div>
       </SectionContainer>
+
+      {compute && (
+        <SectionContainer title="Compute">
+          <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 lg:grid-cols-4">
+            <Field label="Mode" value={computeSummary.mode} />
+            <Field label="Machine type" value={computeSummary.machine} />
+            <Field label="Runtime" value={computeSummary.runtime} />
+            <Field label="Workers" value={computeSummary.workers} />
+          </div>
+        </SectionContainer>
+      )}
     </div>
   )
 }

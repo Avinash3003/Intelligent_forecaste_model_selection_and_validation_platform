@@ -102,22 +102,18 @@ _FIXED_OVERHEAD_SECONDS = 20.0
 # Cloud execution waits for compute before any Python of ours runs; local
 # execution has no such wait.
 #
-# Serverless is not one wait but ELEVEN. The pipeline is deployed as an
-# 11-task DAG (forecast_job_serverless.yml), and every task acquires its own
-# compute and re-loads the checkpointed context, so the run pays that cost
-# once per task rather than once per run. Charging a single startup here is
-# what made a fresh deployment quote "1-3 min" for a run that took 6-7:
-# measured against a real run, the engine's own stage time totalled ~54s of
-# a ~7 min wall clock, leaving ~33s per task of orchestration the estimate
-# was not accounting for at all.
+# The current architecture submits exactly ONE task per run (jobs.submit —
+# see backend/app/orchestration/databricks_runner.py), on either an existing
+# cluster (starting on demand if it was TERMINATED) or a freshly provisioned
+# job cluster. Either way the run pays one cold start, not several — this
+# fallback is sized from two real cold starts observed on this project's own
+# workspace: 351s (a TERMINATED all-purpose cluster starting on demand) and
+# 441s (a job cluster provisioning from nothing).
 #
-# Both figures are fallbacks only. `_calibrate_startup_seconds()` measures
-# wall-clock minus engine time from real history — which already captures
-# every task's startup — and takes over as soon as this deployment has
-# completed runs to learn from.
-_SERVERLESS_TASK_STARTUP_SECONDS = 33.0
-_SERVERLESS_TASK_COUNT = 11
-_SERVERLESS_STARTUP_SECONDS = _SERVERLESS_TASK_STARTUP_SECONDS * _SERVERLESS_TASK_COUNT
+# This figure is a fallback only. `_calibrate_startup_seconds()` measures
+# wall-clock minus engine time from real history and takes over as soon as
+# this deployment has completed runs to learn from.
+_CLOUD_STARTUP_SECONDS = 396.0  # midpoint of the two observed cold starts
 
 # Startup is only calibrated from runs whose measured overhead is credible:
 # a negative or absurd gap means the two clocks disagree, not that startup
@@ -242,8 +238,8 @@ class EstimationService:
         ]
         if startup_seconds:
             # Rendered in whichever unit reads honestly: a 45-second
-            # serverless start is "~45 sec", not the "~0 min" an
-            # unconditional minutes conversion produced.
+            # startup is "~45 sec", not the "~0 min" an unconditional
+            # minutes conversion produced.
             if startup_seconds < 90:
                 startup_detail = f"~{int(round(startup_seconds))} sec before the pipeline begins"
             else:
@@ -392,7 +388,7 @@ class EstimationService:
         if backend != "databricks":
             return 0.0
 
-        return measured if measured is not None else _SERVERLESS_STARTUP_SECONDS
+        return measured if measured is not None else _CLOUD_STARTUP_SECONDS
 
     def _run_history_calibration(self) -> _RunHistoryCalibration:
         """The cached history sweep, recomputed only once per TTL.

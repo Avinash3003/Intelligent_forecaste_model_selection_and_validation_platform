@@ -1,6 +1,6 @@
 """Model Registry compatibility across MLflow versions.
 
-Production (Databricks Serverless) resolves the pinned `mlflow>=2.15,<3.0`
+Production cloud execution resolves the pinned `mlflow>=2.15,<3.0`
 to 2.x, whose `mlflow.pyfunc.log_model` has no `tags` parameter and no
 `**kwargs` to absorb one — so passing it raised `TypeError` and every
 registration failed. The local dev venv had MLflow 3.x, where `tags` is

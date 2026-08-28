@@ -118,6 +118,7 @@ class ResultService:
             GroupOption(
                 group_id=group.get("group_id", ""),
                 label=self._group_label(group),
+                key_values={str(k): str(v) for k, v in (group.get("key_values") or {}).items()},
             )
             for group in result.forecast_groups
             if group.get("group_id")

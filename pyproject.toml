@@ -15,11 +15,19 @@ authors = [{ name = "Forecast Engine Team" }]
 # engine imports lazily (a specific model library, SHAP, MLflow, the LLM
 # client) is declared as an extra below instead, mirroring how the code
 # itself treats them: missing means "unavailable," never "broken."
+# Lower bounds are the oldest versions the engine is verified to run on,
+# not the newest available: a Databricks ML runtime pins its own scientific
+# stack, and a floor above it makes installing this wheel there rewrite that
+# stack (pandas, scikit-learn and numba all move, and MLflow's own
+# dependencies drag pydantic across a major). Deployments that want newer
+# still get newer — pip takes the highest version satisfying the range, and
+# each deployment target (a Databricks Container Services image, an ML
+# runtime cluster) pins its own versions separately.
 dependencies = [
-    "pandas>=2.2,<3.0",
-    "numpy>=1.26,<2.0",
+    "pandas>=1.5,<3.0",
+    "numpy>=1.23,<2.0",
     "scipy>=1.11,<2.0",
-    "scikit-learn>=1.4,<2.0",
+    "scikit-learn>=1.3,<2.0",
     "openpyxl>=3.1,<4.0",
 ]
 
@@ -38,11 +46,18 @@ tft = [
     "torch>=2.2,<3.0",
 ]
 explainability = [
-    "shap>=0.45,<0.47",
+    "shap>=0.44,<0.47",
 ]
 llm = [
     "openai>=1.30,<2.0",
 ]
+# Full MLflow, for a deployment that hosts its own tracking store — the
+# local default is sqlite, whose store lives in `mlflow` and not in
+# `mlflow-skinny`. Deliberately an extra, never a base dependency: a
+# Databricks runtime already ships `mlflow-skinny` and a managed tracking
+# server, and asking for full MLflow there pulls a second web stack and
+# moves pydantic across a major. Do not add this extra to a job that runs
+# on Databricks ML compute.
 tracking = [
     "mlflow>=2.15,<3.0",
     "matplotlib>=3.8,<4.0",

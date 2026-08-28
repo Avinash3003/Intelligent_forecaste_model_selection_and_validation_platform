@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from app.schemas.compute import ComputeSelection
 from app.schemas.metadata import MetadataMapping
 
 
@@ -20,6 +21,9 @@ class DeploymentRequest(BaseModel):
     # validated against the authoritative registry in `deployment_service`
     # before this ever reaches a Runner.
     derived_features: list[str] | None = None
+    # Where the run executes. Required for Databricks execution; the local
+    # runner ignores it.
+    compute: ComputeSelection | None = None
 
 
 class DeploymentResponse(BaseModel):
@@ -39,6 +43,25 @@ class StageStatus(BaseModel):
     completed_at: str | None = None
 
 
+class ComputeStatus(BaseModel):
+    """Where the run's compute is, before the forecast engine starts.
+
+    Deliberately NOT an eighth pipeline phase. The seven display phases are
+    a view over the engine's own stages; Databricks starting a cluster is
+    infrastructure that happens before any of them, so it is reported
+    alongside the trail rather than inside it.
+
+    Every value is derived from the run's real Databricks lifecycle state —
+    nothing here is timed, estimated or assumed.
+    """
+
+    # "starting" | "ready" | "failed"
+    state: str
+    label: str
+    message: str
+    detail: str | None = None
+
+
 class DeploymentStatus(BaseModel):
     id: str
     dataset: str
@@ -49,6 +72,10 @@ class DeploymentStatus(BaseModel):
     current_stage: str
     estimated_remaining: str
     stages: list[StageStatus]
+    # Present only while the run is waiting on, or has just acquired, its
+    # Databricks compute — None for local runs and once the engine reports
+    # its first stage, at which point the phases speak for themselves.
+    compute: ComputeStatus | None = None
     # Populated only for a failed run, so the UI can show why it failed
     # rather than a generic message.
     error: str | None = None

@@ -206,11 +206,19 @@ export default function PipelineDetails() {
         subtitle={
           run.stages.length > 0
             ? 'Per-stage execution trail reported by the forecast engine'
-            : 'Stage detail is reported once the run finishes'
+            : run.compute
+              ? 'Waiting on the Databricks compute this run was submitted to'
+              : 'Stage detail is reported once the run finishes'
         }
       >
-        {run.stages.length > 0 ? (
-          <PipelineTimeline stages={run.stages} />
+        {run.stages.length > 0 || run.compute ? (
+          <PipelineTimeline
+            stages={run.stages}
+            progress={run.progress}
+            runStatus={run.status}
+            compute={run.compute}
+            error={run.error}
+          />
         ) : (
           <p className="text-sm text-slate-400">
             No stage trail is available for this run.

@@ -22,6 +22,7 @@ export function deployRun({
   fallbackModel,
   horizon,
   aggregationMethod,
+  compute,
 }) {
   const metadata = {
     date_column: mapping.dateColumn,
@@ -48,6 +49,7 @@ export function deployRun({
     // top-level field, not part of `metadata`: it configures how the tree
     // models featurize the target, not a column role assignment.
     derived_features: mapping.derivedFeatures,
+    compute,
   })
 }
 
@@ -73,6 +75,16 @@ function normalizeDeployment(payload) {
       startedAt: stage.started_at,
       completedAt: stage.completed_at,
     })),
+    // Infrastructure progress before the engine starts — present only
+    // while a Databricks run is acquiring its compute. Null otherwise.
+    compute: payload.compute
+      ? {
+          state: payload.compute.state,
+          label: payload.compute.label,
+          message: payload.compute.message,
+          detail: payload.compute.detail ?? null,
+        }
+      : null,
     error: payload.error ?? null,
     startedBy: payload.started_by ?? null,
     cancelledBy: payload.cancelled_by ?? null,

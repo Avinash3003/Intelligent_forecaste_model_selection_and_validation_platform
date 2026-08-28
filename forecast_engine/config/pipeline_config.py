@@ -223,18 +223,6 @@ class GroupingConfig:
 
 
 @dataclass(frozen=True)
-class ExecutionConfig:
-    """How work is distributed across forecasting groups.
-
-    Parallelism is off by default; the knobs exist for fanning out across
-    many keys.
-    """
-
-    parallel_enabled: bool = False
-    max_workers: int = 4
-
-
-@dataclass(frozen=True)
 class ForecastDefaults:
     """Run-level forecasting defaults, consumed by later phases.
 
@@ -259,7 +247,6 @@ class PipelineConfig:
     forecast_export: ForecastExportConfig = field(default_factory=ForecastExportConfig)
     artifacts_mirror: ArtifactsMirrorConfig = field(default_factory=ArtifactsMirrorConfig)
     grouping: GroupingConfig = field(default_factory=GroupingConfig)
-    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     forecast_defaults: ForecastDefaults = field(default_factory=ForecastDefaults)
 
     # Return the standard configuration used when a caller supplies none
@@ -280,7 +267,6 @@ class PipelineConfig:
             forecast_export=_build_block(ForecastExportConfig, payload.get("forecast_export")),
             artifacts_mirror=_build_block(ArtifactsMirrorConfig, payload.get("artifacts_mirror")),
             grouping=_build_block(GroupingConfig, payload.get("grouping")),
-            execution=_build_block(ExecutionConfig, payload.get("execution")),
             forecast_defaults=_build_block(ForecastDefaults, payload.get("forecast_defaults")),
         )
 

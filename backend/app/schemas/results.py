@@ -2,10 +2,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class GroupOption(BaseModel):
-    """One selectable business key on the Results filter bar."""
+    """One selectable business key on the Results filter bar.
+
+    `key_values` carries the key columns separately so the filter bar can
+    offer one dropdown per column instead of one long combined list; it is
+    empty for a single-series run.
+    """
 
     group_id: str
     label: str
+    key_values: dict[str, str] = Field(default_factory=dict)
 
 
 class ConfidenceExplanation(BaseModel):

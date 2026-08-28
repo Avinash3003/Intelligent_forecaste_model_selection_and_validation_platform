@@ -35,8 +35,21 @@ export const forecastPipelineSteps = [
   { id: 2, key: 'profiling', label: 'Profile' },
   { id: 3, key: 'mapping', label: 'Map Columns' },
   { id: 4, key: 'configuration', label: 'Configure' },
-  { id: 5, key: 'review', label: 'Estimate & Run' },
+  { id: 5, key: 'compute', label: 'Compute' },
+  { id: 6, key: 'review', label: 'Estimate & Run' },
 ]
+
+// Compute defaults; node type and runtime are filled from Databricks.
+export const defaultComputeSelection = {
+  mode: 'existing_compute',
+  nodeTypeId: '',
+  runtimeKey: '',
+  autoscale: false,
+  numWorkers: 0,
+  minWorkers: 1,
+  maxWorkers: 2,
+  existingClusterId: null,
+}
 
 export const supportedFileFormats = [
   { format: 'CSV', extension: '.csv' },

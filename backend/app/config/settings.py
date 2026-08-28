@@ -25,7 +25,8 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     max_upload_size_mb: int = 200
 
-    # Where runs execute: "local" (subprocess) or "databricks" (Serverless).
+    # Where runs execute: "local" (subprocess) or "databricks" (a Databricks
+    # Jobs API run — existing compute or a job cluster this backend creates).
     # Changing environments is this one value; an unknown value fails loudly
     # at startup.
     execution_mode: str = "local"
@@ -93,11 +94,31 @@ class Settings(BaseSettings):
     databricks_token: str | None = None
     databricks_workspace_id: str | None = None
 
-    # Resolved to an id by name at submit time, so redeploying the bundle
-    # needs no change here.
-    databricks_job_name: str = "forecastiq-forecast-pipeline"
-    # Set to pin an exact job id and skip the name lookup entirely.
-    databricks_job_id: int | None = None
+    # All-purpose cluster offered in the UI as the "existing compute"
+    # fallback. Empty simply hides that option; nothing here is required.
+    databricks_existing_cluster_id: str | None = None
+
+    # Engine wheel a user-configured job cluster installs at run time.
+    # Empty relies on the cluster already having it.
+    databricks_engine_wheel_path: str | None = None
+
+    # Databricks Container Services: the pre-built runtime image a NEW job
+    # cluster pulls instead of resolving its dependencies from the
+    # runtime's own environment. Empty disables DCS entirely — a new job
+    # cluster is then built exactly as it was before this setting existed
+    # (an ML runtime, no docker_image), the same "blank means off" idiom
+    # every other optional Databricks feature on this class already uses.
+    #
+    # The existing all-purpose cluster is never affected by this setting;
+    # attaching an image to it is a manual, one-time step the operator
+    # performs in the Databricks UI (see docs), not something this backend
+    # does automatically.
+    databricks_docker_image_url: str | None = None
+    # Basic auth Databricks presents to the private ACR repository at pull
+    # time. Both blank is the common case (a public or already-cached
+    # image); set together, never one without the other.
+    databricks_docker_image_username: str | None = None
+    databricks_docker_image_password: str | None = None
 
     # UC volume over the ADLS uploads container: staged datasets and run output.
     databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
@@ -199,9 +220,8 @@ class Settings(BaseSettings):
           that path is what lets both processes open the same file.
         - databricks: the engine runs as a Databricks job,
           where MLflow's own unset-default resolves to the workspace's
-          managed tracking store (see forecast_job_serverless.yml's note on
-          this) — never the sqlite file above, which that job never
-          touches. A deployment that sets DATABRICKS_HOST/credentials for
+          managed tracking store — never the sqlite file above, which that
+          job never touches. A deployment that sets DATABRICKS_HOST/credentials for
           job submission but never separately sets MLFLOW_TRACKING_URI
           previously fell through to the sqlite branch here, silently
           reading a store the engine never wrote to: run history and

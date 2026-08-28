@@ -19,6 +19,23 @@ scipy>=1.11,<2.0          # Drift Detection (s09_drift): scipy.stats, scipy.spat
 openpyxl>=3.1,<4.0
 scikit-learn>=1.4,<2.0
 
+# Key-parallel execution (forecast_engine/parallel). Ray is architecture,
+# not an optional accelerant: `--parallel-keys` fans each forecast key's
+# complete workflow out as one Ray task, and `execute_keys()` falls back to
+# running them sequentially when Ray cannot be imported -- silently, which
+# is exactly why this belongs here rather than being inherited.
+#
+# It used to be: a Databricks ML runtime ships Ray, so nothing declared it.
+# A Container Services image is built from `databricksruntime/standard`,
+# which is NOT an ML runtime and ships no Ray at all, so an undeclared Ray
+# means every cloud run quietly drops to sequential.
+#
+# Pinned exactly, not floored: 2.37.0 is the version the ML runtime this
+# platform has been verified against provides, so pinning it makes the
+# container reproduce the environment those runs were measured on rather
+# than resolving to whatever is newest.
+ray==2.37.0
+
 # Forecasting model libraries. Each is optional at runtime: the Model
 # Registry lazily imports the library a model needs and records that model
 # as Unavailable if it is missing, so a deployment can ship only the model

@@ -72,6 +72,41 @@ _LIFE_CYCLE_MAP: dict[str, JobStatus] = {
 }
 
 
+# The SDK is imported lazily throughout this module so that importing it
+# never requires Databricks credentials or the SDK to be installed.
+def _databricks_service_modules() -> tuple[Any, Any]:
+    from databricks.sdk.service import compute as compute_sdk
+    from databricks.sdk.service import jobs as jobs_sdk
+
+    return compute_sdk, jobs_sdk
+
+
+# Compute selection is required: a run must never be redirected elsewhere.
+def _require_compute(compute: Any) -> Any:
+    if compute is None:
+        raise ExecutionError("Select the compute this forecast should run on before deploying.")
+    if compute.mode == "existing_compute":
+        if not (compute.cluster_id or "").strip():
+            raise ExecutionError("The selected existing compute is missing its cluster id.")
+    elif compute.mode == "new_job_compute":
+        if compute.job_compute is None:
+            raise ExecutionError("The selected job compute configuration is incomplete.")
+    else:
+        raise ExecutionError(f"Unknown compute selection '{compute.mode}'.")
+    return compute
+
+
+# The engine CLI arguments a submitted run passes to the wheel entry point.
+def _engine_parameters(parameters: dict[str, str]) -> list[str]:
+    return [
+        "--dataset", parameters["dataset"],
+        "--config", parameters["config"],
+        "--summary-out", parameters["summary_out"],
+        "--live-status-out", parameters["live_status_out"],
+        "--parallel-keys",
+    ]
+
+
 def map_run_state(life_cycle_state: str | None, result_state: str | None) -> JobStatus:
     """Map a Databricks run state to JobStatus.
 
@@ -122,8 +157,6 @@ class DatabricksRunner(PipelineRunner):
         history: MLflowHistoryStore | None = None,
         workspace_client: Any | None = None,
         execution_backend: ExecutionBackend = ExecutionBackend.DATABRICKS,
-        job_name: str | None = None,
-        job_id: int | None = None,
     ) -> None:
         self._settings = settings
         self._jobs: dict[str, _DatabricksJobRecord] = {}
@@ -138,8 +171,6 @@ class DatabricksRunner(PipelineRunner):
         # (staging, submit/poll/retrieve, error translation) is identical
         # three-line subclass instead of a second implementation.
         self._execution_backend = execution_backend
-        self._job_name = job_name or settings.databricks_job_name
-        self._job_id: int | None = job_id if job_id is not None else settings.databricks_job_id
 
     # ------------------------------------------------------------------
     # Workspace client
@@ -561,7 +592,7 @@ class DatabricksRunner(PipelineRunner):
     def _trigger_databricks_job(
         self, run_id: str, request: PipelineExecutionRequest, dataset_uri: str
     ) -> int:
-        """Start the existing forecast job and return its Databricks run id."""
+        """Submit the engine wheel to the compute the user selected."""
         run_root = self._run_root(run_id)
         parameters = {
             "dataset": dataset_uri,
@@ -570,39 +601,84 @@ class DatabricksRunner(PipelineRunner):
             "live_status_out": f"{run_root}/live_status.json",
         }
 
+        compute = _require_compute(request.compute)
+        compute_sdk, jobs_sdk = _databricks_service_modules()
+        task = jobs_sdk.SubmitTask(
+            task_key="forecast_pipeline",
+            python_wheel_task=jobs_sdk.PythonWheelTask(
+                package_name="forecast_engine",
+                entry_point="forecast-engine",
+                parameters=_engine_parameters(parameters),
+            ),
+            libraries=self._engine_libraries(compute_sdk),
+        )
+        self._attach_compute(task, run_id, compute, compute_sdk)
+
         try:
-            waiter = self._workspace.jobs.run_now(job_id=self._resolve_job_id(), job_parameters=parameters)
-            return int(waiter.run_id)
+            submitted = self._workspace.jobs.submit(run_name=f"forecastiq-{run_id}", tasks=[task])
+            return int(submitted.run_id)
         except ExecutionError:
             raise
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
             raise ExecutionError(
-                safe_detail(exc, fallback="The forecast could not be started in Azure Databricks.")
+                safe_detail(exc, fallback="The forecast could not be started on the selected compute.")
             ) from exc
 
-    def _resolve_job_id(self) -> int:
-        """The job id, from configuration or resolved by name and cached.
+    # The selected compute is the compute that runs; there is no fallback.
+    def _attach_compute(self, task: Any, run_id: str, compute: Any, compute_sdk: Any) -> None:
+        if compute.mode == "existing_compute":
+            task.existing_cluster_id = compute.cluster_id
+        else:
+            task.new_cluster = self._new_cluster_spec(run_id, compute.job_compute, compute_sdk)
 
-        Name lookup is the default because redeploying the bundle mints a
-        new id, which a pinned value would not survive.
-        """
-        if self._job_id is not None:
-            return self._job_id
+    def _new_cluster_spec(self, run_id: str, config: Any, compute_sdk: Any) -> Any:
+        cluster = compute_sdk.ClusterSpec(
+            spark_version=config.runtime_key,
+            node_type_id=config.node_type_id,
+            data_security_mode=compute_sdk.DataSecurityMode.SINGLE_USER,
+            custom_tags={"forecastiq_run_id": run_id},
+        )
+        self._attach_docker_image(cluster, compute_sdk)
 
-        name = self._job_name
-        try:
-            matches = list(self._workspace.jobs.list(name=name))
-        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
-            raise ExecutionError(safe_detail(exc)) from exc
-
-        if not matches:
-            raise ExecutionError(
-                "The forecasting job is not deployed in the connected Databricks workspace. "
-                "An administrator needs to deploy the ForecastIQ bundle."
+        if config.autoscale:
+            cluster.autoscale = compute_sdk.AutoScale(
+                min_workers=config.min_workers, max_workers=config.max_workers
             )
+            return cluster
 
-        self._job_id = int(matches[0].job_id)
-        return self._job_id
+        cluster.num_workers = config.num_workers
+        if config.num_workers == 0:
+            cluster.spark_conf = {
+                "spark.databricks.cluster.profile": "singleNode",
+                "spark.master": "local[*]",
+            }
+            cluster.custom_tags["ResourceClass"] = "SingleNode"
+        return cluster
+
+    # Databricks Container Services: a new job cluster pulls the configured
+    # image instead of resolving its dependencies from the runtime, when one
+    # is configured. A blank URL is DCS staying off — the cluster is built
+    # exactly as it always was, no docker_image on the spec at all. The URL
+    # never comes from anywhere but settings, so there is nothing here for a
+    # caller to override with its own value — the same guarantee
+    # `_require_compute` already gives the cluster id and node type.
+    def _attach_docker_image(self, cluster: Any, compute_sdk: Any) -> None:
+        url = (self._settings.databricks_docker_image_url or "").strip()
+        if not url:
+            return
+
+        username = (self._settings.databricks_docker_image_username or "").strip()
+        password = (self._settings.databricks_docker_image_password or "").strip()
+        basic_auth = (
+            compute_sdk.DockerBasicAuth(username=username, password=password)
+            if username and password
+            else None
+        )
+        cluster.docker_image = compute_sdk.DockerImage(url=url, basic_auth=basic_auth)
+
+    def _engine_libraries(self, compute_sdk: Any) -> list[Any]:
+        wheel = (self._settings.databricks_engine_wheel_path or "").strip()
+        return [compute_sdk.Library(whl=wheel)] if wheel else []
 
     def _monitor_job_status(self, databricks_run_id: int) -> tuple[JobStatus, str | None, float | None]:
         """Poll one run: returns its JobStatus, a safe error message, and duration."""

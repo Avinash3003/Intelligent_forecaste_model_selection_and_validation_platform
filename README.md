@@ -59,11 +59,11 @@ backend/             # FastAPI
   app/api/           #   Routes — HTTP only, no forecasting logic
   app/auth/          #   Entra ID token validation + the RBAC table
   app/services/      #   Profiling, validation, estimation, results
-  app/orchestration/ #   Pipeline Executor and its Local / Serverless runners
+  app/orchestration/ #   Pipeline Executor and its Local / Databricks runners
 frontend/            # React (Vite) SPA
   src/auth/          #   MSAL sign-in, permission guards
   src/pages/         #   Wizard, deployments, results, MLflow experiments
-databricks/          # Databricks Asset Bundle — Serverless job definition
+databricks/          # Databricks Asset Bundle — wheel artifact + a dev-only manual-test job
 tests/               # backend/ runs on the backend venv, engine/ on the engine venv
 docs/                # PHASE_A_AZURE_SETUP.md, execution-modes.md — manual Azure steps + execution architecture
 pyproject.toml       # Builds forecast_engine into a wheel for DAB
@@ -130,7 +130,9 @@ this cannot ship as an unauthenticated deployment.
 ### Tests
 
 ```bash
-backend/.venv/bin/python -m pytest tests -q                  # smoke: app imports and serves
+backend/.venv/bin/python -m pytest tests/backend -q          # backend suite
+forecast_engine/.venv/bin/python -m pytest tests/engine -q   # engine suite
+backend/.venv/bin/python -m pytest tests/test_smoke.py -q    # smoke: app imports and serves
 ```
 
 Or drive the engine directly, with no web layer:
@@ -173,16 +175,18 @@ insights as unavailable. It is wired so a missing secret can never block a clust
 
 ### Execution mode
 
-One forecast_engine, three execution modes — see **`docs/execution-modes.md`** for the full
-breakdown (storage, credentials, known gaps per mode).
+One forecast_engine, two execution modes.
 
 `EXECUTION_MODE=local` (default) runs the engine as a subprocess on the API host.
 
-`EXECUTION_MODE=databricks` submits to the bundle-deployed **Serverless** job (the primary cloud
-path). The runner stages the dataset and a JSON run configuration into one per-run directory in the
-existing Unity Catalog volume, calls the Jobs API, polls run state, reads the engine's live stage
-trail back from the volume so the UI shows real progress, and reads `summary.json` back on
-completion.
+`EXECUTION_MODE=databricks` submits the run through the Databricks Jobs API (`jobs.submit`) as a
+single ad-hoc task, on whichever compute the user selected in the Compute step — an existing
+all-purpose cluster, or a new job cluster the backend creates for that run (optionally pulling a
+Databricks Container Services image; see the root `Dockerfile`). No job resource is pre-deployed or
+resolved by name for this path. The runner stages the dataset and a JSON run configuration into one
+per-run directory in the existing Unity Catalog volume, calls the Jobs API, polls run state, reads
+the engine's live stage trail back from the volume so the UI shows real progress, and reads
+`summary.json` back on completion.
 
 Every mode returns the identical result envelope, so nothing above the executor knows which one ran.
 Retargeting is this one setting changing — no code change.
@@ -199,30 +203,34 @@ cd databricks
 cp .env.example .env && source .env        # profile name + ACR image
 databricks bundle validate -t dev
 databricks bundle deploy  -t dev           # builds and uploads the wheel
+```
 
-databricks bundle run forecast_pipeline_serverless -t dev --params \
+Deploying builds and uploads the `forecast_engine` wheel artifact — the application code every
+cloud run installs at submission time via `libraries: [whl: ...]`. It creates no job resource for
+`prod`: a real run is always submitted by the backend through `jobs.submit`, an ad-hoc single task
+built at request time, never a pre-deployed job triggered by name.
+
+The `dev` target additionally deploys `forecast_pipeline_compute`, a Ray key-parallel job kept for
+manual/CLI testing against an existing all-purpose cluster:
+
+```bash
+databricks bundle run forecast_pipeline_compute -t dev --params \
   dataset=/Volumes/<catalog>/<schema>/<volume>/your.csv,\
 config=/Volumes/<catalog>/<schema>/<volume>/runs/manual/forecast_configuration.json
 ```
 
-Deploying uploads and registers the Serverless job (`forecast_pipeline_serverless`) — one bundle,
-one job resource, one wheel.
-
-The job takes exactly four parameters — `dataset`, `config`, `summary_out`, `live_status_out` — and
-every per-run value (columns, models, fallback, horizon, run id) travels inside the `config` JSON.
-That is not a style choice: a `python_wheel_task`'s argument list is fixed at deploy time, so an
-unset parameter would reach argparse as `--horizon ""` (a crash) or `--models ""` (a model named
-""). A config file also carries multi-value key columns, which one flat parameter cannot.
-
-`dataset` and `config` intentionally have **no defaults** — a default would let a forgotten
-`--params` silently forecast the wrong file and report success. Normally the API writes both.
+Its parameters — `dataset`, `config`, `summary_out`, `live_status_out` — are fixed at deploy time
+(a `python_wheel_task`'s argument list can't be extended per run), so every other per-run value
+(columns, models, fallback, horizon) travels inside the `config` JSON instead. `dataset` and
+`config` intentionally have **no defaults** — a default would let a forgotten `--params` silently
+forecast the wrong file and report success. Normally the API writes both; this manual path exists
+for testing the compute/Ray path directly, outside the application.
 
 Production deployment is automated — a push to `main` runs the tested, validated `prod` target
-through GitHub Actions rather than a manual `bundle deploy`. See **`docs/ci-cd.md`** for the CI/CD
-pipeline, required GitHub secrets, and rollback.
+through GitHub Actions rather than a manual `bundle deploy`.
 
 Three workflows cover it: `ci.yml` (tests and build validation, also reused as the pre-deploy gate),
-`deploy-databricks.yml` (job definitions), and `deploy-app.yml` (backend
+`deploy-databricks.yml` (the wheel artifact), and `deploy-app.yml` (backend
 and frontend). Every environment-specific value comes from an encrypted Actions secret, so no
 resource name, hostname or identifier is committed.
 

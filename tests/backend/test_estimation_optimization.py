@@ -316,7 +316,7 @@ def test_an_unreachable_history_store_still_estimates():
     )
     assert "heuristic" in estimate.calibration_basis
     assert estimate.estimated_minutes_low > 0
-    # The per-mode serverless startup constant, not a measured figure.
+    # The per-mode cloud startup constant, not a measured figure.
     assert any("startup" in item.label.lower() for item in estimate.breakdown)
 
 
@@ -332,11 +332,11 @@ def test_a_history_store_that_fails_mid_sweep_still_estimates():
 
 
 # ---------------------------------------------------------------------
-# 7. Serverless does not estimate TFT workload
+# 7. The databricks mode does not estimate TFT workload
 # ---------------------------------------------------------------------
 
 
-def test_serverless_excludes_tft_from_the_estimated_workload():
+def test_the_databricks_mode_excludes_tft_from_the_estimated_workload():
     df = _frame(groups=4, months_per_group=72)  # long enough to clear tft's 60-obs bar
     settings = Settings(execution_mode="databricks")
 

@@ -35,7 +35,11 @@ const MAX_PANEL_HEIGHT = 320
 //    popover library uses: flip to open upward when there's more room
 //    there, and cap height with internal scroll as a safety net
 //    regardless of which side it opens on.
-export default function DropdownPortal({ anchorRef, open, className, children }) {
+// `minWidth` lets a panel be wider than its trigger when its contents need
+// it (the business-key panel holds per-column filters, which truncate at a
+// narrow field width). Omitted, the panel matches the anchor exactly, which
+// is what every other Select does.
+export default function DropdownPortal({ anchorRef, open, className, minWidth, children }) {
   const [placement, setPlacement] = useState(null)
   const panelRef = useRef(null)
 
@@ -50,9 +54,17 @@ export default function DropdownPortal({ anchorRef, open, className, children })
       // is genuinely cramped and above offers more room to work with.
       const openUpward = spaceBelow < MIN_USABLE_HEIGHT && spaceAbove > spaceBelow
 
+      // A panel wider than its trigger can overhang the right edge; pull it
+      // back so it stays fully on screen.
+      const width = Math.max(rect.width, minWidth || 0)
+      const left = Math.max(
+        VIEWPORT_MARGIN,
+        Math.min(rect.left, window.innerWidth - width - VIEWPORT_MARGIN),
+      )
+
       setPlacement({
-        left: rect.left,
-        width: rect.width,
+        left,
+        width,
         openUpward,
         top: openUpward ? undefined : rect.bottom + 6,
         bottom: openUpward ? window.innerHeight - rect.top + 6 : undefined,
@@ -72,7 +84,7 @@ export default function DropdownPortal({ anchorRef, open, className, children })
       window.removeEventListener('resize', updatePlacement)
       window.removeEventListener('scroll', updatePlacement, true)
     }
-  }, [open, anchorRef])
+  }, [open, anchorRef, minWidth])
 
   if (!open || !placement) return null
 

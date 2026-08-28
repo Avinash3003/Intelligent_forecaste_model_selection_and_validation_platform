@@ -11,6 +11,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.compute import ComputeSelection
+
 
 class JobStatus(str, Enum):
     """Run status, identical across backends so the UI renders one status pill."""
@@ -46,6 +48,7 @@ class PipelineExecutionRequest(BaseModel):
     horizon: int | None = None
     # Lag/rolling/calendar features for the tree models, validated by the caller.
     derived_features: list[str] | None = None
+    compute: ComputeSelection | None = None
 
     # Always taken from the authenticated user server-side, never from the
     # request body, so a caller cannot submit a run as someone else.

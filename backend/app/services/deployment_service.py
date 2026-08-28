@@ -5,8 +5,19 @@ from app.auth.models import Principal
 from app.config.model_availability import strip_silently_skipped
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.exceptions import UnknownRunError
-from app.orchestration.schemas import JobStatus, PipelineExecutionRequest, RunListing
-from app.schemas.deployment import DeploymentRequest, DeploymentResponse, DeploymentStatus, StageStatus
+from app.orchestration.schemas import (
+    ExecutionBackend,
+    JobStatus,
+    PipelineExecutionRequest,
+    RunListing,
+)
+from app.schemas.deployment import (
+    ComputeStatus,
+    DeploymentRequest,
+    DeploymentResponse,
+    DeploymentStatus,
+    StageStatus,
+)
 
 # The pipeline's stage vocabulary lives in pipeline_stages.py — shared with
 # estimation, which needs the same names without importing the executor
@@ -45,6 +56,7 @@ def build_execution_request(
         fallback_model=request.fallback_model,
         horizon=request.horizon,
         derived_features=request.derived_features,
+        compute=request.compute,
         started_by_user_id=principal.subject,
         started_by_display_name=principal.display_name or principal.subject,
         started_by_email=principal.email,
@@ -94,6 +106,7 @@ class DeploymentService:
 
     def _to_deployment_status(self, listing: RunListing) -> DeploymentStatus:
         stages = self._to_stage_statuses(listing)
+        compute = _compute_status(listing, stages)
 
         # Counted against the ENGINE's stages, not the seven display phases:
         # the phases are a view for reading, and using them here would move
@@ -131,11 +144,14 @@ class DeploymentService:
             start_time=listing.started_at,
             duration=_format_duration(listing, stages),
             progress=progress,
-            current_stage=_current_stage(listing, stages),
+            # While compute is still being acquired there is no engine stage
+            # to name, and "Queued" reads as if nothing is happening.
+            current_stage=compute.label if compute else _current_stage(listing, stages),
             # No estimate is produced rather than a fabricated one: the
             # engine reports no per-stage timing until a run has finished.
             estimated_remaining="0 min" if listing.job_status is JobStatus.COMPLETED else "—",
             stages=stages,
+            compute=compute,
             error=listing.error,
             started_by=listing.started_by,
             cancelled_by=listing.cancelled_by,
@@ -164,10 +180,11 @@ class DeploymentService:
 
         # Rolled up to the seven display phases. A phase spans from the
         # first of its stages to start until the last to finish, so the
-        # elapsed time it reports is real wall clock — including the
-        # orchestration gaps BETWEEN its stages, which on the 11-task
-        # Serverless DAG are most of the run. Reporting each stage's own
-        # engine time instead made a 7-minute run read as ~54 seconds.
+        # elapsed time it reports is real wall clock. Reporting each
+        # stage's own engine time instead has understated a run's true
+        # duration before — the gap is compute startup now (see
+        # ComputeStatus), and was orchestration between DAG tasks on the
+        # old Serverless job before that.
         phases: list[StageStatus] = []
         for label, stage_names in PIPELINE_PHASES:
             members = [reported[n] for n in stage_names if n in reported]
@@ -215,6 +232,52 @@ class DeploymentService:
         )
 
         return phases
+
+
+# Infrastructure progress, from the run's real Databricks lifecycle state.
+#
+# Databricks holds a submitted run in PENDING for exactly as long as it is
+# acquiring compute — starting a stopped existing cluster, or provisioning a
+# new job cluster. It reports RUNNING only once the task is actually
+# executing on live compute. So the PENDING -> RUNNING transition IS the
+# moment compute became ready: it is observed, never timed or guessed, and
+# it is the same signal for both compute modes.
+#
+# Deliberately not a phase. The seven display phases are the engine's own
+# stages, and this returns None the moment the engine reports the first of
+# them, handing the trail back over.
+def _compute_status(listing: RunListing, stages: list[StageStatus]) -> ComputeStatus | None:
+    # Local execution has no compute to acquire.
+    if listing.execution_backend is not ExecutionBackend.DATABRICKS:
+        return None
+    # The engine has started reporting: the phases below say it better.
+    if any(stage.status != "Pending" for stage in stages):
+        return None
+
+    if listing.job_status is JobStatus.PENDING:
+        return ComputeStatus(
+            state="starting",
+            label="Starting Compute",
+            message="Starting the selected Databricks compute\u2026",
+            detail="This may take a few minutes for a stopped cluster.",
+        )
+    if listing.job_status is JobStatus.RUNNING:
+        return ComputeStatus(
+            state="ready",
+            label="Compute Ready",
+            message="Databricks compute is ready. Starting the forecast pipeline\u2026",
+        )
+    # Failed before a single stage began — the compute itself never came up
+    # (quota, a policy rejection, a cluster that could not start). Without
+    # this the trail would show seven Pending phases and no explanation.
+    if listing.job_status is JobStatus.FAILED:
+        return ComputeStatus(
+            state="failed",
+            label="Compute Unavailable",
+            message="The Databricks compute for this run could not be started.",
+            detail=listing.error,
+        )
+    return None
 
 
 # Human-readable run duration, measured live while a run is still going

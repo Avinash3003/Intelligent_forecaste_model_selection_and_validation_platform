@@ -32,6 +32,7 @@ from app.orchestration.mlflow_history import (
     STARTED_BY_DISPLAY_NAME_TAG,
     MLflowHistoryStore,
 )
+from app.schemas.compute import ComputeSelection
 from app.orchestration.schemas import JobStatus, PipelineExecutionRequest
 
 from test_databricks_runner import _FakeWorkspace, _request as _dbx_request  # noqa: E402
@@ -255,6 +256,7 @@ def test_databricks_started_by_travels_through_the_job_configuration(dbx_setting
     workspace = _FakeWorkspace()
     runner = DatabricksRunner(dbx_settings, workspace_client=workspace)
     request = PipelineExecutionRequest(
+        compute=ComputeSelection(mode="existing_compute", cluster_id="test-cluster"),
         dataset_path=str(dataset),
         dataset_name="sales.csv",
         forecast_configuration={

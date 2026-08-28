@@ -1,16 +1,3 @@
-# ForecastIQ — Databricks Asset Bundle
-#
-# Deploys ONE Job resource:
-#
-#   forecast_job_serverless.yml   Databricks-managed compute, no Docker image.
-#                                  The cloud execution path.
-#
-# See docs/execution-modes.md. The wheel deliberately contains no
-# dependencies; the job's `environments:` spec resolves them at run time.
-#
-# A second job (Databricks Container Services, Docker image from ACR) used to
-# be deployed alongside this one. It was removed from the active project and
-# preserved under migration_archive/dcs/ — see that folder to restore it.
 
 bundle:
   name: forecastiq
@@ -20,9 +7,20 @@ bundle:
 # Override per target below, or on the CLI: --var="key=value".
 # ---------------------------------------------------------------------
 variables:
-  job_name:
-    description: Display name of the Serverless Databricks Job (the primary cloud execution path).
-    default: forecastiq-forecast-pipeline
+  compute_job_name:
+    description: >-
+      Display name of the dev-only Ray key-parallel Job below. Deployed for
+      manual/CLI use — the application itself submits every cloud run
+      through jobs.submit (backend/app/orchestration/databricks_runner.py),
+      never by resolving or triggering a job by name.
+    default: forecastiq-forecast-pipeline-compute
+
+  existing_cluster_id:
+    description: >-
+      Cluster id of an ALREADY EXISTING all-purpose cluster for the key-parallel
+      job. Nothing here ever creates a cluster. Empty by default so a prod
+      deploy is unaffected; the dev target's job is the only consumer.
+    default: ""
 
 
   catalog:
@@ -34,9 +32,6 @@ variables:
     default: forecasting
 
 
-
-
-
   volume:
     description: Existing Unity Catalog external volume holding datasets and run output.
     default: forecast_files
@@ -46,17 +41,7 @@ variables:
     description: MLflow experiment path in the Databricks workspace.
     default: /Shared/forecastiq/forecast-engine
 
-  # Azure OpenAI (LLM business insights, s11_llm) — genuinely optional.
-  #
-  # These hold the *values* of the cluster's AZURE_OPENAI_* env vars, and
-  # default to empty on purpose. Databricks resolves `{{secrets/...}}` in
-  # spark_env_vars during cluster init, before any Python runs, so hardcoding a
-  # secret reference here makes the whole job fail to start when that secret is
-  # absent — the engine's own graceful degradation never gets a chance to apply.
-  # Empty means no secret lookup happens at all, and forecast_engine's `_env()`
-  # reads blank as "not configured" and reports insights as unavailable.
-  #
-  # To enable, point these at real secrets in a target below (see `dev`).
+ 
   azure_openai_endpoint:
     description: Value for AZURE_OPENAI_ENDPOINT. Empty disables LLM insights.
     default: ""
@@ -77,8 +62,6 @@ variables:
       readable. A UC volume path is /Volumes/<catalog>/<schema>/<volume>, so the
       volume name must be included: forecastiq.forecasting.forecast_files is an
       EXTERNAL volume over the deployment's `uploads` container.
-    # Composed from catalog/schema above so retargeting a environment means
-    # changing those two values, not editing a path in three places.
     default: /Volumes/${var.catalog}/${var.schema}/${var.volume}
 
   cicd_service_principal_id:
@@ -94,22 +77,13 @@ variables:
       --var="cicd_service_principal_id=...". A missing value fails
       validation immediately rather than deploying to the wrong path.
 
-# ---------------------------------------------------------------------
-# Artifacts — the wheel is built and uploaded by the bundle itself.
-# `path: ..` is the repo root (this file lives in databricks/), where
-# pyproject.toml and dist/ are.
+
 # ---------------------------------------------------------------------
 artifacts:
   forecast_engine_wheel:
     type: whl
     path: ..
-    # `pip wheel` rather than `python -m build`: setuptools writes its
-    # intermediate output to a `build/` directory in the repo root, which then
-    # shadows the PyPI `build` module as an implicit namespace package, so
-    # `python -m build` fails with "No module named build.__main__" on any
-    # machine that has built once. pip is never shadowed and needs no extra
-    # dependency installed. Both drive the same pyproject.toml setuptools
-    # backend and emit the same wheel.
+    
     build: python3 -m pip wheel . --no-deps --wheel-dir dist
 
 include:
@@ -123,51 +97,92 @@ targets:
     mode: development
     default: true
     workspace:
-      # No `host:` here: the workspace URL identifies the Azure tenant, so it
-      # is supplied by the environment instead of committed. DAB does not
-      # allow variable interpolation on this field ("Interpolation is not
-      # supported for the field workspace.host"), so DATABRICKS_HOST is the
-      # supported mechanism — see .env.example.
-      #
-      # Set DATABRICKS_HOST *and* an auth variable together. DATABRICKS_HOST
-      # alone loses to `default_profile` in ~/.databrickscfg, which silently
-      # targets whichever workspace that profile names.
+      
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
-      # Enabled for dev: these three secrets are populated in the `forecastiq`
-      # scope in this workspace. Remove this block (or blank the values) and the
-      # job still starts — insights are simply reported as unavailable.
+
       azure_openai_endpoint: "{{secrets/forecastiq/azure-openai-endpoint}}"
       azure_openai_api_key: "{{secrets/forecastiq/azure-openai-api-key}}"
       azure_openai_deployment: "{{secrets/forecastiq/azure-openai-deployment}}"
 
+    # Declared under `dev` rather than in resources/ on purpose: a resources/
+    # file is included by every target, and this job must never reach prod.
+    #
+    # Deployed for manual/CLI use only (`databricks bundle run
+    # forecast_pipeline_compute -t dev`) — the application never triggers a
+    # job by name or id. Every cloud run the backend submits goes through
+    # jobs.submit with an ad-hoc single task instead (see
+    # backend/app/orchestration/databricks_runner.py); this resource is not
+    # part of that path.
+    resources:
+      jobs:
+        forecast_pipeline_compute:
+          name: ${var.compute_job_name}
+          description: >-
+            Runs the whole forecast_engine pipeline in ONE task on an existing
+            all-purpose cluster, fanning each forecast key's complete workflow
+            out across Ray. One process, so no cross-task checkpoints.
+
+          parameters:
+            - name: dataset
+              default: ""
+            - name: config
+              default: ""
+            - name: summary_out
+              default: ${var.volumes_root}/runs/{{job.run_id}}/summary.json
+            - name: live_status_out
+              default: ${var.volumes_root}/runs/{{job.run_id}}/live_status.json
+            - name: azure_openai_endpoint
+              default: ${var.azure_openai_endpoint}
+            - name: azure_openai_api_key
+              default: ${var.azure_openai_api_key}
+            - name: azure_openai_deployment
+              default: ${var.azure_openai_deployment}
+
+          tasks:
+            - task_key: forecast_pipeline
+              # An id that must already exist — this creates no compute.
+              existing_cluster_id: ${var.existing_cluster_id}
+              python_wheel_task:
+                package_name: forecast_engine
+                entry_point: forecast-engine
+                parameters:
+                  - --dataset
+                  - "{{job.parameters.dataset}}"
+                  - --config
+                  - "{{job.parameters.config}}"
+                  - --summary-out
+                  - "{{job.parameters.summary_out}}"
+                  - --live-status-out
+                  - "{{job.parameters.live_status_out}}"
+                  - --azure-openai-endpoint
+                  - "{{job.parameters.azure_openai_endpoint}}"
+                  - --azure-openai-api-key
+                  - "{{job.parameters.azure_openai_api_key}}"
+                  - --azure-openai-deployment
+                  - "{{job.parameters.azure_openai_deployment}}"
+                  - --parallel-keys
+              # The wheel alone, with no extras. A Databricks ML runtime
+              # already ships Ray, statsmodels, xgboost, lightgbm, prophet,
+              # shap, openai and mlflow-skinny, so naming them here only
+              # re-resolves versions the runtime pins — which rewrites its
+              # scientific stack and moves pydantic across a major. The
+              # wheel's own base dependencies are already satisfied except
+              # for openpyxl.
+              libraries:
+                - whl: ../dist/*.whl
+
+          max_concurrent_runs: 1
+          queue:
+            enabled: true
+
   prod:
     mode: production
     workspace:
-      # A fixed path, not `${workspace.current_user.userName}` — CI/CD deploys
-      # as the sp-forecastiq-cicd service principal, not an interactive user,
-      # and `mode: production` deliberately disallows the per-user identity
-      # this bundle's `dev` target relies on (which is also what `dev` prefixes
-      # every job name with — "[dev <user>] " — and `prod` does not).
-      #
-      # Scoped under the service principal's own id, not /Workspace/Shared —
-      # `bundle validate` warns that /Workspace/Shared is writable by every
-      # workspace user, which fails the least-privilege bar. This path is
-      # readable/writable only by the principal that owns it and workspace
-      # admins.
+     
       root_path: /Workspace/Users/${var.cicd_service_principal_id}/.bundle/${bundle.name}/${bundle.target}
-    # Deliberately no `run_as:` override. A Databricks job runs as whoever
-    # deployed it by default, and CI/CD always deploys authenticated AS
-    # sp-forecastiq-cicd (its OAuth client_id/secret) — so jobs are already
-    # owned by the right principal with no extra binding needed. Setting
-    # `run_as` explicitly here would require whichever identity deploys to
-    # additionally hold the account-level "Service Principal: User" role on
-    # sp-forecastiq-cicd (a separate, higher-tier grant only an account
-    # admin can make) purely to guard against a human deploying `prod`
-    # manually — a case this bundle discourages by convention (deploy `prod`
-    # through CI) rather than by adding an account-admin dependency for it.
+    
     variables:
-      # Same secret scope as `dev` — no second Key Vault/secret-scope strategy.
       azure_openai_endpoint: "{{secrets/forecastiq/azure-openai-endpoint}}"
       azure_openai_api_key: "{{secrets/forecastiq/azure-openai-api-key}}"
       azure_openai_deployment: "{{secrets/forecastiq/azure-openai-deployment}}"

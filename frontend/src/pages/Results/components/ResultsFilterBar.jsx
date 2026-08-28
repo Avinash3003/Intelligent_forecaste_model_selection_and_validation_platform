@@ -1,4 +1,8 @@
 import Select from '../../../components/ui/Select'
+import BusinessKeySelector from './BusinessKeySelector'
+
+const LABEL_CLASS =
+  'mb-1.5 block truncate text-xs font-semibold uppercase tracking-wide text-slate-400'
 
 function FilterField({ label, children }) {
   // `min-w-0` is what actually prevents the overflow: a grid/flex child
@@ -8,9 +12,7 @@ function FilterField({ label, children }) {
   // control instead.
   return (
     <div className="min-w-0">
-      <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-400">
-        {label}
-      </label>
+      <label className={LABEL_CLASS}>{label}</label>
       {children}
     </div>
   )
@@ -23,6 +25,10 @@ function FilterField({ label, children }) {
 // Dataset and Run are dependent: `runOptions` is expected to already be
 // filtered down to the selected dataset's own runs (newest first) — this
 // component just renders whatever it is given, never re-derives it.
+//
+// Business Key stays one field: its key columns are split inside the
+// dropdown panel, so the bar keeps this four-column layout regardless of
+// how many key columns a run has.
 export default function ResultsFilterBar({
   dataset,
   datasetOptions = [],
@@ -37,10 +43,6 @@ export default function ResultsFilterBar({
   horizonOptions = [],
   onHorizonChange,
 }) {
-  // A 2-up grid at card width, 4-up only once there is genuinely room for
-  // it. The previous single flex row asked for 4 x 180px minimum, which the
-  // chart card cannot give beside the AI Insight panel — so Forecast
-  // Horizon was pushed past the card's right edge.
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 xl:items-end">
       <FilterField label="Dataset">
@@ -49,14 +51,11 @@ export default function ResultsFilterBar({
       <FilterField label="Run">
         <Select value={run} onChange={onRunChange} options={runOptions} placeholder="Select run" />
       </FilterField>
-      <FilterField label="Business Key">
-        <Select
-          value={businessKey}
-          onChange={onBusinessKeyChange}
-          options={businessKeyOptions}
-          placeholder="Select key"
-        />
-      </FilterField>
+      <BusinessKeySelector
+        value={businessKey}
+        options={businessKeyOptions}
+        onChange={onBusinessKeyChange}
+      />
       <FilterField label="Forecast Horizon">
         <Select
           value={horizon}

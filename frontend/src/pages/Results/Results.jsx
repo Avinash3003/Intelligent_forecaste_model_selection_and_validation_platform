@@ -27,7 +27,14 @@ function normalizeResults(response) {
   return {
     runId: response.run_id,
     groupId: response.group_id,
-    groups: response.groups.map((group) => ({ value: group.group_id, label: group.label })),
+    // `value`/`label` keep the plain Select contract; `group_id`/`key_values`
+    // are what BusinessKeySelector splits into one dropdown per key column.
+    groups: response.groups.map((group) => ({
+      value: group.group_id,
+      label: group.label,
+      group_id: group.group_id,
+      key_values: group.key_values || {},
+    })),
     horizonPoints: response.horizon_points,
     datasetDateRangeStart: response.dataset_date_range_start,
     datasetDateRangeEnd: response.dataset_date_range_end,

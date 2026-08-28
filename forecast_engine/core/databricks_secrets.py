@@ -1,11 +1,15 @@
-"""Resolves {{secrets/scope/key}} in the --azure-openai-* flags on Serverless.
+"""Resolves {{secrets/scope/key}} in the --azure-openai-* flags.
 
 Databricks expands that template in cluster env vars but not in job
 parameters, and a wheel task has no cluster env vars to use — so the value
 arrives at the CLI still in template form. dbutils.secrets.get() is the only
 supported way to read the real value from running code.
 
-Only Serverless hits this; local runs set real environment variables.
+Only a Databricks Jobs API python_wheel_task whose job parameters reference
+a secret template hits this (currently: databricks.yml's dev-only
+forecast_pipeline_compute job); local runs set real environment variables
+directly, and a run submitted via jobs.submit (backend/app/orchestration/
+databricks_runner.py) never passes these flags at all.
 """
 
 from __future__ import annotations

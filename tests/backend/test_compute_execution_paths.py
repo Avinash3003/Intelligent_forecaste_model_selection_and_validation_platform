@@ -1,0 +1,399 @@
+"""The selected compute is the compute that runs — with no fallback.
+
+Compute Configuration exists so the user decides where the Ray workload
+executes. A run must therefore never be redirected to a job resolved by
+name, which is how it previously reached the Serverless pipeline.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from app.config.settings import Settings
+from app.orchestration.databricks_runner import DatabricksRunner
+from app.orchestration.exceptions import ExecutionError
+from app.orchestration.schemas import PipelineExecutionRequest
+from app.schemas.compute import ComputeSelection, JobComputeConfig
+
+
+class _FakeFiles:
+    def __init__(self) -> None:
+        self.uploaded: dict[str, bytes] = {}
+
+    def upload(self, file_path, contents, overwrite=False):
+        self.uploaded[file_path] = contents.read()
+
+    def delete_directory(self, path):
+        pass
+
+
+class _FakeJobs:
+    def __init__(self) -> None:
+        self.submit_calls: list[dict] = []
+
+    def submit(self, run_name=None, tasks=None):
+        self.submit_calls.append({"run_name": run_name, "tasks": tasks})
+        return SimpleNamespace(run_id=99)
+
+    def get_run(self, run_id, **kwargs):
+        return SimpleNamespace(
+            state=SimpleNamespace(life_cycle_state="RUNNING", result_state=None, state_message=""),
+            run_duration=1,
+        )
+
+
+class _FakeWorkspace:
+    def __init__(self) -> None:
+        self.files = _FakeFiles()
+        self.jobs = _FakeJobs()
+
+
+@pytest.fixture
+def settings(tmp_path, mlflow_db):
+    return Settings(
+        execution_mode="databricks",
+        databricks_host="https://example.invalid",
+        databricks_token="test-token",
+        upload_dir=str(tmp_path / "uploads"),
+        mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
+    )
+
+
+@pytest.fixture
+def dataset(tmp_path) -> Path:
+    path = tmp_path / "sales.csv"
+    path.write_text("date,store,sales\n2024-01-01,S1,10\n")
+    return path
+
+
+def _request(dataset: Path, compute) -> PipelineExecutionRequest:
+    return PipelineExecutionRequest(
+        dataset_path=str(dataset),
+        dataset_name="sales.csv",
+        forecast_configuration={
+            "date_column": "date",
+            "target_column": "sales",
+            "key_columns": ["store"],
+            "feature_columns": [],
+        },
+        compute=compute,
+    )
+
+
+def _submitted_task(workspace):
+    return workspace.jobs.submit_calls[0]["tasks"][0]
+
+
+def _run(settings, dataset, compute):
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    run_id = runner.submit(_request(dataset, compute))
+    return workspace, runner, run_id
+
+
+# ---- new job compute ------------------------------------------------
+
+
+NEW_COMPUTE = ComputeSelection(
+    mode="new_job_compute",
+    job_compute=JobComputeConfig(
+        node_type_id="Standard_E8ads_v7", runtime_key="16.4.x-cpu-ml-scala2.12", num_workers=3
+    ),
+)
+
+
+def test_new_compute_reaches_submit_with_the_selected_values(settings, dataset):
+    workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.node_type_id == "Standard_E8ads_v7"
+    assert cluster.spark_version == "16.4.x-cpu-ml-scala2.12"
+    assert cluster.num_workers == 3
+    assert _submitted_task(workspace).existing_cluster_id is None
+
+
+def test_new_compute_carries_autoscale_bounds(settings, dataset):
+    compute = ComputeSelection(
+        mode="new_job_compute",
+        job_compute=JobComputeConfig(
+            node_type_id="Standard_F4ads_v7",
+            runtime_key="15.4.x-cpu-ml-scala2.12",
+            autoscale=True,
+            min_workers=2,
+            max_workers=7,
+        ),
+    )
+    workspace, _, _ = _run(settings, dataset, compute)
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.autoscale.min_workers == 2
+    assert cluster.autoscale.max_workers == 7
+    assert cluster.num_workers is None
+
+
+def test_single_node_new_compute_is_marked_single_node(settings, dataset):
+    compute = ComputeSelection(
+        mode="new_job_compute",
+        job_compute=JobComputeConfig(
+            node_type_id="Standard_DC4as_v5", runtime_key="15.4.x-cpu-ml-scala2.12", num_workers=0
+        ),
+    )
+    workspace, _, _ = _run(settings, dataset, compute)
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.num_workers == 0
+    assert cluster.custom_tags["ResourceClass"] == "SingleNode"
+
+
+# ---- Databricks Container Services (docker_image) --------------------
+#
+# A new job cluster pulls the configured runtime image instead of resolving
+# its dependencies from the Databricks runtime, when Container Services is
+# configured. `databricks_docker_image_url` is the single on/off switch --
+# blank means DCS stays off and the cluster is built exactly as it always
+# was, matching every other optional Databricks feature on Settings.
+
+
+def test_docker_image_is_absent_when_dcs_is_not_configured(settings, dataset):
+    """Configuration loading: the default Settings has no DCS fields set,
+    so a new job cluster must come back with no docker_image at all --
+    this must never require an explicit opt-out."""
+    workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.docker_image is None
+
+
+def test_new_compute_attaches_the_configured_docker_image(settings, dataset):
+    dcs_settings = settings.model_copy(
+        update={
+            "databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1",
+            "databricks_docker_image_username": "sp-forecastiq-dcs-acrpull",
+            "databricks_docker_image_password": "super-secret-value",
+        }
+    )
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
+    runner.submit(_request(dataset, NEW_COMPUTE))
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.docker_image.url == "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"
+    assert cluster.docker_image.basic_auth.username == "sp-forecastiq-dcs-acrpull"
+    assert cluster.docker_image.basic_auth.password == "super-secret-value"
+    # Every other field is untouched -- DCS is additive, not a rewrite.
+    assert cluster.node_type_id == "Standard_E8ads_v7"
+    assert cluster.num_workers == 3
+
+
+def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):
+    """Two different configured URLs must produce two different clusters --
+    proof the value comes from settings, not a literal in the runner."""
+    first_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+    )
+    first_ws = _FakeWorkspace()
+    DatabricksRunner(first_settings, workspace_client=first_ws).submit(_request(dataset, NEW_COMPUTE))
+
+    second_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "otheracr.azurecr.io/some-other-image:v9"}
+    )
+    second_ws = _FakeWorkspace()
+    DatabricksRunner(second_settings, workspace_client=second_ws).submit(_request(dataset, NEW_COMPUTE))
+
+    assert _submitted_task(first_ws).new_cluster.docker_image.url.endswith("forecastiq-runtime:v1")
+    assert _submitted_task(second_ws).new_cluster.docker_image.url.endswith("some-other-image:v9")
+
+
+def test_docker_image_without_credentials_has_no_basic_auth(settings, dataset):
+    """A public or already-cached image needs no credential -- basic_auth
+    must not be forced onto a spec that never asked for it."""
+    dcs_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+    )
+    workspace = _FakeWorkspace()
+    DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+    cluster = _submitted_task(workspace).new_cluster
+
+    assert cluster.docker_image.url
+    assert cluster.docker_image.basic_auth is None
+
+
+def test_existing_compute_path_never_touches_docker_image(settings, dataset):
+    """Existing compute is preserved exactly as it was: it attaches by
+    cluster id and must never gain a docker_image, even when DCS is
+    configured for new job compute."""
+    dcs_settings = settings.model_copy(
+        update={
+            "databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1",
+            "databricks_docker_image_username": "sp-forecastiq-dcs-acrpull",
+            "databricks_docker_image_password": "super-secret-value",
+        }
+    )
+    existing = ComputeSelection(mode="existing_compute", cluster_id="0826-092202-g7bkkhgi")
+    workspace = _FakeWorkspace()
+    DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, existing))
+    task = _submitted_task(workspace)
+
+    assert task.existing_cluster_id == "0826-092202-g7bkkhgi"
+    assert task.new_cluster is None
+
+
+def test_the_acr_password_never_reaches_a_run_id_or_error_message(settings, dataset, caplog):
+    """A submission failure must still redact the password -- the same
+    guarantee every other Databricks credential on this class already has."""
+    dcs_settings = settings.model_copy(
+        update={
+            "databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1",
+            "databricks_docker_image_username": "sp-forecastiq-dcs-acrpull",
+            "databricks_docker_image_password": "super-secret-value",
+        }
+    )
+
+    class _FailingJobs(_FakeJobs):
+        def submit(self, run_name=None, tasks=None):
+            raise RuntimeError(f"denied for password=super-secret-value on {run_name}")
+
+    workspace = _FakeWorkspace()
+    workspace.jobs = _FailingJobs()
+    runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
+
+    run_id = runner.submit(_request(dataset, NEW_COMPUTE))
+    status = runner.get_run(run_id)
+
+    assert "super-secret-value" not in (status.error or "")
+    assert "super-secret-value" not in caplog.text
+
+
+def test_dcs_never_routes_through_run_now_or_a_job_name(settings, dataset):
+    """No Serverless routing is introduced: DCS is the same jobs.submit path
+    every other compute selection already uses."""
+    dcs_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+    )
+    workspace = _FakeWorkspace()
+    assert not hasattr(workspace.jobs, "run_now")
+
+    DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    assert len(workspace.jobs.submit_calls) == 1
+
+
+def test_no_node_type_or_worker_count_is_hardcoded(settings, dataset):
+    """Two different selections must produce two different clusters."""
+    first, _, _ = _run(settings, dataset, NEW_COMPUTE)
+    second_compute = ComputeSelection(
+        mode="new_job_compute",
+        job_compute=JobComputeConfig(
+            node_type_id="Standard_L4aos_v4", runtime_key="15.4.x-cpu-ml-scala2.12", num_workers=1
+        ),
+    )
+    second, _, _ = _run(settings, dataset, second_compute)
+
+    assert _submitted_task(first).new_cluster.node_type_id != _submitted_task(second).new_cluster.node_type_id
+    assert _submitted_task(first).new_cluster.num_workers != _submitted_task(second).new_cluster.num_workers
+
+
+# ---- existing compute -----------------------------------------------
+
+
+EXISTING = ComputeSelection(mode="existing_compute", cluster_id="0826-abc-chosen")
+
+
+def test_existing_compute_runs_on_the_selected_cluster(settings, dataset):
+    workspace, _, _ = _run(settings, dataset, EXISTING)
+    task = _submitted_task(workspace)
+
+    assert task.existing_cluster_id == "0826-abc-chosen"
+    assert task.new_cluster is None
+
+
+def test_execution_does_not_depend_on_a_named_job(settings, dataset):
+    """Where a run executes comes from the selection, never a job lookup."""
+    workspace, _, _ = _run(settings, dataset, EXISTING)
+
+    assert _submitted_task(workspace).existing_cluster_id == "0826-abc-chosen"
+    assert not hasattr(settings, "databricks_job_name")
+    assert not hasattr(workspace.jobs, "run_now_calls")
+
+
+def test_both_modes_submit_the_same_wheel_task(settings, dataset):
+    new_task = _submitted_task(_run(settings, dataset, NEW_COMPUTE)[0])
+    existing_task = _submitted_task(_run(settings, dataset, EXISTING)[0])
+
+    assert new_task.python_wheel_task.package_name == existing_task.python_wheel_task.package_name
+    assert new_task.python_wheel_task.entry_point == existing_task.python_wheel_task.entry_point
+    # Run ids differ, so compare the argument shape rather than the paths.
+    flags = lambda task: [a for a in task.python_wheel_task.parameters if a.startswith("--")]
+    assert flags(new_task) == flags(existing_task)
+    assert "--parallel-keys" in flags(new_task)
+
+
+# ---- safety ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "compute, expected",
+    [
+        (None, "Select the compute"),
+        (ComputeSelection(mode="existing_compute", cluster_id=None), "missing its cluster id"),
+        (ComputeSelection(mode="existing_compute", cluster_id="   "), "missing its cluster id"),
+    ],
+)
+def test_missing_compute_fails_clearly(settings, dataset, compute, expected):
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    run_id = runner.submit(_request(dataset, compute))
+
+    # Recorded as a failed run rather than raised; the caller holds the id.
+    from app.orchestration.schemas import JobStatus
+
+    assert runner.get_status(run_id) is JobStatus.FAILED
+    assert workspace.jobs.submit_calls == []
+
+
+def test_unknown_compute_mode_is_rejected():
+    with pytest.raises(ValueError):
+        ComputeSelection(mode="serverless")
+
+
+# Routing a run by job name is how execution previously reached the
+# Serverless pipeline; no application module may do it again.
+FORBIDDEN_ROUTING = ("run_now", "_resolve_job_id", "databricks_job_name", "databricks_job_id")
+
+
+def test_no_application_module_can_route_a_run_by_job_name():
+    offenders = []
+    for path in Path("backend/app").rglob("*.py"):
+        source = path.read_text()
+        for token in FORBIDDEN_ROUTING:
+            if token in source:
+                offenders.append(f"{path}: {token}")
+    assert not offenders, f"Serverless routing reachable from: {offenders}"
+
+
+def test_the_engine_is_never_asked_to_run_a_serverless_stage_group():
+    """The wheel task must run the whole pipeline, not one DAG task."""
+    settings_source = Path("backend/app/orchestration/databricks_runner.py").read_text()
+    assert "--stage-group" not in settings_source
+    assert "--checkpoint-dir" not in settings_source
+
+
+# ---- regression ------------------------------------------------------
+
+
+def test_volume_paths_and_config_staging_are_unchanged(settings, dataset):
+    workspace, _, run_id = _run(settings, dataset, EXISTING)
+    root = f"{settings.databricks_volumes_root}/runs/{run_id}"
+
+    assert f"{root}/sales.csv" in workspace.files.uploaded
+    config = json.loads(workspace.files.uploaded[f"{root}/forecast_configuration.json"])
+    assert config["date_column"] == "date"
+    assert config["curated_storage"]["root_dir"].startswith(settings.databricks_curated_volumes_root)
+
+    args = _submitted_task(workspace).python_wheel_task.parameters
+    assert f"{root}/summary.json" in args
+    assert f"{root}/live_status.json" in args

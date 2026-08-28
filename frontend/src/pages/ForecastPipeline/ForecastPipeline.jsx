@@ -7,9 +7,22 @@ import StepDatasetUpload from './components/StepDatasetUpload'
 import StepDatasetProfiling from './components/StepDatasetProfiling'
 import StepMetadataMapping from './components/StepMetadataMapping'
 import StepForecastConfiguration from './components/StepForecastConfiguration'
+import StepComputeConfiguration from './components/StepComputeConfiguration'
 import StepReviewDeploy from './components/StepReviewDeploy'
 import WizardFooter from './components/WizardFooter'
-import { uploadDataset, profileDataset, fetchDatasetDateRange, validateMetadata, deployRun, estimateRun } from '../../services'
+import {
+  uploadDataset,
+  profileDataset,
+  fetchDatasetDateRange,
+  validateMetadata,
+  deployRun,
+  estimateRun,
+  fetchComputeOptions,
+  fetchExistingCompute,
+  validateExistingCompute,
+  validateCompute,
+  toComputePayload,
+} from '../../services'
 import {
   forecastPipelineSteps,
   forecastModels,
@@ -17,6 +30,7 @@ import {
   defaultForecastHorizon,
   defaultAggregationMethod,
   defaultDerivedFeatures,
+  defaultComputeSelection,
 } from '../../data/appConfig'
 
 const initialMapping = {
@@ -122,7 +136,15 @@ export default function ForecastPipeline() {
   // Step 4 — Forecast Configuration (client-side only in this phase)
   const [config, setConfig] = useState(initialConfig)
 
-  // Step 5 — Estimate & Run
+  // Step 5 — Compute
+  const [compute, setCompute] = useState(defaultComputeSelection)
+  const [computeOptions, setComputeOptions] = useState(null)
+  const [existingCompute, setExistingCompute] = useState(null)
+  const [existingComputeLoading, setExistingComputeLoading] = useState(false)
+  const [computeValidation, setComputeValidation] = useState({ state: 'idle', message: '' })
+  const [existingValidation, setExistingValidation] = useState({ state: 'idle', message: '' })
+
+  // Step 6 — Estimate & Run
   const [estimate, setEstimate] = useState(null)
   const [estimateLoading, setEstimateLoading] = useState(false)
   const [estimateError, setEstimateError] = useState(null)
@@ -319,6 +341,106 @@ export default function ForecastPipeline() {
     }
   }
 
+  // Presets, so this answers without contacting Databricks.
+  useEffect(() => {
+    if (currentStep !== 5 || computeOptions) return
+
+    let cancelled = false
+    fetchComputeOptions().then((options) => {
+      if (cancelled) return
+      setComputeOptions(options)
+      setCompute((current) => ({
+        ...current,
+        nodeTypeId: current.nodeTypeId || options.defaultNodeTypeId || '',
+        runtimeKey: current.runtimeKey || options.defaultRuntimeKey || '',
+      }))
+    })
+
+    return () => {
+      cancelled = true
+    }
+    // computeOptions is read here as an "already loaded" guard, not as a
+    // trigger: listing it would re-run this effect the instant it is set.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep])
+
+  // The fallback lookup gets its own effect because it is much the slower
+  // of the two requests -- it costs a real Databricks call, where the
+  // presets above cost none. Sharing one effect meant the presets always
+  // landed first and, since setting them re-ran that effect, cancelled
+  // this request mid-flight: its .then and .finally were both skipped, so
+  // the step sat on "loading" forever with no retry and Next disabled.
+  useEffect(() => {
+    if (currentStep !== 5 || existingCompute) return
+
+    let cancelled = false
+    setExistingComputeLoading(true)
+    fetchExistingCompute()
+      .then((result) => {
+        if (cancelled) return
+        setExistingCompute(result)
+        setCompute((current) => ({
+          ...current,
+          existingClusterId: result.compute?.clusterId ?? null,
+          mode: result.available ? current.mode : 'new_job_compute',
+        }))
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setExistingCompute({ available: false, message: 'The existing compute could not be reached.' })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setExistingComputeLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep])
+
+  // Changing the configuration invalidates any earlier validation result.
+  const handleComputeChange = (next) => {
+    setCompute(next)
+    if (next.mode === compute.mode) {
+      setComputeValidation({ state: 'idle', message: '' })
+    }
+  }
+
+  const handleValidateExistingCompute = async () => {
+    setExistingValidation({ state: 'validating', message: '' })
+    try {
+      const result = await validateExistingCompute()
+      setExistingValidation({
+        state: result.valid ? 'valid' : 'invalid',
+        message: result.message,
+      })
+    } catch (err) {
+      setExistingValidation({ state: 'invalid', message: err.message })
+    }
+  }
+
+  const handleValidateCompute = async () => {
+    setComputeValidation({ state: 'validating', message: '' })
+    try {
+      const result = await validateCompute(compute)
+      setComputeValidation({
+        state: result.valid ? 'valid' : 'invalid',
+        message: result.message,
+      })
+    } catch (err) {
+      setComputeValidation({ state: 'invalid', message: err.message })
+    }
+  }
+
+  // New compute must be validated; existing compute must actually exist.
+  // Either mode must be validated against Databricks before continuing.
+  const canLeaveComputeStep =
+    compute.mode === 'existing_compute'
+      ? existingValidation.state === 'valid'
+      : computeValidation.state === 'valid'
+
   const handleNext = async () => {
     if (isBusy) return
 
@@ -371,6 +493,13 @@ export default function ForecastPipeline() {
     }
 
     if (currentStep === 5) {
+      if (!canLeaveComputeStep) return
+      setErrors({})
+      advanceTo(6)
+      return
+    }
+
+    if (currentStep === 6) {
       setDeploying(true)
       setDeployError(null)
       try {
@@ -383,6 +512,7 @@ export default function ForecastPipeline() {
           horizon: config.horizon,
           // Monthly data needs no roll-up, so no method is sent for it.
           aggregationMethod: aggregationRequired ? aggregationMethod : null,
+          compute: toComputePayload(compute),
         })
         setRunId(response.run_id)
         setDeployed(true)
@@ -395,7 +525,7 @@ export default function ForecastPipeline() {
   }
 
   const nextLoading =
-    currentStep === 1 ? uploading : currentStep === 2 ? profiling : currentStep === 5 ? deploying : false
+    currentStep === 1 ? uploading : currentStep === 2 ? profiling : currentStep === 6 ? deploying : false
 
   // Step 3 cannot be left until the backend has validated the mapping and
   // found it deployable. Any mapping edit clears the result, which disables
@@ -404,8 +534,9 @@ export default function ForecastPipeline() {
   // is shown; it always carries a default, so this only blocks if a user
   // explicitly clears it.
   const nextDisabled =
-    currentStep === 3 &&
-    (!validationResult?.readyForDeployment || (aggregationRequired && !aggregationMethod))
+    (currentStep === 3 &&
+      (!validationResult?.readyForDeployment || (aggregationRequired && !aggregationMethod))) ||
+    (currentStep === 5 && !canLeaveComputeStep)
 
   return (
     <PageContainer>
@@ -472,7 +603,23 @@ export default function ForecastPipeline() {
             <StepForecastConfiguration config={config} onChange={updateConfig} errors={errors} />
           )}
           {currentStep === 5 && (
+            <StepComputeConfiguration
+              compute={compute}
+              options={computeOptions}
+              existingCompute={existingCompute}
+              existingComputeLoading={existingComputeLoading}
+              validation={computeValidation}
+              existingValidation={existingValidation}
+              onChange={handleComputeChange}
+              onValidate={handleValidateCompute}
+              onValidateExisting={handleValidateExistingCompute}
+            />
+          )}
+
+          {currentStep === 6 && (
             <StepReviewDeploy
+              compute={compute}
+              existingCompute={existingCompute?.compute}
               file={file}
               mapping={mapping}
               config={config}

@@ -14,6 +14,7 @@ import pytest
 
 from app.config.settings import Settings
 from app.orchestration.databricks_runner import DatabricksRunner
+from app.schemas.compute import ComputeSelection
 from app.orchestration.schemas import PipelineExecutionRequest
 from app.services.dataset_preview_service import DatasetPreviewService
 
@@ -31,15 +32,29 @@ class _FakeFiles:
         return SimpleNamespace(contents=SimpleNamespace(read=lambda: self.uploaded[file_path]))
 
 
+
+# The engine arguments of the submitted wheel task, as a {flag: value} map.
+def _submitted_parameters(workspace):
+    task = workspace.jobs.submit_calls[0]["tasks"][0]
+    args = task.python_wheel_task.parameters
+    flags = {}
+    index = 0
+    while index < len(args):
+        if args[index].startswith("--"):
+            has_value = index + 1 < len(args) and not args[index + 1].startswith("--")
+            flags[args[index].lstrip("-").replace("-", "_")] = args[index + 1] if has_value else True
+            index += 2 if has_value else 1
+        else:
+            index += 1
+    return flags
+
+
 class _FakeJobs:
     def __init__(self) -> None:
-        self.run_now_calls: list[dict] = []
+        self.submit_calls: list[dict] = []
 
-    def list(self, name=None):
-        return [SimpleNamespace(job_id=1, settings=SimpleNamespace(name=name))]
-
-    def run_now(self, job_id, job_parameters=None):
-        self.run_now_calls.append({"job_id": job_id, "job_parameters": job_parameters})
+    def submit(self, run_name=None, tasks=None):
+        self.submit_calls.append({"run_name": run_name, "tasks": tasks})
         return SimpleNamespace(run_id=7)
 
     def get_run(self, run_id, **kwargs):
@@ -78,6 +93,7 @@ def dataset(tmp_path):
 
 def _request(dataset, run_id="dbx-run-curated"):
     return PipelineExecutionRequest(
+        compute=ComputeSelection(mode="existing_compute", cluster_id="test-cluster"),
         run_id=run_id,
         dataset_path=str(dataset),
         dataset_name="sales.csv",
@@ -131,9 +147,7 @@ def test_curated_volume_is_separate_from_the_uploads_volume(settings, dataset):
 
     config = _submitted_config(workspace, run_id)
     assert config["curated_storage"]["root_dir"].startswith("/Volumes/cat/sch/curated_files/")
-    assert workspace.jobs.run_now_calls[0]["job_parameters"]["dataset"].startswith(
-        "/Volumes/cat/sch/forecast_files/"
-    )
+    assert _submitted_parameters(workspace)["dataset"].startswith("/Volumes/cat/sch/forecast_files/")
 
 
 
@@ -144,12 +158,11 @@ def test_existing_run_file_layout_is_unchanged(settings, dataset):
     run_id = runner.submit(_request(dataset))
 
     root = f"/Volumes/cat/sch/forecast_files/runs/{run_id}"
-    assert workspace.jobs.run_now_calls[0]["job_parameters"] == {
-        "dataset": f"{root}/sales.csv",
-        "config": f"{root}/forecast_configuration.json",
-        "summary_out": f"{root}/summary.json",
-        "live_status_out": f"{root}/live_status.json",
-    }
+    parameters = _submitted_parameters(workspace)
+    assert parameters["dataset"] == f"{root}/sales.csv"
+    assert parameters["config"] == f"{root}/forecast_configuration.json"
+    assert parameters["summary_out"] == f"{root}/summary.json"
+    assert parameters["live_status_out"] == f"{root}/live_status.json"
 
 
 # ---------------------------------------------------------------------

@@ -15,11 +15,11 @@ from app.config.model_availability import (
 )
 
 
-def test_nothing_is_currently_blocked_on_serverless():
+def test_nothing_is_currently_blocked_on_the_databricks_mode():
     assert unavailable_models("databricks") == {}
 
 
-def test_serverless_can_run_every_other_candidate():
+def test_the_databricks_mode_can_run_every_other_candidate():
     blocked = unavailable_models("databricks")
     for model in ("arima", "prophet", "xgboost", "lightgbm"):
         assert model not in blocked

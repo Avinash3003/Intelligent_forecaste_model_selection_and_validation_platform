@@ -43,6 +43,29 @@ def sanitize_model_name(raw: str) -> str:
     return _UNSAFE_MODEL_NAME_CHARS.sub("_", raw)
 
 
+# A scheme-carrying artifact location, or None to let the server choose
+_LOCATION_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+def _remote_artifact_location(configured: str | None) -> str | None:
+    """The artifact location to send to `create_experiment`, or None.
+
+    A managed tracking server owns where artifacts live and rejects a local
+    path outright ("It should have a scheme like dbfs:/ or s3:// and that
+    scheme should not be file:/"), so sending the local default fails the
+    whole run rather than degrading. It also refuses the very prefix it
+    assigns itself, and tells the caller to leave the field unset instead —
+    None is the only way to ask for the server's own convention.
+
+    A deployment that configures a real cloud URI still gets exactly that;
+    only a schemeless local path is dropped, and a local file store puts
+    artifacts in the same place either way.
+    """
+    if not configured or not _LOCATION_SCHEME.match(configured):
+        return None
+    return configured
+
+
 class MLflowClient:
     """Facade over the operations the tracking pipeline needs."""
 
@@ -90,7 +113,8 @@ class MLflowClient:
             experiment = mlflow.get_experiment_by_name(self._config.experiment_name)
             if experiment is None:
                 mlflow.create_experiment(
-                    self._config.experiment_name, artifact_location=self._config.artifact_location
+                    self._config.experiment_name,
+                    artifact_location=_remote_artifact_location(self._config.artifact_location),
                 )
             mlflow.set_experiment(self._config.experiment_name)
             self._configured = True

@@ -4,11 +4,13 @@ name: Deploy Databricks Bundle (Production)
 #   - a push to main (a merged, reviewed PR)
 #   - workflow_dispatch, for a manual trigger from the Actions tab
 #
-# This workflow deploys the JOB DEFINITIONS only (the Serverless job's code,
-# dependencies and config). It never submits a run — `bundle deploy` only
-# registers/updates what `jobs run-now` would later execute. A forecast is
-# always triggered by a user through the backend (EXECUTION_MODE=databricks
-# -> DatabricksRunner -> Jobs API run-now), never by this workflow.
+# This workflow builds and uploads the forecast_engine wheel artifact — the
+# application code every cloud run installs at submission time. It never
+# submits a run and creates no job resource for `prod`: a forecast is always
+# triggered by a user through the backend (EXECUTION_MODE=databricks ->
+# DatabricksRunner -> Jobs API jobs.submit, an ad-hoc single task on
+# whichever compute the user selected), never by this workflow or by
+# resolving a pre-deployed job by name.
 on:
   push:
     branches: [main]
@@ -83,8 +85,8 @@ jobs:
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
         run: databricks bundle validate -t prod
 
-      # Stage 4/5: deploy — updates the Serverless job definition and
-      # uploads the wheel. Never runs the forecast job itself.
+      # Stage 4/5: deploy — builds and uploads the wheel artifact to the
+      # bundle's workspace path. Never runs anything itself.
       - name: databricks bundle deploy -t prod
         working-directory: databricks
         env:

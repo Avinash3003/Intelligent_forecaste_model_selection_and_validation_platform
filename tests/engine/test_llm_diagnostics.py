@@ -1,8 +1,8 @@
 """LLM configuration and connectivity diagnostics.
 
-Production Serverless runs currently show provider=template, call_count=0
-— Azure OpenAI credentials never reach the wheel task on that compute
-layer. These diagnostics exist so that gap is visible on its own terms
+Production cloud runs currently show provider=template, call_count=0 —
+the jobs.submit path never passes Azure OpenAI credentials to the wheel
+task. These diagnostics exist so that gap is visible on its own terms
 (a config check that never touches the network) and so a single real
 request can prove the deployment credentials actually work, independent
 of which compute backend eventually calls them.

@@ -1,12 +1,14 @@
 """Which forecasting models the *current execution mode* can actually run.
 
 A model being registered in the engine does not mean the environment it
-will execute in has the library behind it. The clearest case is TFT: the
-Serverless job's `environments:` spec (databricks/resources/
-forecast_job_serverless.yml) deliberately omits torch and
-pytorch-forecasting — roughly 900 MB of dependencies — so
-`TemporalFusionTransformerModel.is_available()` returns False there and the
-engine reports the model Unavailable rather than training it.
+will execute in has the library behind it. The clearest case is TFT: torch
+and pytorch-forecasting are roughly 900 MB of dependencies that a cloud
+run's compute does not carry unless something explicitly installs them —
+today, that means a Databricks Container Services image built from
+forecast_engine/requirements.txt (see the root Dockerfile); a plain ML
+runtime with no such image attached does not have them either. Wherever
+they are missing, `TemporalFusionTransformerModel.is_available()` returns
+False and the engine reports the model Unavailable rather than training it.
 
 Without this module the platform lies twice about that: the model picker
 offers TFT as a choice, and the estimator charges its (high) per-fit weight
@@ -33,9 +35,10 @@ _UNAVAILABLE_BY_MODE: dict[str, dict[str, str]] = {}
 
 # Models offered in the picker but NOT actually executed.
 #
-# TFT needs torch and pytorch-forecasting (~900 MB), which the Databricks
-# Serverless environment deliberately does not install — so it genuinely
-# cannot run there. It is nonetheless left selectable, by product decision,
+# TFT needs torch and pytorch-forecasting (~900 MB), which today's cloud
+# compute does not carry unless a Container Services image supplies them —
+# so on a plain runtime it genuinely cannot run. It is nonetheless left
+# selectable, by product decision,
 # because the picker is part of the demo narrative; it is then dropped from
 # the model list before the run is submitted (see
 # deployment_service.build_execution_request).

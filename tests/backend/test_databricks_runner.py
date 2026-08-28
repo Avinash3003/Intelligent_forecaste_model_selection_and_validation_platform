@@ -12,6 +12,7 @@ import pytest
 
 from app.config.settings import Settings
 from app.orchestration.databricks_runner import DatabricksRunner, map_run_state
+from app.schemas.compute import ComputeSelection
 from app.orchestration.schemas import JobStatus, PipelineExecutionRequest
 
 
@@ -74,17 +75,31 @@ def _not_found(path):
         return FileNotFoundError(path)
 
 
+
+# The engine arguments of the submitted wheel task, as a {flag: value} map.
+def _submitted_parameters(workspace):
+    task = workspace.jobs.submit_calls[0]["tasks"][0]
+    args = task.python_wheel_task.parameters
+    flags = {}
+    index = 0
+    while index < len(args):
+        if args[index].startswith("--"):
+            has_value = index + 1 < len(args) and not args[index + 1].startswith("--")
+            flags[args[index].lstrip("-").replace("-", "_")] = args[index + 1] if has_value else True
+            index += 2 if has_value else 1
+        else:
+            index += 1
+    return flags
+
+
 class _FakeJobs:
     def __init__(self, state=None) -> None:
-        self.run_now_calls: list[dict] = []
+        self.submit_calls: list[dict] = []
         self.cancelled: list[int] = []
         self._state = state or SimpleNamespace(life_cycle_state="RUNNING", result_state=None, state_message="")
 
-    def list(self, name=None):
-        return [SimpleNamespace(job_id=4242, settings=SimpleNamespace(name=name))]
-
-    def run_now(self, job_id, job_parameters=None):
-        self.run_now_calls.append({"job_id": job_id, "job_parameters": job_parameters})
+    def submit(self, run_name=None, tasks=None):
+        self.submit_calls.append({"run_name": run_name, "tasks": tasks})
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):
@@ -121,6 +136,7 @@ def dataset(tmp_path):
 
 def _request(dataset):
     return PipelineExecutionRequest(
+        compute=ComputeSelection(mode="existing_compute", cluster_id="test-cluster"),
         run_id="dbx-run-test",
         dataset_path=str(dataset),
         dataset_name="sales.csv",
@@ -186,14 +202,11 @@ def test_submit_stages_dataset_and_config_then_runs_the_job(settings, dataset):
     assert f"{root}/sales.csv" in workspace.files.uploaded
     assert f"{root}/forecast_configuration.json" in workspace.files.uploaded
 
-    call = workspace.jobs.run_now_calls[0]
-    assert call["job_id"] == 4242
-    assert call["job_parameters"] == {
-        "dataset": f"{root}/sales.csv",
-        "config": f"{root}/forecast_configuration.json",
-        "summary_out": f"{root}/summary.json",
-        "live_status_out": f"{root}/live_status.json",
-    }
+    parameters = _submitted_parameters(workspace)
+    assert parameters["dataset"] == f"{root}/sales.csv"
+    assert parameters["config"] == f"{root}/forecast_configuration.json"
+    assert parameters["summary_out"] == f"{root}/summary.json"
+    assert parameters["live_status_out"] == f"{root}/live_status.json"
 
 
 def test_no_job_parameter_is_ever_empty(settings, dataset):
@@ -207,7 +220,7 @@ def test_no_job_parameter_is_ever_empty(settings, dataset):
     runner = DatabricksRunner(settings, workspace_client=workspace)
     runner.submit(_request(dataset))
 
-    for name, value in workspace.jobs.run_now_calls[0]["job_parameters"].items():
+    for name, value in _submitted_parameters(workspace).items():
         assert value, f"job parameter '{name}' was submitted empty"
 
 
@@ -239,7 +252,7 @@ def test_missing_dataset_fails_the_run_with_a_usable_message(settings, tmp_path)
     # Recorded as FAILED rather than raising: the caller already holds this
     # run id, and a 404 on the next poll would be worse than an honest failure.
     assert runner.get_status(run_id) is JobStatus.FAILED
-    assert workspace.jobs.run_now_calls == []
+    assert workspace.jobs.submit_calls == []
 
 
 # ---------------------------------------------------------------------

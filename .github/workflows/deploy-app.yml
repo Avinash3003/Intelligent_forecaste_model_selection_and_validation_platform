@@ -25,7 +25,7 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Backend — FastAPI on App Service (Linux, Python). API only: forecasting
-  # runs on Databricks Serverless, never on this box.
+  # runs on Databricks compute, never on this box.
   #
   # Authenticates to Azure by OIDC federation, so no Azure client secret is
   # stored anywhere. The client id doubles as the Databricks service

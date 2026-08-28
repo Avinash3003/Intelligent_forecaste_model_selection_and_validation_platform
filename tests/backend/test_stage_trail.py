@@ -86,30 +86,6 @@ def test_a_finished_run_with_no_trail_reports_no_stages():
     assert _service()._to_stage_statuses(_listing([], status=JobStatus.COMPLETED)) == []
 
 
-def test_every_databricks_task_key_titlecases_to_a_real_stage():
-    """The naming contract: the Serverless job's task_keys and the stage
-    trail are one vocabulary, so a task renamed in the YAML without its
-    stage being renamed too is caught here rather than in a demo."""
-    yaml_source = Path("databricks/resources/forecast_job_serverless.yml").read_text()
-    # Task definitions sit at eight spaces; the deeper-indented `task_key`s
-    # under a `depends_on:` are references to them, not new tasks.
-    task_keys = re.findall(r"^ {8}- task_key: (\w+)$", yaml_source, re.MULTILINE)
-
-    assert len(task_keys) == 11, task_keys
-
-    # load_prepare and build_series fan out to several stages; the other
-    # nine are exactly one stage each, named by Title-Casing the key.
-    fan_out = {"load_prepare", "build_series"}
-    # Two keys whose stage spelling is not pure Title Case, both for
-    # readability in the UI rather than any behavioural reason.
-    spelling = {"rank_select": "Rank & Select", "mlflow_tracking": "MLflow Tracking"}
-    for key in task_keys:
-        if key in fan_out:
-            continue
-        expected = spelling.get(key) or key.replace("_", " ").title()
-        assert expected in PIPELINE_STAGES, f"{key} -> {expected!r} is not a stage"
-
-
 def test_stage_names_stay_short_enough_to_read_in_the_trail():
     """The whole point of the rename: seventeen labels the UI can show
     without truncating. 'Rank & Select' is the only three-token label and

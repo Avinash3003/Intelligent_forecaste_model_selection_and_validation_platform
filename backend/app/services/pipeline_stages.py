@@ -1,24 +1,18 @@
 """The pipeline's stage vocabulary — one set of names for every surface.
 
-The engine, the Databricks Serverless job and the UI all used to name the
-same seventeen stages differently ("Generate Explainability (SHAP)" vs
-`explain_models` vs a third wording in the deck), which made a run's trail
-impossible to follow across surfaces. They now share one vocabulary:
-
-    every label here is the Title Case of its Databricks `task_key`
-
-so `explain_models` reports "Explain Models" and `mlflow_tracking` reports
-"MLflow Tracking". Nine of the eleven Databricks tasks are exactly 1:1 with
-a stage; only `load_prepare` and `build_series` fan out to several, and
-those keep the same two-word shape so the trail reads uniformly.
+The engine and the UI used to name the same seventeen stages differently
+("Generate Explainability (SHAP)" vs a different wording in the deck),
+which made a run's trail impossible to follow across surfaces. They now
+share one vocabulary: every label here is short and Title Case, so
+`explain_models`'s stage reports "Explain Models" and `mlflow_tracking`'s
+reports "MLflow Tracking".
 
 Defined here rather than in deployment_service so estimation (which only
 needs to translate a stage name) does not have to import the executor
 stack to get it.
 
-Sources kept in sync, verified by tests/backend/test_stage_trail.py:
-  - forecast_engine/run_pipeline.py     `begin_stage(...)` calls
-  - databricks/resources/forecast_job_serverless.yml   `task_key`s
+Kept in sync with forecast_engine/run_pipeline.py's `begin_stage(...)`
+calls, verified by tests/backend/test_stage_trail.py.
 """
 
 from __future__ import annotations

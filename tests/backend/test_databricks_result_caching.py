@@ -19,6 +19,7 @@ import pytest
 
 from app.config.settings import Settings
 from app.orchestration.databricks_runner import DatabricksRunner
+from app.schemas.compute import ComputeSelection
 from app.orchestration.schemas import JobStatus, PipelineExecutionRequest
 
 
@@ -45,10 +46,7 @@ class _CountingJobs:
         self.get_run_calls = 0
         self._state = SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message="")
 
-    def list(self, name=None):
-        return [SimpleNamespace(job_id=4242, settings=SimpleNamespace(name=name))]
-
-    def run_now(self, job_id, job_parameters=None):
+    def submit(self, run_name=None, tasks=None):
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):
@@ -86,6 +84,7 @@ def dataset(tmp_path):
 
 def _request(dataset):
     return PipelineExecutionRequest(
+        compute=ComputeSelection(mode="existing_compute", cluster_id="test-cluster"),
         run_id="dbx-run-cache-test",
         dataset_path=str(dataset),
         dataset_name="sales.csv",

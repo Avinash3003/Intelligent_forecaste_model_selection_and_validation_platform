@@ -25,6 +25,7 @@ from forecast_engine.core.forecast_configuration import ForecastConfiguration, F
 if TYPE_CHECKING:
     # Imported for typing only — importing at runtime would create a cycle,
     # since the preprocessing modules import this package's core types.
+    from forecast_engine.parallel.key_workflow import KeyReports
     from forecast_engine.s01_preprocessing.group_generator import ForecastGroup
     from forecast_engine.s01_preprocessing.series_builder import ForecastSeries
     from forecast_engine.s02_quality.quality_report import PreprocessingSummary, QualityReport
@@ -119,6 +120,13 @@ class PipelineContext:
     # direct input.
     training_report: "TrainingReport | None" = None
     selected_models: list[str] | None = None
+
+    # Key-parallel execution output: the five per-key stage reports, already
+    # merged. Set only when the run fans out per key, and read by the four
+    # stages that would otherwise compute them one batch at a time — they
+    # all come back from a single fan-out, so the first one to ask for them
+    # triggers it and the rest reuse it.
+    key_reports: "KeyReports | None" = None
 
     # Derived feature columns selected for this run (Priority C) —
     # `lag_*`/`rolling_mean_*`/calendar feature ids, consumed by the

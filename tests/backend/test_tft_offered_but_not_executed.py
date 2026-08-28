@@ -1,8 +1,9 @@
 """TFT is selectable in the picker but never actually executed.
 
 A product decision, not a bug: TFT needs torch and pytorch-forecasting
-(~900 MB) which the Serverless environment does not install, so it cannot
-run there — but the picker still offers it. The selection is dropped when
+(~900 MB), which today's cloud compute does not carry unless a Container
+Services image supplies them — so on a plain runtime it cannot run there,
+but the picker still offers it. The selection is dropped when
 the execution request is built, so no runner or engine code has to know.
 
 These tests pin both halves, because either one alone is wrong: if the strip

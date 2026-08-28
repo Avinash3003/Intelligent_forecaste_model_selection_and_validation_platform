@@ -1,0 +1,6 @@
+# The runtime image needs exactly one file from this repo: the engine's
+# requirements. Everything else is excluded rather than filtered, so the
+# build context stays kilobytes instead of hundreds of megabytes and no
+# credential file can reach a layer by accident.
+*
+!forecast_engine/requirements.txt
