@@ -98,8 +98,9 @@ def _execute_with_ray(
 ) -> tuple[KeyReports, dict[str, Any]]:
     import ray
 
-    if not ray.is_initialized():
-        _start_ray()
+    # Ray may already be running (a second call in one process); there is
+    # then no topology decision to report for this call.
+    topology = _start_ray() if not ray.is_initialized() else {"ray_mode": "already_initialized"}
 
     started = time.perf_counter()
     # A wall-clock reference alongside the monotonic one above:
@@ -159,6 +160,15 @@ def _execute_with_ray(
         "failures": failures,
         "max_concurrent_keys": _peak_overlap(spans),
         "wall_seconds": round(time.perf_counter() - started, 3),
+        # How Ray was actually started, and how far the work really spread.
+        # `ray_nodes_used` is counted from the spans themselves — the number
+        # of distinct machines that genuinely ran a key — so multi-node
+        # execution can never be inferred from the cluster's shape alone. A
+        # 4-node cluster whose keys all landed on the driver reports 1 here,
+        # which is the whole point.
+        **topology,
+        "ray_nodes_used": len({s["node_id"] for s in key_spans}),
+        "ray_workers_used": len({s["worker_id"] for s in key_spans}),
         # Multi-node caveat: on Ray-on-Spark, each key_span's start/end is
         # wall-clock time on whichever node ran that key, offset against the
         # DRIVER's run_started_wall — accurate to node-to-node clock skew
@@ -185,18 +195,31 @@ def _spark_worker_nodes() -> int:
         return 0
 
 
-def _start_ray() -> None:
+def _start_ray() -> dict[str, Any]:
     """Start Ray across whatever compute this run actually has.
 
     Single-node compute keeps the local head; multi-node compute puts Ray
     on the Spark workers too, so the nodes the user paid for take keys
     instead of idling. Neither path fixes a CPU count — Ray reads the real
     resources either way, and each key still asks for exactly one CPU.
+
+    Returns how Ray was actually started, so the run can REPORT it rather
+    than leave it to be inferred. Falling back to the driver is a legitimate
+    outcome on single-node compute and a silent, expensive defect on
+    multi-node compute — a cluster whose workers were paid for and never
+    used. The two are indistinguishable from the outside unless the
+    decision is recorded, so this returns it and `_execute_with_ray` puts it
+    in the telemetry.
     """
     import ray
 
     runtime_env = _worker_runtime_env()
     workers = _spark_worker_nodes()
+    topology: dict[str, Any] = {
+        "spark_worker_nodes_detected": workers,
+        "ray_on_spark_attempted": workers > 0,
+        "ray_on_spark_error": None,
+    }
 
     if workers > 0:
         try:
@@ -205,11 +228,24 @@ def _start_ray() -> None:
             setup_ray_cluster(max_worker_nodes=workers, collect_log_to_path=None)
             ray.init(ignore_reinit_error=True, address="auto", runtime_env=runtime_env)
             logger.info("Ray started across %d Spark worker node(s)", workers)
-            return
+            topology["ray_mode"] = "ray_on_spark"
+            return topology
         except Exception as exc:  # noqa: BLE001 - fall back rather than fail the run
-            logger.warning("Ray on Spark unavailable (%s); using local Ray on the driver", exc)
+            # Loud, not silent: multi-node compute was requested and Ray
+            # could not use it, so every key will run on the driver while
+            # the worker nodes idle. That is a real, costly degradation and
+            # it is recorded in the telemetry the run reports.
+            logger.error(
+                "Ray on Spark FAILED with %d Spark worker node(s) available (%s); "
+                "falling back to driver-only Ray — worker nodes will be UNUSED",
+                workers,
+                exc,
+            )
+            topology["ray_on_spark_error"] = f"{type(exc).__name__}: {exc}"
 
     ray.init(ignore_reinit_error=True, include_dashboard=False, runtime_env=runtime_env)
+    topology["ray_mode"] = "driver_only"
+    return topology
 
 
 # The native math libraries every model sits on, and the variable each one

@@ -14,6 +14,7 @@ length and on how many keys clear each model's minimum-history bar.
 
 from __future__ import annotations
 
+import logging
 import math
 import statistics
 import threading
@@ -39,6 +40,8 @@ from app.schemas.estimation import (
 )
 from app.services.dataset_analysis import DatasetAnalysis, DatasetAnalyzer
 from app.services.pipeline_stages import canonical_stage_name
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------
 # Heuristic fallback constants — used only when historical telemetry is
@@ -145,6 +148,44 @@ _CALIBRATION_SAMPLE_TARGET = 6
 # run is picked up long before it could matter to an estimate.
 _CALIBRATION_TTL_SECONDS = 300.0
 
+# Hard wall-clock ceiling on one history sweep.
+#
+# Calibration is an ACCURACY improvement over the heuristic, never a
+# correctness requirement — `_sweep_run_history` already degrades to the
+# heuristic on every failure mode (MLflow unreachable, no runs, no summary
+# artifact). A slow sweep is just one more of those, and must be treated the
+# same way instead of holding the request open.
+#
+# Measured against this deployment's real Databricks-backed MLflow store:
+# `list_runs(15)` alone took 24.7s, and a single `get_summary()` then ran
+# past 95s — with the sweep allowed up to _CALIBRATION_SAMPLE_TARGET (6) of
+# them. That blew through the frontend's 30s request timeout and surfaced in
+# the wizard as "The request took too long to respond" on the Estimate step,
+# while the backend was still working. Bounding the sweep fixes that at the
+# source rather than by widening the client timeout, which would only move
+# a multi-minute wait into the UI.
+_CALIBRATION_DEADLINE_SECONDS = 8.0
+
+
+def _heuristic_history_calibration() -> "_RunHistoryCalibration":
+    """The no-history answer: labelled heuristics, no measured startup.
+
+    Identical to what `_sweep_run_history` produces when it finds nothing
+    usable — defined separately so the request path can return it without
+    performing the sweep's network I/O at all.
+    """
+    return _RunHistoryCalibration(
+        calibration=_Calibration(
+            seconds_per_fit=_DEFAULT_SECONDS_PER_FIT,
+            seconds_per_shap=_HEURISTIC_SECONDS_PER_SHAP,
+            seconds_per_llm_call=_HEURISTIC_SECONDS_PER_LLM_CALL,
+            prompt_tokens_per_call=_HEURISTIC_PROMPT_TOKENS_PER_CALL,
+            completion_tokens_per_call=_HEURISTIC_COMPLETION_TOKENS_PER_CALL,
+            basis="a measured-timing heuristic (not enough completed runs yet for historical calibration)",
+        ),
+        measured_startup_seconds=None,
+    )
+
 
 @dataclass
 class _Calibration:
@@ -185,6 +226,9 @@ class EstimationService:
         # every concurrent request rather than per-request.
         self._calibration_lock = threading.Lock()
         self._cached_history: _RunHistoryCalibration | None = None
+        # Guards against every concurrent estimate starting its own sweep
+        # while the first one is still running.
+        self._calibration_refreshing = False
         self._cached_history_at: float = 0.0
 
     def estimate(self, dataframe: pd.DataFrame, request: EstimationRequest) -> EstimationResponse:
@@ -400,19 +444,74 @@ class EstimationService:
         """
         now = time.monotonic()
         with self._calibration_lock:
-            if self._cached_history is not None and now - self._cached_history_at < _CALIBRATION_TTL_SECONDS:
+            cached = self._cached_history
+            fresh = cached is not None and now - self._cached_history_at < _CALIBRATION_TTL_SECONDS
+            if fresh:
+                return cached
+            already_refreshing = self._calibration_refreshing
+            if not already_refreshing:
+                self._calibration_refreshing = True
+
+        # The sweep is never awaited on the request path. Against this
+        # deployment's Databricks-backed store one sweep measured >120s
+        # unbounded, and ~30s even with an internal deadline — because
+        # `list_runs` alone took ~25s inside MLflow's own client, where no
+        # caller-side deadline can interrupt it. Blocking /estimate on that
+        # is what surfaced as "The request took too long to respond" on the
+        # wizard's Estimate step.
+        #
+        # So: serve what we have (a stale sweep, or the heuristic on the
+        # very first call) and refresh behind the request. Calibration only
+        # sharpens an estimate that is already correct without it, so
+        # answering now from the heuristic and sharpening the next call is
+        # strictly better than making the user wait for precision.
+        # The sweep runs on its own thread, and this request waits only up
+        # to the deadline for it. A fast store (a local sqlite tracking
+        # store, or an in-memory one) finishes well inside that and the
+        # caller gets a fully calibrated answer on the very first estimate,
+        # exactly as before. A slow one (Databricks, measured ~30s+) blows
+        # the deadline, the caller gets the heuristic now, and the sweep
+        # keeps going so the *next* estimate is calibrated.
+        if not already_refreshing:
+            worker = threading.Thread(
+                target=self._refresh_calibration_in_background,
+                name="estimation-calibration-refresh",
+                daemon=True,
+            )
+            worker.start()
+            worker.join(timeout=_CALIBRATION_DEADLINE_SECONDS)
+
+        with self._calibration_lock:
+            if self._cached_history is not None:
                 return self._cached_history
 
-        # Computed outside the lock: it performs network I/O, and blocking
-        # every concurrent estimate behind one slow sweep would reintroduce
-        # the latency this cache exists to remove. A racing second sweep is
-        # harmless — both produce the same answer and the later write wins.
-        computed = self._sweep_run_history()
+        logger.warning(
+            "Run-history calibration did not finish within %.0fs; estimating from the "
+            "heuristic and refreshing in the background",
+            _CALIBRATION_DEADLINE_SECONDS,
+        )
+        return _heuristic_history_calibration()
+
+    def _refresh_calibration_in_background(self) -> None:
+        """Recompute the sweep off the request path, then publish it.
+
+        Failure is not propagated anywhere: the cache simply keeps its
+        previous value (or stays empty, leaving the heuristic in place),
+        which is the same degradation every other calibration failure mode
+        already takes.
+        """
+        try:
+            computed = self._sweep_run_history()
+        except Exception:  # noqa: BLE001 - calibration is best-effort
+            logger.warning("Background run-history calibration failed", exc_info=True)
+            return
+        finally:
+            with self._calibration_lock:
+                self._calibration_refreshing = False
 
         with self._calibration_lock:
             self._cached_history = computed
             self._cached_history_at = time.monotonic()
-        return computed
 
     def _sweep_run_history(self) -> _RunHistoryCalibration:
         """One pass over recent completed runs, yielding both calibrations.
@@ -436,13 +535,40 @@ class EstimationService:
         runs_used = 0
         summaries_read = 0
 
+        # Every remote call below is bounded by one shared deadline, so a
+        # slow store costs the estimate a known few seconds rather than an
+        # unbounded wait. Whatever was gathered before the deadline is still
+        # used; falling short only means falling back to the heuristic.
+        deadline = time.monotonic() + _CALIBRATION_DEADLINE_SECONDS
+
         try:
             listings = self._history.list_runs(limit=_HISTORY_SAMPLE_SIZE)
         except Exception:  # noqa: BLE001 - calibration is best-effort
             listings = []
 
+        # `list_runs` is itself a remote call and was measured at ~25s
+        # against this deployment's store — on its own already past the
+        # point where reading summaries could finish in time. Re-checking
+        # here means a slow listing costs the estimate the deadline and
+        # nothing more.
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "Run-history listing alone exceeded the %.0fs calibration deadline; "
+                "estimating from the heuristic instead",
+                _CALIBRATION_DEADLINE_SECONDS,
+            )
+            listings = []
+
         for listing in listings:
             if summaries_read >= _CALIBRATION_SAMPLE_TARGET:
+                break
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Run-history calibration hit its %.0fs deadline after %d summary read(s); "
+                    "estimating from the heuristic instead",
+                    _CALIBRATION_DEADLINE_SECONDS,
+                    summaries_read,
+                )
                 break
             if listing.job_status.value != "Completed":
                 continue

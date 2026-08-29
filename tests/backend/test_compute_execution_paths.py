@@ -46,6 +46,35 @@ class _FakeJobs:
         )
 
 
+class _FakeWorkspaceFiles:
+    """The workspace-files API a DCS run stages through.
+
+    Separate from _FakeFiles on purpose: /Workspace and /Volumes are
+    different APIs on the real client, and a test that let one satisfy the
+    other would hide a path written by one and read by the other.
+    """
+
+    def __init__(self) -> None:
+        self.uploaded: dict[str, bytes] = {}
+        self.created_dirs: list[str] = []
+
+    def mkdirs(self, path):
+        # The real workspace API does not create parents on upload, so the
+        # runner calls this first; the fake records it to keep that ordering
+        # honest rather than quietly tolerating its absence.
+        self.created_dirs.append(path)
+
+    def upload(self, path, content, format=None, overwrite=False):
+        self.uploaded[path] = content if isinstance(content, bytes) else content.read()
+
+    def download(self, path):
+        import io as _io
+
+        if path not in self.uploaded:
+            raise FileNotFoundError(path)
+        return _io.BytesIO(self.uploaded[path])
+
+
 class _FakeCurrentUser:
     def me(self):
         return SimpleNamespace(user_name="sp-forecastiq-cicd")
@@ -56,6 +85,7 @@ class _FakeWorkspace:
         self.files = _FakeFiles()
         self.jobs = _FakeJobs()
         self.current_user = _FakeCurrentUser()
+        self.workspace = _FakeWorkspaceFiles()
 
 
 @pytest.fixture
@@ -244,6 +274,57 @@ def test_without_dcs_the_runtime_and_ml_flag_are_left_alone(settings, dataset):
     assert cluster.spark_version == "16.4.x-cpu-ml-scala2.12"
     assert cluster.use_ml_runtime is None
     assert cluster.single_user_name is None
+
+
+def test_a_dcs_run_stages_to_workspace_files_not_uc_volumes(settings, dataset):
+    """A container cannot read UC Volumes at all.
+
+    Replacing the runtime image removes Databricks' own `uc-volumes` storage
+    scheme handler, so /Volumes cannot be resolved from inside the container
+    -- proven on a real DCS cluster, whose /dbfs/Volumes/mount.err reads
+    "Unrecognized storage scheme: uc-volumes" while Spark still has Unity
+    Catalog fully enabled. Workspace files are reachable, so that is where a
+    DCS run stages."""
+    dcs_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "acr.example.io/forecastiq-runtime:v1"}
+    )
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
+    runner.submit(_request(dataset, NEW_COMPUTE))
+
+    staged = list(workspace.workspace.uploaded)
+    assert staged, "a DCS run must stage through the workspace API"
+    assert all(p.startswith("/Workspace/") for p in staged), staged
+    # And nothing reached the UC Volume API, which would fail at run time.
+    assert workspace.files.uploaded == {}
+
+
+def test_a_non_dcs_run_still_stages_to_uc_volumes(settings, dataset):
+    """The existing-compute path is unchanged: no docker image, so UC
+    Volumes remain the staging location they have always been."""
+    workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
+
+    staged = list(workspace.files.uploaded)
+    assert staged, "a non-DCS run must stage through the UC Volume API"
+    assert all(p.startswith("/Volumes/") for p in staged), staged
+    assert workspace.workspace.uploaded == {}
+
+
+def test_the_engine_is_pointed_at_the_same_paths_it_was_given(settings, dataset):
+    """Whatever root a run stages to, the engine must be told that root --
+    a run staged to /Workspace but told to read /Volumes would fail exactly
+    the way the original bug did."""
+    dcs_settings = settings.model_copy(
+        update={"databricks_docker_image_url": "acr.example.io/forecastiq-runtime:v1"}
+    )
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
+    runner.submit(_request(dataset, NEW_COMPUTE))
+
+    params = _submitted_task(workspace).python_wheel_task.parameters
+    for flag in ("--dataset", "--config", "--summary-out", "--live-status-out"):
+        value = params[params.index(flag) + 1]
+        assert value.startswith("/Workspace/"), f"{flag} -> {value}"
 
 
 def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):

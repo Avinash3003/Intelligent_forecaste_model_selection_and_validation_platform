@@ -62,6 +62,32 @@ def test_autoscale_bounds_are_rejected_when_inverted():
         )
 
 
+def test_a_single_node_request_is_not_rejected_for_its_unused_autoscale_bounds():
+    """The reported bug: choosing 0 workers with autoscaling off failed with
+    "Please check these fields and try again: max_workers".
+
+    The UI hides the min/max inputs when autoscaling is off, but still sends
+    them, and its number input reports an emptied box as 0. Validating a
+    bound the user cannot see, for a mode it does not apply to, blocked a
+    valid single-node run."""
+    config = JobComputeConfig(
+        node_type_id="n", runtime_key=RUNTIME, autoscale=False, num_workers=0, max_workers=0
+    )
+
+    assert config.num_workers == 0
+    # One node, no workers -- the bounds contribute nothing.
+    assert config.requested_cores(4) == 4
+
+
+def test_autoscaling_still_requires_a_real_upper_bound():
+    """Relaxing the field-level floor must not let an autoscaling cluster
+    through with no ceiling to scale to."""
+    with pytest.raises(ValueError):
+        JobComputeConfig(
+            node_type_id="n", runtime_key=RUNTIME, autoscale=True, min_workers=0, max_workers=0
+        )
+
+
 # ---- stage 1 --------------------------------------------------------
 
 

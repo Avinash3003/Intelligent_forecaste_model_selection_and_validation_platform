@@ -30,8 +30,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from app.config.settings import Settings
 from app.orchestration.exceptions import ExecutionError, RunNotReadyError, UnknownRunError
 from app.orchestration.mlflow_history import MLflowHistoryStore
@@ -46,6 +44,22 @@ from app.orchestration.schemas import (
     RunListing,
 )
 from app.utils.errors import safe_detail
+
+logger = logging.getLogger(__name__)
+
+# How long /deploy waits for a run's inputs to finish staging before it
+# answers anyway.
+#
+# Staging uploads the dataset to the UC Volume byte-for-byte: a real 17.3 MB
+# dataset measured 56.97s against this workspace, past the frontend's 30s
+# request timeout on its own. The client aborted while the backend kept
+# working and often did submit the run — the user saw "the request took too
+# long" for a forecast that was actually starting.
+#
+# Short enough that the request always returns well inside that timeout,
+# long enough that a small dataset (and every in-memory test workspace)
+# finishes staging inline and the caller sees a fully submitted run.
+_SUBMIT_STAGING_GRACE_SECONDS = 3.0
 
 # Databricks' own run vocabulary -> this platform's. Kept as data rather
 # than an if-chain so the mapping is auditable at a glance, and so a state
@@ -298,23 +312,72 @@ class DatabricksRunner(PipelineRunner):
         with self._lock:
             self._jobs[run_id] = record
 
+        # Staging runs off the request thread, so /deploy answers in
+        # milliseconds with the id the caller polls by.
+        #
+        # It cannot run inline: the dataset is uploaded to the UC Volume
+        # byte-for-byte, and a real 17.3 MB dataset measured 56.97s against
+        # this workspace — on its own already past the frontend's 30s
+        # request timeout, before the config upload and jobs.submit that
+        # follow it. The client aborted every time while the backend kept
+        # going and often did submit the run, which is the worst of both:
+        # the user sees "the request took too long" for a forecast that is
+        # actually starting.
+        #
+        # Nothing about the run's semantics changes. The record is already
+        # registered above, so a status poll finds it immediately; it simply
+        # reports PENDING until staging finishes, which is exactly what
+        # PENDING already means everywhere else in this runner.
+        worker = threading.Thread(
+            target=self._stage_and_trigger,
+            args=(record, request),
+            name=f"forecastiq-submit-{run_id}",
+            daemon=True,
+        )
+        worker.start()
+        # Bounded wait, not a fire-and-forget. Staging that finishes quickly
+        # — a small dataset, or an in-memory workspace in tests — is fully
+        # complete by the time this returns, so the run is already RUNNING
+        # and its Databricks id already recorded. Staging that does not
+        # finish in time keeps going on its own thread while the caller gets
+        # its id now. Either way the caller polls the same record.
+        worker.join(timeout=_SUBMIT_STAGING_GRACE_SECONDS)
+
+        return run_id
+
+    def _stage_and_trigger(
+        self, record: _DatabricksJobRecord, request: PipelineExecutionRequest
+    ) -> None:
+        """Upload the run's inputs and start the Databricks run.
+
+        Failures are recorded on the record rather than raised: by the time
+        this runs the caller already holds the run id and is polling it, so
+        a run that reports honestly why it never started beats one that
+        vanishes.
+        """
+        run_id = record.run_id
         try:
-            record.dataset_uri = self._upload_data_to_storage(run_id, request)
-            record.summary_uri = f"{self._run_root(run_id)}/summary.json"
-            record.live_status_uri = f"{self._run_root(run_id)}/live_status.json"
-            record.databricks_run_id = self._trigger_databricks_job(run_id, request, record.dataset_uri)
+            dataset_uri = self._upload_data_to_storage(run_id, request)
+            databricks_run_id = self._trigger_databricks_job(run_id, request, dataset_uri)
         except ExecutionError as exc:
-            # The submission is recorded as FAILED rather than discarded:
-            # the frontend already holds this run id, and a run that 404s
-            # on its very next status poll is a worse experience than one
-            # that reports honestly why it never started.
             with self._lock:
                 record.status = JobStatus.FAILED
                 record.error = str(exc)
                 record.completed_at = _now_iso()
-            return run_id
+            return
+        except Exception as exc:  # noqa: BLE001 - a submit thread must never die silently
+            logger.exception("Submitting run %s failed", run_id)
+            with self._lock:
+                record.status = JobStatus.FAILED
+                record.error = safe_detail(exc, fallback="The forecast could not be started.")
+                record.completed_at = _now_iso()
+            return
 
-        return run_id
+        with self._lock:
+            record.dataset_uri = dataset_uri
+            record.summary_uri = f"{self._run_root(run_id)}/summary.json"
+            record.live_status_uri = f"{self._run_root(run_id)}/live_status.json"
+            record.databricks_run_id = databricks_run_id
 
     def get_status(self, run_id: str) -> JobStatus:
         record = self._find_job(run_id)
@@ -542,13 +605,10 @@ class DatabricksRunner(PipelineRunner):
         config_uri = f"{run_root}/forecast_configuration.json"
 
         try:
-            with source.open("rb") as handle:
-                self._workspace.files.upload(dataset_uri, handle, overwrite=True)
-
-            self._workspace.files.upload(
+            self._upload_run_file(dataset_uri, source.read_bytes())
+            self._upload_run_file(
                 config_uri,
-                io.BytesIO(json.dumps(self._job_configuration(run_id, request)).encode("utf-8")),
-                overwrite=True,
+                json.dumps(self._job_configuration(run_id, request)).encode("utf-8"),
             )
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
             raise ExecutionError(
@@ -599,21 +659,33 @@ class DatabricksRunner(PipelineRunner):
         payload["artifacts_mirror"] = {"root_dir": self._artifacts_root()}
         return payload
 
+    # The engine writes its outputs to four further roots. Under DCS these
+    # cannot be UC Volumes either — the container has no `uc-volumes` scheme
+    # handler at all, so every one of them fails the same way the run root
+    # did, just later in the pipeline (Persist Curated rather than Load
+    # Dataset). Each keeps its own sub-folder under the workspace staging
+    # root so a DCS run's outputs stay as separated as the volumes keep
+    # them, and every root still comes from settings.
+    def _output_root(self, volumes_root: str, kind: str) -> str:
+        if self._uses_container_image():
+            return f"{self._settings.databricks_workspace_staging_root.rstrip('/')}/{kind}"
+        return f"{volumes_root.rstrip('/')}/runs"
+
     def _forecasts_root(self) -> str:
-        """Forecasts volume run directory, without the run id — the writer adds it."""
-        return f"{self._settings.databricks_forecasts_volumes_root.rstrip('/')}/runs"
+        """Forecast output directory, without the run id — the writer adds it."""
+        return self._output_root(self._settings.databricks_forecasts_volumes_root, "forecasts")
 
     def _artifacts_root(self) -> str:
-        """Artifacts volume run directory, without the run id — the writer adds it."""
-        return f"{self._settings.databricks_artifacts_volumes_root.rstrip('/')}/runs"
+        """Artifact output directory, without the run id — the writer adds it."""
+        return self._output_root(self._settings.databricks_artifacts_volumes_root, "artifacts")
 
     def _curated_root(self, run_id: str) -> str:
-        """Curated volume run directory, without the run id — the writer adds it."""
-        return f"{self._settings.databricks_curated_volumes_root.rstrip('/')}/runs"
+        """Curated dataset directory, without the run id — the writer adds it."""
+        return self._output_root(self._settings.databricks_curated_volumes_root, "curated")
 
     def _models_root(self) -> str:
-        """Models volume run directory, without the run id — the writer adds it."""
-        return f"{self._settings.databricks_models_volumes_root.rstrip('/')}/runs"
+        """Winning-model directory, without the run id — the writer adds it."""
+        return self._output_root(self._settings.databricks_models_volumes_root, "models")
 
     def _trigger_databricks_job(
         self, run_id: str, request: PipelineExecutionRequest, dataset_uri: str
@@ -775,27 +847,36 @@ class DatabricksRunner(PipelineRunner):
         return self._history.get_summary(record.run_id)
 
     def read_volume_text(self, uri: str) -> str | None:
-        """A volume file as text, or None if unreadable.
+        """A staged file as text, or None if unreadable.
 
         Public because a volume path means nothing on the API host, so the
         dataset preview must fetch it through this client.
         """
+        payload = self._download_run_file(uri)
+        return payload.decode("utf-8", errors="replace") if payload is not None else None
+
+    def _download_run_file(self, uri: str) -> bytes | None:
+        """Read one staged file back, through whichever API owns that path.
+
+        A DCS run stages under /Workspace, everything else under a UC
+        Volume; the writer already chose, so the reader must match.
+        """
         try:
-            response = self._workspace.files.download(uri)
-            return response.contents.read().decode("utf-8", errors="replace")
+            if self._is_workspace_path(uri):
+                with self._workspace.workspace.download(uri) as handle:
+                    return handle.read()
+            return self._workspace.files.download(uri).contents.read()
         except Exception:  # noqa: BLE001 - absence is normal, not an error
             return None
 
     def _read_volume_json(self, uri: str | None) -> dict[str, Any] | None:
         if not uri:
             return None
-        try:
-            response = self._workspace.files.download(uri)
-            contents = response.contents.read()
-        except Exception:  # noqa: BLE001 - absence is normal, not an error
-            # Not written yet (the job has not reached that stage), or not
-            # readable. Both resolve on a later poll; neither is worth
-            # failing a status request over.
+        # Not written yet (the job has not reached that stage), or not
+        # readable. Both resolve on a later poll; neither is worth failing a
+        # status request over.
+        contents = self._download_run_file(uri)
+        if contents is None:
             return None
 
         try:
@@ -807,9 +888,55 @@ class DatabricksRunner(PipelineRunner):
     # Internals
     # ------------------------------------------------------------------
 
+    # Whether this run executes inside a Container Services image.
+    #
+    # DCS decides where a run can stage its files at all, so it is asked here
+    # rather than inferred further down: a container cannot resolve /Volumes
+    # (the runtime image that carries the `uc-volumes` scheme handler is the
+    # very thing DCS replaces), while workspace files are reachable from
+    # inside it.
+    def _uses_container_image(self) -> bool:
+        return bool((self._settings.databricks_docker_image_url or "").strip())
+
     def _run_root(self, run_id: str) -> str:
-        """One directory per run, holding its dataset, config and output."""
-        return f"{self._settings.databricks_volumes_root.rstrip('/')}/runs/{run_id}"
+        """One directory per run, holding its dataset, config and output.
+
+        UC Volumes for a normal run; workspace files for a DCS run, which
+        cannot read UC Volumes at all. Both roots come from settings, so
+        neither path is fixed in code.
+        """
+        if self._uses_container_image():
+            root = self._settings.databricks_workspace_staging_root
+        else:
+            root = f"{self._settings.databricks_volumes_root.rstrip('/')}/runs"
+        return f"{root.rstrip('/')}/{run_id}"
+
+    # Workspace files and UC Volumes are different APIs on the same client.
+    # One predicate decides which, so a path can never be written by one and
+    # read back by the other.
+    @staticmethod
+    def _is_workspace_path(uri: str) -> bool:
+        return uri.startswith("/Workspace/")
+
+    def _upload_run_file(self, uri: str, payload: bytes) -> None:
+        """Write one staged file, through whichever API owns that path."""
+        if self._is_workspace_path(uri):
+            from databricks.sdk.service.workspace import ImportFormat
+
+            # The workspace API does not create parents the way the Files
+            # API does — an upload into a folder that does not exist yet
+            # fails with ResourceDoesNotExist rather than creating it. mkdirs
+            # is idempotent, so this is safe on every run.
+            parent = uri.rsplit("/", 1)[0]
+            self._workspace.workspace.mkdirs(parent)
+            # RAW, not AUTO: these are a dataset and a JSON config, not
+            # notebooks. AUTO invites the workspace importer to interpret
+            # them as source files.
+            self._workspace.workspace.upload(
+                path=uri, content=payload, format=ImportFormat.RAW, overwrite=True
+            )
+            return
+        self._workspace.files.upload(uri, io.BytesIO(payload), overwrite=True)
 
     def _refresh(self, record: _DatabricksJobRecord) -> None:
         """Refresh one record from the workspace.

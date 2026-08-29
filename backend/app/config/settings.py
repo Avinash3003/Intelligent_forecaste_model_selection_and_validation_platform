@@ -113,6 +113,23 @@ class Settings(BaseSettings):
     # attaching an image to it is a manual, one-time step the operator
     # performs in the Databricks UI (see docs), not something this backend
     # does automatically.
+    # Where a Container Services run stages its inputs and outputs.
+    #
+    # A DCS run cannot use the UC Volume roots below. Replacing the runtime
+    # image removes Databricks' own `uc-volumes` storage-scheme handler, so
+    # the container's DBFS client cannot resolve /Volumes at all — proven on
+    # a real DCS cluster, which reports `Unrecognized storage scheme:
+    # uc-volumes` in /dbfs/Volumes/mount.err while Spark itself still has
+    # Unity Catalog fully enabled. That is a property of DCS, not of this
+    # workspace or of the image we build, and it applies to any cluster
+    # carrying a docker_image.
+    #
+    # Workspace files are reachable from inside the container (verified: a
+    # read/write round-trip under /Workspace/Shared succeeds), so a DCS run
+    # stages here instead. Configurable rather than derived, so a deployment
+    # can point it at a folder its principal owns.
+    databricks_workspace_staging_root: str = "/Workspace/Shared/forecastiq/runs"
+
     databricks_docker_image_url: str | None = None
     # Basic auth Databricks presents to the private ACR repository at pull
     # time. Both blank is the common case (a public or already-cached

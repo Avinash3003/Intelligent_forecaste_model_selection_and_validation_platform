@@ -79,11 +79,23 @@ class JobComputeConfig(BaseModel):
     autoscale: bool = False
     num_workers: int = Field(0, ge=0, le=100)
     min_workers: int = Field(1, ge=0, le=100)
-    max_workers: int = Field(2, ge=1, le=100)
+    # `ge=0`, not `ge=1`: the autoscale bounds are only meaningful when
+    # autoscale is on, and a fixed-size cluster still carries them in the
+    # payload. Rejecting max_workers=0 at the field level failed a perfectly
+    # valid single-node request ("Please check these fields and try again:
+    # max_workers") purely because the UI's number input reports an empty
+    # box as 0 — a field the user could not even see, since the form hides
+    # the bounds when autoscale is unchecked. The real constraint is
+    # enforced below, where it actually applies.
+    max_workers: int = Field(2, ge=0, le=100)
 
     @model_validator(mode="after")
     def _check_worker_bounds(self) -> "JobComputeConfig":
-        if self.autoscale and self.min_workers > self.max_workers:
+        if not self.autoscale:
+            return self
+        if self.max_workers < 1:
+            raise ValueError("Maximum workers must be at least 1 when autoscaling is enabled.")
+        if self.min_workers > self.max_workers:
             raise ValueError("Minimum workers cannot be greater than maximum workers.")
         return self
 
