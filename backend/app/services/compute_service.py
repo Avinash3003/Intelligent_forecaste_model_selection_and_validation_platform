@@ -172,6 +172,11 @@ class ComputeService:
         self._settings = settings or get_settings()
         self._workspace = workspace
         self._node_catalog: dict[str, dict] | None = None
+        # Guards the catalog fetch so concurrent callers share one — see
+        # _ensure_catalog. Per instance, unlike the class-level probe lock
+        # above, which exists to keep one probe cluster alive at a time
+        # across every instance.
+        self._catalog_lock = threading.Lock()
 
     # Reuse the runner's authenticated client rather than building another.
     def _client(self) -> Any:
@@ -309,16 +314,83 @@ class ComputeService:
             return catalog
         return self._validate_by_create_probe(config)
 
+    def prewarm(self) -> None:
+        """Load the node catalog before anyone waits on it.
+
+        Every validation answers from this one catalog, in well under a
+        millisecond — but the fetch itself measured 5.13s against this
+        workspace, and whoever validates first in a fresh process pays it.
+        Started at application startup that is nobody. Returns immediately;
+        a failure is logged by the fetch and retried by the next caller.
+        """
+        threading.Thread(
+            target=self._ensure_catalog,
+            name="forecastiq-node-catalog",
+            daemon=True,
+        ).start()
+
     # The workspace's node catalog, read once per service instance.
+    def _ensure_catalog(self) -> dict | None:
+        # Single-flight. Without the lock, a request arriving while
+        # startup's own warm-up is still in flight just runs a second fetch
+        # of all 337 node types alongside it — and still waits the full
+        # 5.13s for its own copy. Holding the lock means it joins the fetch
+        # already running and returns the moment that one lands.
+        with self._catalog_lock:
+            if self._node_catalog is None:
+                try:
+                    raw = self._client().api_client.do("GET", "/api/2.1/clusters/list-node-types")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not read Databricks node types: %s", exc)
+                    return None
+                self._node_catalog = {n["node_type_id"]: n for n in raw.get("node_types", []) or []}
+            return self._node_catalog
+
     def _node_info(self, node_type_id: str) -> dict | None:
-        if self._node_catalog is None:
-            try:
-                raw = self._client().api_client.do("GET", "/api/2.1/clusters/list-node-types")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Could not read Databricks node types: %s", exc)
-                return None
-            self._node_catalog = {n["node_type_id"]: n for n in raw.get("node_types", []) or []}
-        return self._node_catalog.get(node_type_id)
+        catalog = self._ensure_catalog()
+        return catalog.get(node_type_id) if catalog else None
+
+    def _catalog_core_quota(self) -> float | None:
+        """The subscription's core ceiling, read off the node catalog.
+
+        Azure enforces a Total Regional Cores limit on top of any per-family
+        one, so it binds nearly every node type — and that is exactly what
+        the catalog shows. This workspace, across 337 node types:
+
+            4.0    -> 253 types    the regional limit
+            6.0    ->   2 types    Standard_NC12/NC24, a GPU family quota
+            0.0    ->  20 types    families not enabled at all
+            absent ->  62 types    no figure reported — the silent case
+
+        So the *modal* figure is the regional limit, and the run that
+        prompted this confirms it exactly: "Total Regional Cores ...
+        Current Limit: 4".
+
+        The mode is used rather than the maximum, which the two GPU
+        outliers would win — reporting a ceiling of 6 that no ordinary
+        family has, and telling the user a number that is simply untrue —
+        and rather than the minimum, which the disabled families would win
+        at 0, rejecting every configuration. Zeros are excluded outright: a
+        zero says "this family is unavailable", which the status check above
+        already reports, and says nothing about the regional ceiling.
+
+        This costs nothing at request time — the catalog is one cached call
+        per service instance — which is the point. Actually creating the
+        cluster is the only fully authoritative answer and it is far too
+        slow to sit in a wizard: the run that prompted this took 191.5s to
+        report ADD_NODES_FAILED and 276.1s to terminate.
+
+        None when nothing in the catalog reports a usable quota, which
+        leaves the caller no worse off than not asking.
+        """
+        quotas = [
+            quota
+            for node in (self._node_catalog or {}).values()
+            if (quota := (node.get("node_info") or {}).get("available_core_quota"))
+        ]
+        if not quotas:
+            return None
+        return max(set(quotas), key=quotas.count)
 
     # Stage 1 — live workspace metadata for the selected values only.
     def _validate_against_catalog(self, config: JobComputeConfig) -> ComputeValidationResult:
@@ -337,6 +409,17 @@ class ComputeService:
             return self._invalid(f"This machine type is {reason}.")
 
         quota = (node.get("node_info") or {}).get("available_core_quota")
+        if quota is None:
+            # Not every node type carries a quota. This workspace reports
+            # one for Standard_F4ads_v7, Standard_E4ads_v7 and
+            # Standard_F8ads_v7 and none at all for Standard_DC4as_v5 —
+            # which is the default preset, so the size most users pick was
+            # the one size this check silently skipped. A three-worker
+            # DC4as_v5 job (16 vCPUs against a limit of 4) validated clean
+            # and then died at cluster start with AZURE_QUOTA_EXCEEDED,
+            # after the user had already waited for compute.
+            quota = self._catalog_core_quota()
+
         cores = int(node.get("num_cores") or 0)
         if quota is not None and cores:
             requested = config.requested_cores(cores)

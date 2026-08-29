@@ -52,10 +52,17 @@ async def lifespan(_: FastAPI):
     unreachable tracking server is logged by the sweep itself and retried
     by the next caller.
     """
-    try:
-        get_pipeline_executor().prewarm()
-    except Exception:  # noqa: BLE001 - warming is never worth failing startup
-        logger.exception("Could not warm run history at startup")
+    for what, warm in (
+        ("run history", get_pipeline_executor().prewarm),
+        # The compute step's node catalog: every validation answers from it
+        # in under a millisecond, but fetching it measured 5.13s, and
+        # without this the first user to reach that step pays for it.
+        ("the compute catalog", compute.compute_service.prewarm),
+    ):
+        try:
+            warm()
+        except Exception:  # noqa: BLE001 - warming is never worth failing startup
+            logger.exception("Could not warm %s at startup", what)
     yield
 
 
