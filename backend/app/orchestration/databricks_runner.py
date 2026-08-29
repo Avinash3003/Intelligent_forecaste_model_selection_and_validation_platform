@@ -186,6 +186,10 @@ class _DatabricksJobRecord:
     started_by_display_name: str | None = None
     cancelled_by_user_id: str | None = None
     cancelled_by_display_name: str | None = None
+    # Decided once, when the run is submitted: which storage layout its
+    # paths follow. Held here because cancellation has to delete exactly
+    # what the run wrote, long after the request that chose it is gone.
+    uses_container: bool = False
 
 
 class DatabricksRunner(PipelineRunner):
@@ -308,6 +312,7 @@ class DatabricksRunner(PipelineRunner):
             dataset_name=request.dataset_name or Path(request.dataset_path).name,
             started_by_user_id=request.started_by_user_id,
             started_by_display_name=request.started_by_display_name,
+            uses_container=self._uses_container_image(request.compute),
         )
         with self._lock:
             self._jobs[run_id] = record
@@ -375,8 +380,9 @@ class DatabricksRunner(PipelineRunner):
 
         with self._lock:
             record.dataset_uri = dataset_uri
-            record.summary_uri = f"{self._run_root(run_id)}/summary.json"
-            record.live_status_uri = f"{self._run_root(run_id)}/live_status.json"
+            run_root = self._run_root(run_id, record.uses_container)
+            record.summary_uri = f"{run_root}/summary.json"
+            record.live_status_uri = f"{run_root}/live_status.json"
             record.databricks_run_id = databricks_run_id
 
     def get_status(self, run_id: str) -> JobStatus:
@@ -525,7 +531,7 @@ class DatabricksRunner(PipelineRunner):
         # something this driver-side call can close without polling
         # `jobs.get_run()` in a loop — deliberately not done here, to avoid
         # turning a cancel request into a multi-second blocking call.
-        cleanup_errors += self._cleanup_run_storage(run_id)
+        cleanup_errors += self._cleanup_run_storage(run_id, record.uses_container)
 
         try:
             self._history.mark_cancelled(run_id, cancelled_by_user_id, cancelled_by_display_name, cancelled_at)
@@ -534,7 +540,7 @@ class DatabricksRunner(PipelineRunner):
 
         return CancellationOutcome(cancelled=True, cleanup_errors=cleanup_errors)
 
-    def _cleanup_run_storage(self, run_id: str) -> list[str]:
+    def _cleanup_run_storage(self, run_id: str, uses_container: bool) -> list[str]:
         """Delete every volume path this run wrote, scoped to runs/{run_id}.
 
         Idempotent — a missing path counts as already clean. Only the
@@ -543,17 +549,17 @@ class DatabricksRunner(PipelineRunner):
         """
         errors: list[str] = []
         for label, path in (
-            ("uploaded dataset/config/status", self._run_root(run_id)),
-            ("curated dataset", f"{self._curated_root(run_id)}/{run_id}"),
-            ("trained models", f"{self._models_root()}/{run_id}"),
-            ("mirrored artifacts", f"{self._artifacts_root()}/{run_id}"),
+            ("uploaded dataset/config/status", self._run_root(run_id, uses_container)),
+            ("curated dataset", f"{self._curated_root(run_id, uses_container)}/{run_id}"),
+            ("trained models", f"{self._models_root(uses_container)}/{run_id}"),
+            ("mirrored artifacts", f"{self._artifacts_root(uses_container)}/{run_id}"),
         ):
             try:
                 self._delete_volume_directory(path)
             except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
                 errors.append(f"{label} ({path}): {safe_detail(exc)}")
 
-        forecast_path = f"{self._forecasts_root()}/{run_id}_forecast.csv"
+        forecast_path = f"{self._forecasts_root(uses_container)}/{run_id}_forecast.csv"
         try:
             self._workspace.files.delete(forecast_path)
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
@@ -603,7 +609,8 @@ class DatabricksRunner(PipelineRunner):
         if not source.is_file():
             raise ExecutionError("The dataset for this run could not be found. Please upload it again.")
 
-        run_root = self._run_root(run_id)
+        uses_container = self._uses_container_image(request.compute)
+        run_root = self._run_root(run_id, uses_container)
         dataset_uri = f"{run_root}/{source.name}"
         config_uri = f"{run_root}/forecast_configuration.json"
 
@@ -651,16 +658,57 @@ class DatabricksRunner(PipelineRunner):
         # on exit, so the curated dataset never outlived the run. Partitioned
         # by run id for the same reason the other outputs are: one run must
         # never overwrite another's.
-        payload["curated_storage"] = {"root_dir": self._curated_root(run_id)}
+        uses_container = self._uses_container_image(request.compute)
+        payload["curated_storage"] = {"root_dir": self._curated_root(run_id, uses_container)}
         # Same reasoning for the winning models the run persists: a
         # relative root would put them on disposable driver storage.
-        payload["model_storage"] = {"root_dir": self._models_root()}
+        payload["model_storage"] = {"root_dir": self._models_root(uses_container)}
         # Same reasoning again for the exported forecast CSV and the
         # artifacts mirror — both outlive the run only if they land on a
         # UC Volume, not the driver's disposable working directory.
-        payload["forecast_export"] = {"root_dir": self._forecasts_root()}
-        payload["artifacts_mirror"] = {"root_dir": self._artifacts_root()}
+        payload["forecast_export"] = {"root_dir": self._forecasts_root(uses_container)}
+        payload["artifacts_mirror"] = {"root_dir": self._artifacts_root(uses_container)}
+        if uses_container:
+            # A container run writes to workspace staging because it has no
+            # UC Volumes mount to write to. That is a limitation of the
+            # container's filesystem, not of its network: the Files API
+            # reaches the same Volume over REST from anywhere. So the run
+            # copies its own outputs across before it exits, and the
+            # storage account ends up holding exactly what a normal run
+            # would have written to it directly.
+            payload["volume_sync"] = {"targets": self._volume_sync_targets(run_id)}
         return payload
+
+    def _volume_sync_targets(self, run_id: str) -> list[dict[str, str]]:
+        """Where a container run's outputs have to be copied to.
+
+        Every pair is one logical location resolved twice by the very same
+        helper — once under the workspace layout the container can write,
+        once under the UC Volume layout the storage account is behind — so
+        the two can never drift apart as the layout changes.
+        """
+        return [
+            {
+                "source": self._run_root(run_id, True),
+                "destination": self._run_root(run_id, False),
+            },
+            {
+                "source": f"{self._curated_root(run_id, True)}/{run_id}",
+                "destination": f"{self._curated_root(run_id, False)}/{run_id}",
+            },
+            {
+                "source": f"{self._models_root(True)}/{run_id}",
+                "destination": f"{self._models_root(False)}/{run_id}",
+            },
+            {
+                "source": f"{self._artifacts_root(True)}/{run_id}",
+                "destination": f"{self._artifacts_root(False)}/{run_id}",
+            },
+            {
+                "source": f"{self._forecasts_root(True)}/{run_id}_forecast.csv",
+                "destination": f"{self._forecasts_root(False)}/{run_id}_forecast.csv",
+            },
+        ]
 
     # The engine writes its outputs to four further roots. Under DCS these
     # cannot be UC Volumes either — the container has no `uc-volumes` scheme
@@ -669,32 +717,33 @@ class DatabricksRunner(PipelineRunner):
     # Dataset). Each keeps its own sub-folder under the workspace staging
     # root so a DCS run's outputs stay as separated as the volumes keep
     # them, and every root still comes from settings.
-    def _output_root(self, volumes_root: str, kind: str) -> str:
-        if self._uses_container_image():
+    def _output_root(self, volumes_root: str, kind: str, uses_container: bool) -> str:
+        if uses_container:
             return f"{self._settings.databricks_workspace_staging_root.rstrip('/')}/{kind}"
         return f"{volumes_root.rstrip('/')}/runs"
 
-    def _forecasts_root(self) -> str:
+    def _forecasts_root(self, uses_container: bool) -> str:
         """Forecast output directory, without the run id — the writer adds it."""
-        return self._output_root(self._settings.databricks_forecasts_volumes_root, "forecasts")
+        return self._output_root(self._settings.databricks_forecasts_volumes_root, "forecasts", uses_container)
 
-    def _artifacts_root(self) -> str:
+    def _artifacts_root(self, uses_container: bool) -> str:
         """Artifact output directory, without the run id — the writer adds it."""
-        return self._output_root(self._settings.databricks_artifacts_volumes_root, "artifacts")
+        return self._output_root(self._settings.databricks_artifacts_volumes_root, "artifacts", uses_container)
 
-    def _curated_root(self, run_id: str) -> str:
+    def _curated_root(self, run_id: str, uses_container: bool) -> str:
         """Curated dataset directory, without the run id — the writer adds it."""
-        return self._output_root(self._settings.databricks_curated_volumes_root, "curated")
+        return self._output_root(self._settings.databricks_curated_volumes_root, "curated", uses_container)
 
-    def _models_root(self) -> str:
+    def _models_root(self, uses_container: bool) -> str:
         """Winning-model directory, without the run id — the writer adds it."""
-        return self._output_root(self._settings.databricks_models_volumes_root, "models")
+        return self._output_root(self._settings.databricks_models_volumes_root, "models", uses_container)
 
     def _trigger_databricks_job(
         self, run_id: str, request: PipelineExecutionRequest, dataset_uri: str
     ) -> int:
         """Submit the engine wheel to the compute the user selected."""
-        run_root = self._run_root(run_id)
+        compute = _require_compute(request.compute)
+        run_root = self._run_root(run_id, self._uses_container_image(compute))
         parameters = {
             "dataset": dataset_uri,
             "config": f"{run_root}/forecast_configuration.json",
@@ -702,7 +751,6 @@ class DatabricksRunner(PipelineRunner):
             "live_status_out": f"{run_root}/live_status.json",
         }
 
-        compute = _require_compute(request.compute)
         compute_sdk, jobs_sdk = _databricks_service_modules()
         task = jobs_sdk.SubmitTask(
             task_key="forecast_pipeline",
@@ -898,17 +946,31 @@ class DatabricksRunner(PipelineRunner):
     # (the runtime image that carries the `uc-volumes` scheme handler is the
     # very thing DCS replaces), while workspace files are reachable from
     # inside it.
-    def _uses_container_image(self) -> bool:
+    def _uses_container_image(self, compute: Any) -> bool:
+        """Whether *this run* executes inside the custom container image.
+
+        The image is attached to a job cluster this runner creates, and to
+        nothing else — see _attach_compute. An existing-compute run
+        therefore executes on whatever runtime that cluster already has,
+        with a working UC Volumes mount, no matter what
+        DATABRICKS_DOCKER_IMAGE_URL is set to.
+
+        Testing the setting alone (which is what this did) diverted those
+        runs to workspace staging as well, quietly taking their outputs out
+        of the storage account for no reason at all.
+        """
+        if getattr(compute, "mode", None) != "new_job_compute":
+            return False
         return bool((self._settings.databricks_docker_image_url or "").strip())
 
-    def _run_root(self, run_id: str) -> str:
+    def _run_root(self, run_id: str, uses_container: bool) -> str:
         """One directory per run, holding its dataset, config and output.
 
         UC Volumes for a normal run; workspace files for a DCS run, which
         cannot read UC Volumes at all. Both roots come from settings, so
         neither path is fixed in code.
         """
-        if self._uses_container_image():
+        if uses_container:
             root = self._settings.databricks_workspace_staging_root
         else:
             root = f"{self._settings.databricks_volumes_root.rstrip('/')}/runs"

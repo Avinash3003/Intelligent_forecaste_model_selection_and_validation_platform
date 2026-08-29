@@ -51,6 +51,7 @@ from forecast_engine.s03_storage.curated_writer import CuratedDatasetWriter
 from forecast_engine.s03_storage.model_writer import WinningModelWriter
 from forecast_engine.s03_storage.forecast_export_writer import ForecastExportWriter
 from forecast_engine.s03_storage.artifacts_mirror_writer import ArtifactsMirrorWriter
+from forecast_engine.s03_storage.volume_sync import sync_outputs_to_volume
 from forecast_engine.s04_training.curated_validator import CuratedDatasetValidator
 from forecast_engine.s04_training.model_trainer import ModelTrainer
 from forecast_engine.s05_models.model_registry import ModelRegistry
@@ -893,6 +894,10 @@ def main(argv: list[str] | None = None) -> int:
     # forecast_engine/core/databricks_secrets.py for who sets one.
     apply_azure_openai_cli_overrides(args)
 
+    # Bound before the try so the post-run volume sync below can read it
+    # even on the paths that leave the try early.
+    config_payload: dict[str, Any] = {}
+
     try:
         configuration = build_configuration_from_args(args)
         # Run-level options may also travel inside --config; see
@@ -951,6 +956,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.summary_out:
         Path(args.summary_out).write_text(json.dumps(summary, indent=2))
+
+    # Last, so it carries summary.json across too. A no-op unless this run
+    # executes inside a container image, which is the only case that cannot
+    # write its outputs to their final home directly — see
+    # forecast_engine/s03_storage/volume_sync.py.
+    outcome = sync_outputs_to_volume(config_payload)
+    if outcome is not None:
+        print(f"Volume sync: {outcome.describe()}", file=sys.stderr)
+        if not outcome.ok:
+            # Reported as a failed run rather than swallowed. The forecast
+            # itself succeeded and is in MLflow, but its results are not in
+            # the storage account the platform treats as their home, and a
+            # run that quietly half-lands there is exactly the failure mode
+            # this whole step exists to end.
+            print(
+                "Forecast Engine failed: the run completed but its outputs could not be "
+                "copied to the storage volume.",
+                file=sys.stderr,
+            )
+            return 1
 
     return 0
 

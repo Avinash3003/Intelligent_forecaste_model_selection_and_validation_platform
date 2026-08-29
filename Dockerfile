@@ -57,6 +57,13 @@ REQUIRED = (
     "statsmodels", "xgboost", "lightgbm", "prophet",
     "torch", "pytorch_forecasting",   # TFT (PyTorch, not TensorFlow)
     "shap", "mlflow", "matplotlib", "openai",
+    # The Files API client. This image has no UC Volumes mount, so it is
+    # how a container run copies its outputs into the storage account —
+    # see forecast_engine/s03_storage/volume_sync.py. It arrives
+    # transitively via mlflow today, which is exactly why it is asserted
+    # here: a future mlflow that stopped pulling it would otherwise fail
+    # the run, not the build.
+    "databricks.sdk",
 )
 
 for name in REQUIRED:

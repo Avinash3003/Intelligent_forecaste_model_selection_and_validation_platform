@@ -214,8 +214,13 @@ def test_databricks_cleanup_is_idempotent(dbx_settings, dataset):
     runner = DatabricksRunner(dbx_settings, workspace_client=workspace)
     run_id = runner.submit(_dbx_request(dataset))
 
-    first_errors = runner._cleanup_run_storage(run_id)
-    second_errors = runner._cleanup_run_storage(run_id)
+    # The layout a run wrote under is the layout cleanup must delete from,
+    # so it is passed explicitly rather than re-derived from settings that
+    # may describe a different kind of run.
+    uses_container = runner._jobs[run_id].uses_container
+
+    first_errors = runner._cleanup_run_storage(run_id, uses_container)
+    second_errors = runner._cleanup_run_storage(run_id, uses_container)
 
     assert first_errors == []
     assert second_errors == []

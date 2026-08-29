@@ -83,3 +83,4 @@ openai>=1.30,<2.0           # Azure OpenAI Chat Completions client
 # the same tracking store — re-verify this range if that pin ever changes.
 mlflow>=2.15,<3.0           # Experiment tracking, artifact logging, model registry
 matplotlib>=3.8,<4.0         # Forecast plot artifacts (installed transitively by mlflow)
+databricks-sdk>=0.30,<1.0    # Files API for the container runtime volume sync (see s03_storage/volume_sync.py)
