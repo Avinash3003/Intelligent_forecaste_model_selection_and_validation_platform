@@ -557,6 +557,32 @@ class MLflowHistoryStore:
         if not self._tracking_uri.strip().lower().startswith("databricks"):
             return
 
+        # OAuth (a service principal's client id + secret) is not something
+        # mlflow-skinny will use on its own. Handed those credentials and
+        # nothing else, `http_request` refuses outright:
+        #
+        #   MlflowException: To use OAuth authentication, set environmental
+        #   variable 'MLFLOW_ENABLE_DB_SDK' to true
+        #
+        # (mlflow/utils/rest_utils.py, reached whenever host creds carry a
+        # client_secret and no token). Every history read then fails, which
+        # surfaces as an app with no run history at all rather than as an
+        # error — `is_available()` still reports true, because building the
+        # client is not what fails.
+        #
+        # This deployment authenticates exactly that way: a workspace-scoped
+        # service principal, deliberately no personal access token. So the
+        # flag that makes MLflow route through the Databricks SDK is part of
+        # supplying those credentials, not a separate thing to remember in
+        # every environment's configuration.
+        #
+        # setdefault, like the credentials below: an operator who has set it
+        # explicitly — including to "false" — is never overridden.
+        if (self._settings.databricks_client_id or "").strip() and (
+            self._settings.databricks_client_secret or ""
+        ).strip():
+            os.environ.setdefault("MLFLOW_ENABLE_DB_SDK", "true")
+
         for env_name, value in (
             ("DATABRICKS_HOST", self._settings.databricks_host),
             ("DATABRICKS_CLIENT_ID", self._settings.databricks_client_id),

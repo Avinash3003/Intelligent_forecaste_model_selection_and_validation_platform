@@ -166,3 +166,58 @@ def test_health_never_leaks_the_full_tracking_uri():
             assert body["run_history_backend"] == "postgresql"
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------
+# OAuth needs one more environment variable than the credentials
+# ---------------------------------------------------------------------
+
+
+def test_oauth_credentials_also_enable_mlflows_databricks_sdk_path(monkeypatch):
+    """mlflow-skinny refuses OAuth outright without this.
+
+    Handed a client id and secret and no token, `http_request` raises
+    "To use OAuth authentication, set environmental variable
+    'MLFLOW_ENABLE_DB_SDK' to true" on every call — so run history reads
+    as empty rather than as broken, since building the client is not what
+    fails. This deployment has no personal access token by design.
+    """
+    monkeypatch.delenv("MLFLOW_ENABLE_DB_SDK", raising=False)
+    settings = Settings(
+        execution_mode="databricks",
+        databricks_host="https://example.azuredatabricks.net",
+        databricks_client_id="client-123",
+        databricks_client_secret="secret-456",
+    )
+
+    MLflowHistoryStore(settings)._ensure_databricks_credentials_in_environment()
+
+    assert os.environ["MLFLOW_ENABLE_DB_SDK"] == "true"
+
+
+def test_an_operator_who_disabled_the_sdk_path_is_not_overridden(monkeypatch):
+    monkeypatch.setenv("MLFLOW_ENABLE_DB_SDK", "false")
+    settings = Settings(
+        execution_mode="databricks",
+        databricks_host="https://example.azuredatabricks.net",
+        databricks_client_id="client-123",
+        databricks_client_secret="secret-456",
+    )
+
+    MLflowHistoryStore(settings)._ensure_databricks_credentials_in_environment()
+
+    assert os.environ["MLFLOW_ENABLE_DB_SDK"] == "false"
+
+
+def test_token_only_credentials_do_not_set_the_oauth_flag(monkeypatch):
+    """A token authenticates on its own; the flag would be noise."""
+    monkeypatch.delenv("MLFLOW_ENABLE_DB_SDK", raising=False)
+    settings = Settings(
+        execution_mode="databricks",
+        databricks_host="https://example.azuredatabricks.net",
+        databricks_token="dapi-abc",
+    )
+
+    MLflowHistoryStore(settings)._ensure_databricks_credentials_in_environment()
+
+    assert "MLFLOW_ENABLE_DB_SDK" not in os.environ
