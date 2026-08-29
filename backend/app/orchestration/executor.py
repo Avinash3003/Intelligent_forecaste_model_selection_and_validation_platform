@@ -44,6 +44,10 @@ class PipelineExecutor:
         """Every run on the active Runner, newest first."""
         return self._runner.list_runs()
 
+    def prewarm(self) -> None:
+        """Let the Runner start any slow first read before requests arrive."""
+        self._runner.prewarm()
+
     def get_run(self, run_id: str) -> RunListing | None:
         """One run including its stage trail, or None if unknown."""
         return self._runner.get_run(run_id)

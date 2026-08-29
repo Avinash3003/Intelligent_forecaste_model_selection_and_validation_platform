@@ -51,7 +51,14 @@ export default function Deployments() {
       if (cancelledRef.current) return
 
       const hasActiveRun = (data ?? []).some((run) => !isTerminalStatus(run.status))
-      if (hasActiveRun) {
+      // An empty list is also worth one more look. Run history is read
+      // from MLflow, which the backend warms at startup but cannot have
+      // ready in the seconds immediately after a restart — and an empty
+      // table that has stopped refreshing is indistinguishable from "you
+      // have never run anything", which is the one thing it must not be
+      // mistaken for. Costs nothing once history is warm: the backend
+      // answers a repeat list from cache in single-digit milliseconds.
+      if (hasActiveRun || (data ?? []).length === 0) {
         timeoutRef.current = setTimeout(() => cycle(false), REFRESH_INTERVAL_MS)
       }
     }

@@ -78,6 +78,33 @@ _MAX_SEARCH_PAGES = 200
 # on every request, which is most of what made estimation slow.
 MISSING_SUMMARY_TTL_SECONDS = 120.0
 
+# How long a fetched history listing is served without re-reading MLflow.
+#
+# This store holds *finished* runs only. Anything still live is held in the
+# runner's in-memory registry and merged over the top of this list, so a
+# cached listing can never hide a running run or stale its progress — the
+# only thing it can delay is a run that finished in a *previous* process,
+# and those never change again.
+#
+# Measured against the Databricks-hosted tracking server this deployment
+# uses: one full sweep of fourteen runs cost 39.6s — an 11.3s experiment
+# lookup plus 28.3s of paging (the server returned 1, 10, 1 and 2 runs per
+# page). Five screens poll the deployments list every five seconds, and
+# every one of those polls used to start its own sweep.
+HISTORY_LIST_TTL_SECONDS = 30.0
+
+# How long a caller holding no cached listing at all waits for the first
+# sweep before answering with what it has.
+#
+# A file-backed store answers in milliseconds, so local development always
+# completes inside this and behaves exactly as it did before. A slow remote
+# store answers "nothing yet" and fills in on the caller's next poll, which
+# is the entire point: a request that blocks for 39.6s is already past the
+# frontend's own 30s timeout, so waiting for it produces "The request took
+# too long to respond" and *no* history, where not waiting produces the
+# live runs immediately and the rest a few seconds later.
+HISTORY_COLD_WAIT_SECONDS = 8.0
+
 
 class MLflowHistoryStore:
     """Reads finished-run history from the configured MLflow store."""
@@ -95,6 +122,17 @@ class MLflowHistoryStore:
         # run_id -> monotonic deadline until which "no summary" is taken on
         # trust instead of re-downloaded. See MISSING_SUMMARY_TTL_SECONDS.
         self._missing_summaries: dict[str, float] = {}
+        # The experiment's id, resolved once. See _resolve_experiment_id.
+        self._experiment_id: str | None = None
+        # limit -> (monotonic deadline, listings). Keyed by limit because
+        # callers ask for different depths (the deployments list wants the
+        # full history, estimation wants a small sample) and one is not a
+        # correct answer to the other.
+        self._listing_cache: dict[int, tuple[float, list[RunListing]]] = {}
+        # limit -> the Event a sweep in flight will set when it finishes.
+        # Presence is what makes the sweep single-flight: concurrent
+        # callers join the running sweep instead of starting another.
+        self._listing_refresh: dict[int, threading.Event] = {}
 
     def is_available(self) -> bool:
         """Whether history can be read. Never raises."""
@@ -103,26 +141,123 @@ class MLflowHistoryStore:
     def list_runs(self, limit: int = DEFAULT_HISTORY_LIMIT) -> list[RunListing]:
         """Every finished run, newest first.
 
+        Cached for HISTORY_LIST_TTL_SECONDS and refreshed off the calling
+        thread, because a sweep costs tens of seconds against a remote
+        tracking store and every screen in the app polls this list. A
+        caller never waits for a sweep it did not have to start, and never
+        waits longer than HISTORY_COLD_WAIT_SECONDS even then.
+
         Returns an empty list rather than raising when MLflow is
         unreachable, so history degrades to "none" instead of breaking the page.
         """
+        with self._lock:
+            cached = self._listing_cache.get(limit)
+            if cached is not None and time.monotonic() < cached[0]:
+                return list(cached[1])
+
+        done = self._sweep_in_flight(limit)
+
+        if cached is not None:
+            # Stale, and a sweep is already on its way. Answering with the
+            # previous listing costs the caller nothing; parking a request
+            # thread for the length of a sweep costs it everything, and
+            # with one worker process those threads are the whole API.
+            return list(cached[1])
+
+        done.wait(timeout=HISTORY_COLD_WAIT_SECONDS)
+        with self._lock:
+            cached = self._listing_cache.get(limit)
+        return list(cached[1]) if cached is not None else []
+
+    def prewarm(self) -> None:
+        """Start the first history sweep now, so no request has to pay it.
+
+        A sweep costs tens of seconds against a remote tracking store, and
+        the very first caller is the only one that cannot be served from
+        cache. Started at application startup instead, that caller is
+        nobody: by the time a browser asks for the deployments list the
+        sweep has long finished. Without this, the first page load after a
+        deploy or a restart gets HISTORY_COLD_WAIT_SECONDS and then an
+        *incomplete* list, which reads as "my run history disappeared".
+
+        Returns immediately; the sweep runs on its own thread and a failure
+        is logged and retried by the next caller.
+        """
+        self._sweep_in_flight(DEFAULT_HISTORY_LIMIT)
+
+    def _sweep_in_flight(self, limit: int) -> threading.Event:
+        """The Event for the sweep covering `limit`, starting one if none is
+        already running.
+
+        This is what makes the sweep single-flight: concurrent callers all
+        receive the same Event and only the first of them starts a thread.
+        Must not be called holding self._lock.
+        """
+        with self._lock:
+            done = self._listing_refresh.get(limit)
+            if done is not None:
+                return done
+            done = threading.Event()
+            self._listing_refresh[limit] = done
+
+        threading.Thread(
+            target=self._refresh_listings,
+            args=(limit, done),
+            name=f"forecastiq-history-{limit}",
+            daemon=True,
+        ).start()
+        return done
+
+    def _refresh_listings(self, limit: int, done: threading.Event) -> None:
+        """Re-read history into the cache. Never raises.
+
+        A failed sweep caches nothing, so the previous listing keeps being
+        served and the next call retries — a transient tracking-server
+        blip must not empty the deployments table for thirty seconds.
+        """
+        listings: list[RunListing] | None = None
+        try:
+            listings = self._fetch_listings(limit)
+        except Exception as exc:  # noqa: BLE001 - history is best-effort
+            logger.warning("Could not read run history from MLflow: %s", exc)
+        finally:
+            with self._lock:
+                if listings is not None:
+                    self._listing_cache[limit] = (
+                        time.monotonic() + HISTORY_LIST_TTL_SECONDS,
+                        listings,
+                    )
+                self._listing_refresh.pop(limit, None)
+            done.set()
+
+    def _fetch_listings(self, limit: int) -> list[RunListing] | None:
+        """One sweep of history, or None if it could not be read at all.
+
+        None and [] are different answers: [] is "this experiment really
+        has no runs" and is worth caching, None is "MLflow was unreachable"
+        and is not.
+        """
         client = self._get_client()
         if client is None:
+            return None
+
+        experiment_id = self._resolve_experiment_id(client)
+        if experiment_id is None:
             return []
 
         try:
-            experiment = client.get_experiment_by_name(self._experiment_name)
-            if experiment is None:
-                return []
             runs = self._search_runs(
                 client,
-                experiment.experiment_id,
+                experiment_id,
                 limit=limit,
                 order_by=["attributes.start_time DESC"],
             )
-        except Exception as exc:  # noqa: BLE001 - history is best-effort
-            logger.warning("Could not read run history from MLflow: %s", exc)
-            return []
+        except Exception:
+            # The cached id is the one thing here that could be wrong
+            # rather than merely unreachable, so it is dropped before the
+            # failure propagates and the next sweep re-resolves it.
+            self._forget_experiment_id()
+            raise
 
         listings = []
         for run in runs:
@@ -210,8 +345,8 @@ class MLflowHistoryStore:
         # run id is a different identifier the rest of the platform never
         # uses.
         try:
-            experiment = client.get_experiment_by_name(self._experiment_name)
-            if experiment is None:
+            experiment_id = self._resolve_experiment_id(client)
+            if experiment_id is None:
                 return None
             # Paged for the same reason list_runs is, and it matters more
             # here: a miss is not "one run missing from a table" but "this
@@ -221,14 +356,43 @@ class MLflowHistoryStore:
             # not yet reached — not an absent run.
             runs = self._search_runs(
                 client,
-                experiment.experiment_id,
+                experiment_id,
                 limit=1,
                 filter_string=f"tags.{RUN_ID_TAG} = '{run_id}'",
             )
         except Exception as exc:  # noqa: BLE001
+            self._forget_experiment_id()
             logger.warning("Could not look up run '%s' in MLflow: %s", run_id, exc)
             return None
         return runs[0] if runs else None
+
+    def _resolve_experiment_id(self, client: Any) -> str | None:
+        """The experiment's id, resolved once per process.
+
+        `get_experiment_by_name` is a remote call MLflow does not cache —
+        measured at 11.3s cold and 3.1s warm against this deployment's
+        Databricks-hosted tracking server — and it was being paid on every
+        single history read, to re-resolve a name-to-id mapping that cannot
+        change underneath a running process. Dropped again whenever a
+        search using it fails (see the callers), so an experiment that is
+        deleted and recreated is picked up on the next call rather than
+        being wrong for the life of the process.
+        """
+        with self._lock:
+            if self._experiment_id is not None:
+                return self._experiment_id
+
+        experiment = client.get_experiment_by_name(self._experiment_name)
+        if experiment is None:
+            return None
+
+        with self._lock:
+            self._experiment_id = experiment.experiment_id
+        return experiment.experiment_id
+
+    def _forget_experiment_id(self) -> None:
+        with self._lock:
+            self._experiment_id = None
 
     @staticmethod
     def _search_runs(
@@ -343,6 +507,9 @@ class MLflowHistoryStore:
         with self._lock:
             self._summary_cache.pop(run_id, None)
             self._missing_summaries.pop(run_id, None)
+            # This run's MLflow status just changed, so every cached
+            # listing that could contain it is now wrong.
+            self._listing_cache.clear()
         return True
 
     def _get_client(self) -> Any:

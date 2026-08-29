@@ -456,6 +456,9 @@ class DatabricksRunner(PipelineRunner):
             duration_seconds=listing.duration_seconds,
         )
 
+    def prewarm(self) -> None:
+        self._history.prewarm()
+
     def list_runs(self) -> list[RunListing]:
         with self._lock:
             records = list(self._jobs.values())

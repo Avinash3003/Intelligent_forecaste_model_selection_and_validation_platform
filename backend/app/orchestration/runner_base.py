@@ -41,6 +41,14 @@ class PipelineRunner(ABC):
     def get_run(self, run_id: str) -> RunListing | None:
         """One run including its stage trail, or None if unknown."""
 
+    def prewarm(self) -> None:
+        """Start whatever slow first read this backend has, off the request path.
+
+        Optional, and deliberately not abstract: a backend with nothing
+        slow to warm does nothing here. Must return immediately — it is
+        called during application startup, not from a request.
+        """
+
     @abstractmethod
     def cancel(
         self,

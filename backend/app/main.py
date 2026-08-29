@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -21,6 +22,7 @@ from app.api import (
 from app.auth.entra import AuthConfigurationError
 from app.auth.dependencies import get_token_validator
 from app.config.settings import get_settings
+from app.orchestration.executor import get_pipeline_executor
 from app.utils.errors import safe_detail
 
 logger = logging.getLogger("forecastiq.api")
@@ -38,7 +40,27 @@ if settings.auth_enabled:
     # Catch a missing tenant/audience now, not as a 401 on every request later.
     get_token_validator().require_configuration()
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Warm the slow reads before the first request has to pay for them.
+
+    Reading run history from a Databricks-hosted MLflow costs tens of
+    seconds, and every screen in the app opens by asking for it. Started
+    here it is finished long before a browser connects; left to the first
+    request it lands on a user, on a threadpool this app has exactly one
+    of. Best-effort by construction: it returns immediately, and an
+    unreachable tracking server is logged by the sweep itself and retried
+    by the next caller.
+    """
+    try:
+        get_pipeline_executor().prewarm()
+    except Exception:  # noqa: BLE001 - warming is never worth failing startup
+        logger.exception("Could not warm run history at startup")
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title=settings.app_name,
     description="API for the Intelligent Forecast Model Selection & Validation Platform.",
     version="1.0.0",
