@@ -244,14 +244,6 @@ class MLflowClient:
         except Exception as exc:  # noqa: BLE001
             raise MLflowTrackingError(f"Failed to log artifact file '{local_path}': {exc}") from exc
 
-    def log_figure(self, figure: Any, artifact_file: str) -> None:
-        """Log a matplotlib figure directly, without an intermediate file."""
-        mlflow = self._sdk()
-        try:
-            mlflow.log_figure(figure, artifact_file)
-        except Exception as exc:  # noqa: BLE001
-            raise MLflowTrackingError(f"Failed to log figure '{artifact_file}': {exc}") from exc
-
     def register_pyfunc_model(
         self,
         python_model: Any,

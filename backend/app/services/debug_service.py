@@ -29,7 +29,6 @@ KNOWN_ARTIFACT_PATHS = [
     ("Forecast results", "forecast/forecast_results.json"),
     ("Metrics summary", "metrics/metrics_summary.json"),
     ("SHAP outputs", "explainability/shap_outputs.json"),
-    ("Forecast plots", "plots/<group>_forecast.png"),
     ("Drift report", "drift/drift_report.json"),
     ("Ranking results", "ranking/ranking_results.json"),
     ("Fallback report", "selection/fallback_report.json"),

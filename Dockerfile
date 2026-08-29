@@ -56,7 +56,7 @@ REQUIRED = (
     "pandas", "numpy", "scipy", "sklearn", "openpyxl",
     "statsmodels", "xgboost", "lightgbm", "prophet",
     "torch", "pytorch_forecasting",   # TFT (PyTorch, not TensorFlow)
-    "shap", "mlflow", "matplotlib", "openai",
+    "shap", "mlflow", "openai",
     # The Files API client. This image has no UC Volumes mount, so it is
     # how a container run copies its outputs into the storage account —
     # see forecast_engine/s03_storage/volume_sync.py. It arrives
