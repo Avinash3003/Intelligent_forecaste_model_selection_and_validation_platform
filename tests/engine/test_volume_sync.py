@@ -204,3 +204,112 @@ def test_the_backends_payload_shape_drives_the_copy(staged):
     outcome = sync_outputs_to_volume(payload, client)
 
     assert outcome is not None and outcome.ok and outcome.files_copied == 2
+
+
+# --- the auth failure that broke the first version ---------------------
+
+
+class _AuthFailingFiles:
+    """Reproduces the exact production failure: the SDK's default credential
+    chain does not resolve inside a python_wheel_task."""
+
+    MESSAGE = (
+        "default auth: cannot configure default credentials, please check "
+        "https://docs.databricks.com/en/dev-tools/auth.html"
+    )
+
+    def __init__(self):
+        self.attempts = []
+
+    def upload(self, path, contents, overwrite=False):
+        self.attempts.append(path)
+        raise ValueError(self.MESSAGE)
+
+
+class _AuthFailingClient:
+    def __init__(self):
+        self.files = _AuthFailingFiles()
+
+
+def test_a_credential_failure_is_not_retried_per_file(staged, monkeypatch):
+    """The retry storm: 76 files x 3 attempts x backoff buried the cause in
+    228 identical warnings and added minutes to every run."""
+    monkeypatch.setattr("forecast_engine.s03_storage.volume_sync._RETRY_BACKOFF_SECONDS", 0)
+    client = _AuthFailingClient()
+
+    outcome = VolumeSync(client).run(
+        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1")]
+    )
+
+    assert not outcome.ok
+    assert outcome.aborted_on_auth
+    # One attempt, on one file — not three attempts on every file.
+    assert len(client.files.attempts) == 1
+
+
+def test_a_credential_failure_stops_the_whole_sweep(staged, monkeypatch):
+    monkeypatch.setattr("forecast_engine.s03_storage.volume_sync._RETRY_BACKOFF_SECONDS", 0)
+    client = _AuthFailingClient()
+
+    VolumeSync(client).run(
+        [
+            SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1"),
+            SyncTarget(staged / "models" / "run-1", "/Volumes/cat/sch/models_files/runs/run-1"),
+            SyncTarget(staged / "forecasts" / "run-1_forecast.csv", "/Volumes/cat/sch/f.csv"),
+        ]
+    )
+
+    assert len(client.files.attempts) == 1
+
+
+def test_the_abort_is_reported_distinctly_from_a_file_failure(staged, monkeypatch):
+    """"cannot authenticate" and "one upload failed" need different actions,
+    so the run's log must not conflate them."""
+    monkeypatch.setattr("forecast_engine.s03_storage.volume_sync._RETRY_BACKOFF_SECONDS", 0)
+
+    outcome = VolumeSync(_AuthFailingClient()).run(
+        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1")]
+    )
+
+    assert "ABORTED" in outcome.describe()
+    assert "authenticate" in outcome.describe()
+
+
+def test_an_ordinary_upload_failure_is_still_retried(staged, monkeypatch):
+    """The abort must be specific to credentials — a transient blip on one
+    file must keep its retries."""
+    monkeypatch.setattr("forecast_engine.s03_storage.volume_sync._RETRY_BACKOFF_SECONDS", 0)
+    target = "/Volumes/cat/sch/forecasts_files/runs/run-1_forecast.csv"
+    client = _FakeClient(fail_for=[target], fail_times=2)
+
+    outcome = VolumeSync(client).run(
+        [SyncTarget(staged / "forecasts" / "run-1_forecast.csv", target)]
+    )
+
+    assert outcome.ok and not outcome.aborted_on_auth
+    assert client.files.attempts.count(target) == 3
+
+
+def test_default_workspace_client_auth_is_never_used():
+    """Pins the root cause: bare WorkspaceClient() has no credential chain
+    in a python_wheel_task. The client must come from the runtime context."""
+    import inspect
+
+    from forecast_engine.s03_storage import volume_sync
+
+    source = inspect.getsource(volume_sync._runtime_client)
+    assert "databricks.sdk.runtime" in source
+    assert "apiToken" in source
+    # Parsed, not grepped: the docstring names the bare form precisely
+    # because it is the thing that must never be called.
+    import ast
+
+    bare = [
+        node
+        for node in ast.walk(ast.parse(inspect.getsource(volume_sync)))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "WorkspaceClient"
+        and not node.args
+        and not node.keywords
+    ]
+    assert bare == [], "WorkspaceClient() is called with no credentials"
