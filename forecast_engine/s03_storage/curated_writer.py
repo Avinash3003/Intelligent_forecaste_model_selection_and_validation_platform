@@ -10,12 +10,15 @@ location keyed by run id, so a run's input stays reproducible.
 
 from __future__ import annotations
 
+import io
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 import pandas as pd
 
 from forecast_engine.config.pipeline_config import CuratedStorageConfig
+from forecast_engine.core import storage
 from forecast_engine.utils.exceptions import CuratedDatasetError
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset({"csv", "parquet"})
@@ -42,13 +45,18 @@ class LocalCuratedBackend(CuratedDatasetBackend):
     # Write a dataframe to local disk as CSV or parquet
     def write(self, dataframe: pd.DataFrame, relative_path: str, file_format: str) -> str:
         destination = self._root / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        storage.ensure_parent(destination)
 
         try:
+            # Serialised to a buffer and written once through the adapter.
+            # pandas writes to a path, which a DCS container cannot open on
+            # a UC Volume; the bytes are identical either way.
+            buffer = io.BytesIO()
             if file_format == "parquet":
-                dataframe.to_parquet(destination, index=False)
+                dataframe.to_parquet(buffer, index=False)
             else:
-                dataframe.to_csv(destination, index=False)
+                buffer.write(dataframe.to_csv(index=False).encode("utf-8"))
+            storage.write_bytes(destination, buffer.getvalue())
         except Exception as exc:  # noqa: BLE001 - re-raised as a domain error
             raise CuratedDatasetError(f"Failed to write curated dataset to '{destination}': {exc}") from exc
 

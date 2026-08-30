@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from forecast_engine.core import storage
 from typing import Any
 
 from forecast_engine.config.pipeline_config import ArtifactsMirrorConfig
@@ -41,8 +43,8 @@ class ArtifactsMirrorWriter:
     def _write_one(self, run_dir: Path, filename: str, data: dict[str, Any]) -> dict[str, Any]:
         path = run_dir / filename
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            storage.ensure_parent(path)
+            storage.write_text(path, json.dumps(data, indent=2))
         except Exception as exc:  # noqa: BLE001 - one file must not block another
             return {"file": filename, "persisted": False, "uri": None, "error": str(exc)}
         return {"file": filename, "persisted": True, "uri": str(path), "error": None}

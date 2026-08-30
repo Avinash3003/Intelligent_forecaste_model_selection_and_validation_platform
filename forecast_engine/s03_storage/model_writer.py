@@ -19,6 +19,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from forecast_engine.core import storage
 from forecast_engine.config.pipeline_config import ModelStorageConfig
 
 # Anything outside this set becomes "_". Applied to the *whole* key, so a
@@ -116,9 +117,12 @@ class WinningModelWriter:
 
         path = run_dir / f"{sanitize_forecast_key(group_id)}_model.pkl"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("wb") as handle:
-                pickle.dump(model, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            storage.ensure_parent(path)
+            # pickle.dumps rather than dump-to-handle: the adapter takes
+            # bytes, so the same call serves a mounted volume and one
+            # reached over the Files API. Byte-for-byte what the handle
+            # would have received.
+            storage.write_bytes(path, pickle.dumps(model, protocol=pickle.HIGHEST_PROTOCOL))
         except Exception as exc:  # noqa: BLE001 - one key must not end the run
             record["error"] = f"Could not write the model: {exc}"
             return record

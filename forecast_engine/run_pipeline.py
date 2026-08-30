@@ -36,6 +36,7 @@ from forecast_engine.config.pipeline_config import PipelineConfig
 from forecast_engine.config.ranking_config import RankingConfig
 from forecast_engine.core.databricks_secrets import apply_azure_openai_cli_overrides
 from forecast_engine.core.forecast_configuration import AggregationMethod, ForecastConfiguration
+from forecast_engine.core import storage
 from forecast_engine.core.live_status import LiveStatusWriter
 from forecast_engine.core.pipeline_context import PipelineContext, StageStatus
 from forecast_engine.core.pipeline_result import PipelineResultBuilder
@@ -714,7 +715,9 @@ def _failed_stage(context: PipelineContext) -> str | None:
 def load_config_payload(args: argparse.Namespace) -> dict[str, Any]:
     if not args.config:
         return {}
-    payload = json.loads(Path(args.config).read_text())
+    # Read through the adapter: on a DCS container the configuration is in
+    # a UC Volume with no POSIX mount, so Path.read_text() cannot see it.
+    payload = json.loads(storage.read_text(args.config))
     return payload if isinstance(payload, dict) else {}
 
 
@@ -955,7 +958,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summary, indent=2))
 
     if args.summary_out:
-        Path(args.summary_out).write_text(json.dumps(summary, indent=2))
+        storage.write_text(args.summary_out, json.dumps(summary, indent=2))
 
     # Last, so it carries summary.json across too. A no-op unless this run
     # executes inside a container image, which is the only case that cannot

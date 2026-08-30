@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from forecast_engine.config.pipeline_config import ForecastExportConfig
+from forecast_engine.core import storage
 from forecast_engine.s03_storage.model_writer import sanitize_forecast_key
 
 _COLUMNS = ("group_id", "model_name", "date", "value", "lower", "upper")
@@ -48,12 +49,12 @@ class ForecastExportWriter:
 
         path = Path(self._config.root_dir) / f"{sanitize_forecast_key(run_id)}_forecast.csv"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            storage.ensure_parent(path)
             buffer = io.StringIO()
             writer = csv.writer(buffer)
             writer.writerow(_COLUMNS)
             writer.writerows(rows)
-            path.write_text(buffer.getvalue(), encoding="utf-8")
+            storage.write_text(path, buffer.getvalue())
         except Exception as exc:  # noqa: BLE001 - one write failure must not fail the run
             return {"enabled": True, "persisted": False, "uri": None, "rows": 0, "error": f"Could not write the export: {exc}"}
 

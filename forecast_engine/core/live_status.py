@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from forecast_engine.core import storage
+
 if TYPE_CHECKING:
     from forecast_engine.core.pipeline_context import PipelineContext
 
@@ -42,6 +44,19 @@ class LiveStatusWriter:
             pass
 
     def _write_atomic(self, payload: dict[str, Any]) -> None:
+        # A UC Volume with no POSIX mount has no rename, so the tmp+replace
+        # dance below cannot run there. It does not need to: the Files API
+        # writes this payload in a single request (the SDK only switches to
+        # multipart above files_ext_multipart_upload_min_stream_size, which
+        # is 50 MiB — a status document is a few KB), and an object store
+        # PUT replaces the object wholesale. A reader sees either the
+        # previous complete document or the new one, never a splice of the
+        # two. That is the same guarantee os.replace gives, reached by a
+        # different mechanism, so neither route can serve a partial file.
+        if not storage.supports_atomic_replace(self._path):
+            storage.write_text(self._path, json.dumps(payload))
+            return
+
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # Written into the same directory as the final destination so the
         # subsequent os.replace is a same-filesystem rename, which is what
