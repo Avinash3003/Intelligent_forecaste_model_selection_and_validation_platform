@@ -35,18 +35,22 @@ from test_databricks_runner import _FakeWorkspace  # noqa: E402
 
 
 class _FakeWorkspaceApi:
-    """The Workspace Files API, which is a different API on the same client
-    from the Volumes one — a container run's staging goes through it."""
+    """The Workspace Files API — a different API on the same client from the
+    Volumes one.
 
-    def __init__(self, uploaded):
-        self._uploaded = uploaded
+    Keeps its OWN record, deliberately. Sharing one dict with the Volumes
+    fake made "was this written to the workspace?" unanswerable, and that is
+    now the security question the tests exist to answer."""
+
+    def __init__(self):
+        self.uploaded: dict[str, object] = {}
         self.made = []
 
     def mkdirs(self, path):
         self.made.append(path)
 
     def upload(self, path, content, format=None, overwrite=False):
-        self._uploaded[path] = content
+        self.uploaded[path] = content
 
 
 class _Workspace(_FakeWorkspace):
@@ -54,7 +58,7 @@ class _Workspace(_FakeWorkspace):
         super().__init__(state)
         # One dict for both APIs: a test asserts *where* a file landed, and
         # the path itself is what says which API owned it.
-        self.workspace = _FakeWorkspaceApi(self.files.uploaded)
+        self.workspace = _FakeWorkspaceApi()
 
 VOLUME = "/Volumes/forecastiq/forecasting"
 STAGING = "/Workspace/Shared/forecastiq/runs"
@@ -140,64 +144,73 @@ def test_a_job_compute_run_without_an_image_also_uses_volumes(tmp_path, mlflow_d
     assert "volume_sync" not in payload
 
 
-# --- the container run: staged where it can write ----------------------
+# --- the container run: staged straight into Unity Catalog -------------
 
 
-def test_a_container_run_stages_to_the_workspace_because_it_has_no_mount(tmp_path, mlflow_db, dataset):
+def test_a_container_run_stages_into_the_volume_not_the_workspace(tmp_path, mlflow_db, dataset):
     _, run_id, config_key, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
 
-    assert config_key == f"{STAGING}/{run_id}/forecast_configuration.json"
-    assert payload["curated_storage"]["root_dir"] == f"{STAGING}/curated"
-    assert payload["model_storage"]["root_dir"] == f"{STAGING}/models"
+    assert config_key == f"{VOLUME}/forecast_files/runs/{run_id}/forecast_configuration.json"
+    assert payload["curated_storage"]["root_dir"] == f"{VOLUME}/curated_files/runs"
+    assert payload["model_storage"]["root_dir"] == f"{VOLUME}/models_files/runs"
 
 
-# --- defect 2: and copies itself back into the storage account ---------
+# --- the architecture that replaced the sync step ----------------------
 
 
-def test_a_container_run_is_told_to_copy_every_output_into_the_volume(tmp_path, mlflow_db, dataset):
-    _, run_id, _, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
+def test_both_execution_modes_receive_identical_unity_catalog_paths(tmp_path, mlflow_db, dataset):
+    """The whole point of the storage adapter: the runner stops caring which
+    compute is running, because reaching a volume is the adapter's problem.
 
-    pairs = {t["source"]: t["destination"] for t in payload["volume_sync"]["targets"]}
+    Before this there were two path layouts -- UC for existing compute,
+    workspace staging for containers -- and a copy step to reconcile them.
+    That copy is what duplicated sensitive data under an Analyst-readable
+    workspace folder, and what silently delivered nothing when its
+    authentication broke."""
+    _, run_id, existing_key, existing = _config_for(tmp_path, mlflow_db, dataset, EXISTING, "acr.io/forecastiq:1")
+    _, _, container_key, container = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
 
-    assert pairs == {
-        f"{STAGING}/{run_id}": f"{VOLUME}/forecast_files/runs/{run_id}",
-        f"{STAGING}/curated/{run_id}": f"{VOLUME}/curated_files/runs/{run_id}",
-        f"{STAGING}/models/{run_id}": f"{VOLUME}/models_files/runs/{run_id}",
-        f"{STAGING}/artifacts/{run_id}": f"{VOLUME}/artifacts_files/runs/{run_id}",
-        f"{STAGING}/forecasts/{run_id}_forecast.csv": f"{VOLUME}/forecasts_files/runs/{run_id}_forecast.csv",
-    }
+    assert existing_key == container_key
+    for block in ("curated_storage", "model_storage", "forecast_export", "artifacts_mirror"):
+        assert existing[block]["root_dir"] == container[block]["root_dir"], block
+        assert container[block]["root_dir"].startswith(f"{VOLUME}/"), block
 
 
-def test_every_output_the_engine_is_given_is_also_a_sync_source(tmp_path, mlflow_db, dataset):
-    """The guard against a future output being added and quietly never
-    reaching the storage account — the exact shape of this whole bug."""
-    _, run_id, config_key, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
+def test_a_container_run_is_never_asked_to_copy_anything(tmp_path, mlflow_db, dataset):
+    """No `volume_sync` block: the engine already wrote to the source of
+    truth, so there is nothing left to copy. The copy step is inert rather
+    than deleted, so one revert restores the old behaviour."""
+    _, _, _, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
 
-    sources = {t["source"] for t in payload["volume_sync"]["targets"]}
-    written_roots = {
+    assert "volume_sync" not in payload
+
+
+def test_no_run_data_is_staged_in_the_workspace(tmp_path, mlflow_db, dataset):
+    """The security invariant. Workspace ACLs inherit from /Shared and
+    cannot be denied, so a copy of a dataset or a model binary there is
+    reachable by anyone the UC grants deliberately exclude."""
+    runner = DatabricksRunner(
+        _settings(tmp_path, mlflow_db, image="acr.io/forecastiq:1"), workspace_client=_Workspace()
+    )
+    run_id = runner.submit(_request(dataset, JOB))
+    workspace = runner._workspace
+
+    assert list(workspace.files.uploaded), "the run must stage to the volume"
+    assert all(p.startswith("/Volumes/") for p in workspace.files.uploaded)
+    assert not list(workspace.workspace.uploaded), "nothing may be written to the workspace"
+
+
+def test_every_engine_output_root_is_a_unity_catalog_volume(tmp_path, mlflow_db, dataset):
+    """Guards the shape of the bug: one output quietly keeping a separate
+    path is exactly how curated data and models ended up outside UC."""
+    _, _, config_key, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
+
+    roots = [
+        config_key.rsplit("/", 1)[0],
         payload["curated_storage"]["root_dir"],
         payload["model_storage"]["root_dir"],
         payload["forecast_export"]["root_dir"],
         payload["artifacts_mirror"]["root_dir"],
-        config_key.rsplit("/", 1)[0],
-    }
-
-    for root in written_roots:
-        assert any(source.startswith(root) for source in sources), f"{root} is written but never synced"
-
-
-def test_the_sync_destination_is_exactly_where_a_normal_run_would_have_written(
-    tmp_path, mlflow_db, dataset
-):
-    """A container run and an existing-compute run must leave the storage
-    account in the same state; only the route differs."""
-    _, run_id, direct_key, direct = _config_for(tmp_path, mlflow_db, dataset, EXISTING, "acr.io/forecastiq:1")
-    _, _, _, container = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
-
-    destinations = {t["destination"] for t in container["volume_sync"]["targets"]}
-
-    assert f"{direct['curated_storage']['root_dir']}/{run_id}" in destinations
-    assert f"{direct['model_storage']['root_dir']}/{run_id}" in destinations
-    assert f"{direct['artifacts_mirror']['root_dir']}/{run_id}" in destinations
-    assert f"{direct['forecast_export']['root_dir']}/{run_id}_forecast.csv" in destinations
-    assert direct_key.rsplit("/", 1)[0] in destinations
+    ]
+    for root in roots:
+        assert root.startswith("/Volumes/"), root

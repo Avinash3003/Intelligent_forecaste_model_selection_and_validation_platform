@@ -668,15 +668,11 @@ class DatabricksRunner(PipelineRunner):
         # UC Volume, not the driver's disposable working directory.
         payload["forecast_export"] = {"root_dir": self._forecasts_root(uses_container)}
         payload["artifacts_mirror"] = {"root_dir": self._artifacts_root(uses_container)}
-        if uses_container:
-            # A container run writes to workspace staging because it has no
-            # UC Volumes mount to write to. That is a limitation of the
-            # container's filesystem, not of its network: the Files API
-            # reaches the same Volume over REST from anywhere. So the run
-            # copies its own outputs across before it exits, and the
-            # storage account ends up holding exactly what a normal run
-            # would have written to it directly.
-            payload["volume_sync"] = {"targets": self._volume_sync_targets(run_id)}
+        # No `volume_sync` block. Every path above is already the UC Volume
+        # the data belongs in, so there is nothing left to copy — the engine
+        # writes straight to the source of truth. `sync_outputs_to_volume`
+        # returns None when the block is absent, so the old copy step is
+        # inert without being deleted, and a single revert here restores it.
         return payload
 
     def _volume_sync_targets(self, run_id: str) -> list[dict[str, str]]:
@@ -718,8 +714,9 @@ class DatabricksRunner(PipelineRunner):
     # root so a DCS run's outputs stay as separated as the volumes keep
     # them, and every root still comes from settings.
     def _output_root(self, volumes_root: str, kind: str, uses_container: bool) -> str:
-        if uses_container:
-            return f"{self._settings.databricks_workspace_staging_root.rstrip('/')}/{kind}"
+        # Same for both modes, for the same reason as _run_root: the
+        # storage adapter decides how a volume is reached, so nothing here
+        # needs to know which compute is running.
         return f"{volumes_root.rstrip('/')}/runs"
 
     def _forecasts_root(self, uses_container: bool) -> str:
@@ -966,14 +963,17 @@ class DatabricksRunner(PipelineRunner):
     def _run_root(self, run_id: str, uses_container: bool) -> str:
         """One directory per run, holding its dataset, config and output.
 
-        UC Volumes for a normal run; workspace files for a DCS run, which
-        cannot read UC Volumes at all. Both roots come from settings, so
-        neither path is fixed in code.
+        Always a UC Volume, for both execution modes. The container's lack
+        of a `/Volumes` POSIX mount is handled where it belongs — in
+        forecast_engine/core/storage.py, which reaches the same volume over
+        the Files API — rather than by staging a second copy of the run's
+        data somewhere the container can reach.
+
+        `uses_container` is retained but no longer changes the answer: the
+        old workspace-staging branch is kept one revert away while both
+        execution modes are being proven end to end.
         """
-        if uses_container:
-            root = self._settings.databricks_workspace_staging_root
-        else:
-            root = f"{self._settings.databricks_volumes_root.rstrip('/')}/runs"
+        root = f"{self._settings.databricks_volumes_root.rstrip('/')}/runs"
         return f"{root.rstrip('/')}/{run_id}"
 
     # Workspace files and UC Volumes are different APIs on the same client.

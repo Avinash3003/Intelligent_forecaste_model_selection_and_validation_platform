@@ -276,15 +276,17 @@ def test_without_dcs_the_runtime_and_ml_flag_are_left_alone(settings, dataset):
     assert cluster.single_user_name is None
 
 
-def test_a_dcs_run_stages_to_workspace_files_not_uc_volumes(settings, dataset):
-    """A container cannot read UC Volumes at all.
+def test_a_dcs_run_stages_straight_into_unity_catalog(settings, dataset):
+    """A container has no `/Volumes` POSIX mount, but that was never a lack
+    of access -- only of a filesystem handler.
 
-    Replacing the runtime image removes Databricks' own `uc-volumes` storage
-    scheme handler, so /Volumes cannot be resolved from inside the container
-    -- proven on a real DCS cluster, whose /dbfs/Volumes/mount.err reads
-    "Unrecognized storage scheme: uc-volumes" while Spark still has Unity
-    Catalog fully enabled. Workspace files are reachable, so that is where a
-    DCS run stages."""
+    Proven on the production image (wheel-task run 130735570011315):
+    `os.listdir("/Volumes")` raises `PermissionError [Errno 1]`, while the
+    Files API lists, writes and reads back byte-identical. So a DCS run
+    stages to the UC Volume like any other run, and the storage adapter
+    reaches it over the API. Nothing is copied into the workspace, which is
+    what used to put raw datasets and model binaries under a folder the
+    `users` group could manage."""
     dcs_settings = settings.model_copy(
         update={"databricks_docker_image_url": "acr.example.io/forecastiq-runtime:v1"}
     )
@@ -292,11 +294,10 @@ def test_a_dcs_run_stages_to_workspace_files_not_uc_volumes(settings, dataset):
     runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
     runner.submit(_request(dataset, NEW_COMPUTE))
 
-    staged = list(workspace.workspace.uploaded)
-    assert staged, "a DCS run must stage through the workspace API"
-    assert all(p.startswith("/Workspace/") for p in staged), staged
-    # And nothing reached the UC Volume API, which would fail at run time.
-    assert workspace.files.uploaded == {}
+    staged = list(workspace.files.uploaded)
+    assert staged, "a DCS run must stage to the UC Volume"
+    assert all(p.startswith("/Volumes/") for p in staged), staged
+    assert not list(workspace.workspace.uploaded), "nothing may be staged in the workspace"
 
 
 def test_a_non_dcs_run_still_stages_to_uc_volumes(settings, dataset):
@@ -324,7 +325,7 @@ def test_the_engine_is_pointed_at_the_same_paths_it_was_given(settings, dataset)
     params = _submitted_task(workspace).python_wheel_task.parameters
     for flag in ("--dataset", "--config", "--summary-out", "--live-status-out"):
         value = params[params.index(flag) + 1]
-        assert value.startswith("/Workspace/"), f"{flag} -> {value}"
+        assert value.startswith("/Volumes/"), f"{flag} -> {value}"
 
 
 def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):

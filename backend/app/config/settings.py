@@ -125,10 +125,20 @@ class Settings(BaseSettings):
     # carrying a docker_image.
     #
     # Workspace files are reachable from inside the container (verified: a
-    # read/write round-trip under /Workspace/Shared succeeds), so a DCS run
-    # stages here instead. Configurable rather than derived, so a deployment
-    # can point it at a folder its principal owns.
-    databricks_workspace_staging_root: str = "/Workspace/Shared/forecastiq/runs"
+    # read/write round-trip succeeds), so a DCS run stages here instead.
+    # Configurable rather than derived, so a deployment can point it at a
+    # folder its principal owns.
+    #
+    # Deliberately NOT under /Shared. Databricks grants the `users` group
+    # CAN_MANAGE on /Shared, and workspace object ACLs are additive with no
+    # deny — an explicit ACL on a child folder is added to the inherited one,
+    # never replaces it (verified against this workspace: a probe folder given
+    # only ForecastIQ-Admins still reported `users CAN_MANAGE inherited=True`).
+    # So nothing under /Shared can be restricted, and every run's dataset,
+    # configuration, summary and model files were manageable by any workspace
+    # user. A root-level folder inherits from `/` alone, which grants only
+    # `admins`, and carries explicit ACLs for the three ForecastIQ groups.
+    databricks_workspace_staging_root: str = "/Workspace/forecastiq/runs"
 
     databricks_docker_image_url: str | None = None
     # Basic auth Databricks presents to the private ACR repository at pull
