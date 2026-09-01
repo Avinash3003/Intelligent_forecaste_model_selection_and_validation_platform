@@ -543,6 +543,32 @@ def test_ray_stages_share_one_job_cluster_not_one_per_task(settings, dataset):
         assert task.new_cluster is None
 
 
+def test_the_cluster_carries_this_backend_s_mlflow_settings(settings, dataset):
+    """A DCS image replaces the Databricks runtime's own environment, which
+    is what normally pre-sets MLFLOW_TRACKING_URI. Without forwarding it the
+    engine falls back to a local sqlite file inside the container and the run
+    never reaches the history this backend reads back."""
+    tracked = settings.model_copy(
+        update={"mlflow_tracking_uri": "databricks", "mlflow_experiment_name": "/forecast-engine"}
+    )
+    workspace = _FakeWorkspace()
+    DatabricksRunner(tracked, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    env = _submitted_job_cluster(workspace).spark_env_vars
+    assert env["MLFLOW_TRACKING_URI"] == "databricks"
+    assert env["MLFLOW_EXPERIMENT_NAME"] == "/forecast-engine"
+
+
+def test_unset_mlflow_settings_are_omitted_not_sent_as_empty(settings, dataset):
+    untracked = settings.model_copy(
+        update={"mlflow_tracking_uri": None, "mlflow_registry_uri": None, "mlflow_experiment_name": None}
+    )
+    workspace = _FakeWorkspace()
+    DatabricksRunner(untracked, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    assert _submitted_job_cluster(workspace).spark_env_vars == {}
+
+
 def test_the_managed_cluster_self_terminates_and_is_torn_down_on_completion(settings, dataset):
     """Nothing but this run's own tasks ever targets the cluster it creates
     for itself — unlike a real job cluster, Databricks will not tear it

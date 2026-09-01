@@ -969,6 +969,7 @@ class DatabricksRunner(PipelineRunner):
             node_type_id=config.node_type_id,
             data_security_mode=compute_sdk.DataSecurityMode.SINGLE_USER,
             custom_tags={RUN_CLUSTER_TAG: run_id},
+            spark_env_vars=self._engine_cluster_env(),
         )
         self._attach_docker_image(cluster, compute_sdk)
 
@@ -986,6 +987,23 @@ class DatabricksRunner(PipelineRunner):
             }
             cluster.custom_tags["ResourceClass"] = "SingleNode"
         return cluster
+
+    # MLflow settings the engine needs ON the cluster, from this backend's
+    # own configuration — never hardcoded here.
+    #
+    # A standard Databricks runtime pre-sets MLFLOW_TRACKING_URI itself, so
+    # a run on one tracks to the workspace without help. A DCS image
+    # replaces that environment, so without this the engine falls back to
+    # MLflowConfig's local `sqlite:///mlflow.db` — tracking "succeeds" into
+    # a file inside the container that dies with the cluster, and the run
+    # never appears in the history this backend reads back.
+    def _engine_cluster_env(self) -> dict[str, str]:
+        forwarded = {
+            "MLFLOW_TRACKING_URI": self._settings.mlflow_tracking_uri,
+            "MLFLOW_REGISTRY_URI": self._settings.mlflow_registry_uri,
+            "MLFLOW_EXPERIMENT_NAME": self._settings.mlflow_experiment_name,
+        }
+        return {key: value for key, value in forwarded.items() if (value or "").strip()}
 
     # Databricks Container Services: a new job cluster pulls the configured
     # image instead of resolving its dependencies from the runtime, when one
