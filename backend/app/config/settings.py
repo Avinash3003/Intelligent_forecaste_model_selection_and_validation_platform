@@ -94,9 +94,15 @@ class Settings(BaseSettings):
     databricks_token: str | None = None
     databricks_workspace_id: str | None = None
 
-    # All-purpose cluster offered in the UI as the "existing compute"
-    # fallback. Empty simply hides that option; nothing here is required.
-    databricks_existing_cluster_id: str | None = None
+    # The three enterprise-workspace role groups every ForecastIQ run is
+    # shared with at submission time (see DatabricksRunner._shared_run_acl):
+    # every run executes as one shared project resource, visible in
+    # Databricks to the whole team per role, not as a personal resource only
+    # its submitter can see. Empty disables sharing for that role without
+    # failing the run — see _shared_run_acl's docstring.
+    databricks_admins_group: str | None = "ForecastIQ-Admins"
+    databricks_datascientists_group: str | None = "ForecastIQ-DataScientists"
+    databricks_analysts_group: str | None = "ForecastIQ-Analysts"
 
     # Engine wheel a user-configured job cluster installs at run time.
     # Empty relies on the cluster already having it.
@@ -112,33 +118,21 @@ class Settings(BaseSettings):
     # The existing all-purpose cluster is never affected by this setting;
     # attaching an image to it is a manual, one-time step the operator
     # performs in the Databricks UI (see docs), not something this backend
-    # does automatically.
-    # Where a Container Services run stages its inputs and outputs.
+    # does automatically. A DCS run stages through the same UC Volume roots
+    # below as every other run — see forecast_engine/core/storage.py for how
+    # a container without a /Volumes mount still reaches them.
+
+    # ForecastIQ has ONE supported runtime: the prebuilt container image.
+    # It carries every dependency the engine needs — torch and
+    # pytorch-forecasting for TFT among them — so a run's behaviour does
+    # not depend on which cluster happened to pick it up, and nothing is
+    # ever pip-installed while a pipeline is running.
     #
-    # A DCS run cannot use the UC Volume roots below. Replacing the runtime
-    # image removes Databricks' own `uc-volumes` storage-scheme handler, so
-    # the container's DBFS client cannot resolve /Volumes at all — proven on
-    # a real DCS cluster, which reports `Unrecognized storage scheme:
-    # uc-volumes` in /dbfs/Volumes/mount.err while Spark itself still has
-    # Unity Catalog fully enabled. That is a property of DCS, not of this
-    # workspace or of the image we build, and it applies to any cluster
-    # carrying a docker_image.
-    #
-    # Workspace files are reachable from inside the container (verified: a
-    # read/write round-trip succeeds), so a DCS run stages here instead.
-    # Configurable rather than derived, so a deployment can point it at a
-    # folder its principal owns.
-    #
-    # Deliberately NOT under /Shared. Databricks grants the `users` group
-    # CAN_MANAGE on /Shared, and workspace object ACLs are additive with no
-    # deny — an explicit ACL on a child folder is added to the inherited one,
-    # never replaces it (verified against this workspace: a probe folder given
-    # only ForecastIQ-Admins still reported `users CAN_MANAGE inherited=True`).
-    # So nothing under /Shared can be restricted, and every run's dataset,
-    # configuration, summary and model files were manageable by any workspace
-    # user. A root-level folder inherits from `/` alone, which grants only
-    # `admins`, and carries explicit ACLs for the three ForecastIQ groups.
-    databricks_workspace_staging_root: str = "/Workspace/forecastiq/runs"
+    # Existing Compute remains reachable as legacy/fallback infrastructure
+    # (a plain runtime cannot carry the image), and flipping this to false
+    # restores it as a normal execution path. It is not deleted: that is
+    # the rollback route if a container run cannot be made to work.
+    databricks_require_container_runtime: bool = True
 
     databricks_docker_image_url: str | None = None
     # Basic auth Databricks presents to the private ACR repository at pull
@@ -147,8 +141,8 @@ class Settings(BaseSettings):
     databricks_docker_image_username: str | None = None
     databricks_docker_image_password: str | None = None
 
-    # UC volume over the ADLS uploads container: staged datasets and run output.
-    databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
+    # UC volume for the ORIGINAL uploaded dataset only — nothing else.
+    databricks_uploads_volumes_root: str = "/Volumes/forecastiq/forecasting/upload_files"
 
     # UC volume for the curated dataset. Separate from uploads so raw and
     # derived data keep their own lifecycle. Cloud execution only.
@@ -160,7 +154,8 @@ class Settings(BaseSettings):
     # UC volume for the exported forecast CSV.
     databricks_forecasts_volumes_root: str = "/Volumes/forecastiq/forecasting/forecasts_files"
 
-    # UC volume for a blob-accessible copy of insights and the LLM trace.
+    # UC volume for run artifacts: pipeline summary, live status, run
+    # config, and the mirrored insights/LLM trace. Never original input.
     databricks_artifacts_volumes_root: str = "/Volumes/forecastiq/forecasting/artifacts_files"
 
     azure_storage_connection_string: str | None = None

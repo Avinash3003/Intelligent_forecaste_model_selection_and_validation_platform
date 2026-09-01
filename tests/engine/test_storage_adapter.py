@@ -78,7 +78,7 @@ class _FakeClient:
         self.files = _FakeFiles()
 
 
-VOL = "/Volumes/forecastiq/forecasting/forecast_files/runs/r1/summary.json"
+VOL = "/Volumes/forecastiq/forecasting/upload_files/runs/r1/summary.json"
 
 
 # --- path classification ----------------------------------------------

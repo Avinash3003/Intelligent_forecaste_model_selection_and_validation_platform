@@ -61,7 +61,6 @@ class _Workspace(_FakeWorkspace):
         self.workspace = _FakeWorkspaceApi()
 
 VOLUME = "/Volumes/forecastiq/forecasting"
-STAGING = "/Workspace/Shared/forecastiq/runs"
 
 
 def _settings(tmp_path, mlflow_db, *, image: str | None):
@@ -69,12 +68,11 @@ def _settings(tmp_path, mlflow_db, *, image: str | None):
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="test-token",
-        databricks_volumes_root=f"{VOLUME}/forecast_files",
+        databricks_uploads_volumes_root=f"{VOLUME}/upload_files",
         databricks_curated_volumes_root=f"{VOLUME}/curated_files",
         databricks_models_volumes_root=f"{VOLUME}/models_files",
         databricks_forecasts_volumes_root=f"{VOLUME}/forecasts_files",
         databricks_artifacts_volumes_root=f"{VOLUME}/artifacts_files",
-        databricks_workspace_staging_root=STAGING,
         databricks_docker_image_url=image or "",
         upload_dir=str(tmp_path / "uploads"),
         mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
@@ -128,7 +126,7 @@ def test_an_existing_compute_run_still_uses_volumes_when_an_image_is_configured(
     a working mount and belongs in the storage account, as it always did."""
     _, _, config_key, payload = _config_for(tmp_path, mlflow_db, dataset, EXISTING, "acr.io/forecastiq:1")
 
-    assert config_key.startswith(f"{VOLUME}/forecast_files/runs/")
+    assert config_key.startswith(f"{VOLUME}/artifacts_files/runs/")
     assert payload["curated_storage"]["root_dir"] == f"{VOLUME}/curated_files/runs"
     assert payload["model_storage"]["root_dir"] == f"{VOLUME}/models_files/runs"
     assert payload["forecast_export"]["root_dir"] == f"{VOLUME}/forecasts_files/runs"
@@ -140,7 +138,7 @@ def test_an_existing_compute_run_still_uses_volumes_when_an_image_is_configured(
 def test_a_job_compute_run_without_an_image_also_uses_volumes(tmp_path, mlflow_db, dataset):
     _, _, config_key, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, None)
 
-    assert config_key.startswith(f"{VOLUME}/forecast_files/runs/")
+    assert config_key.startswith(f"{VOLUME}/artifacts_files/runs/")
     assert "volume_sync" not in payload
 
 
@@ -150,7 +148,7 @@ def test_a_job_compute_run_without_an_image_also_uses_volumes(tmp_path, mlflow_d
 def test_a_container_run_stages_into_the_volume_not_the_workspace(tmp_path, mlflow_db, dataset):
     _, run_id, config_key, payload = _config_for(tmp_path, mlflow_db, dataset, JOB, "acr.io/forecastiq:1")
 
-    assert config_key == f"{VOLUME}/forecast_files/runs/{run_id}/forecast_configuration.json"
+    assert config_key == f"{VOLUME}/artifacts_files/runs/{run_id}/forecast_configuration.json"
     assert payload["curated_storage"]["root_dir"] == f"{VOLUME}/curated_files/runs"
     assert payload["model_storage"]["root_dir"] == f"{VOLUME}/models_files/runs"
 

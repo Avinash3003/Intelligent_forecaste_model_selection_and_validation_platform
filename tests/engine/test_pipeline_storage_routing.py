@@ -90,7 +90,7 @@ FRAME = pd.DataFrame({"date": ["2024-01-01", "2024-02-01"], "sales": [10.0, 12.5
 
 
 def test_the_dataset_loads_from_a_volume_with_no_posix_mount(dcs):
-    path = f"{VOLUME}/forecast_files/runs/r1/sales.csv"
+    path = f"{VOLUME}/upload_files/runs/r1/sales.csv"
     dcs.files.store[path] = FRAME.to_csv(index=False).encode()
 
     loaded = DatasetLoader().load(path)
@@ -111,7 +111,7 @@ def test_the_dataset_still_loads_from_an_ordinary_path(existing_compute, tmp_pat
 
 def test_a_dataset_that_is_genuinely_absent_is_reported_as_missing(dcs):
     with pytest.raises(DatasetLoadError, match="could not be found"):
-        DatasetLoader().load(f"{VOLUME}/forecast_files/runs/r1/nope.csv")
+        DatasetLoader().load(f"{VOLUME}/upload_files/runs/r1/nope.csv")
 
 
 # --- writes -------------------------------------------------------------
@@ -147,7 +147,7 @@ def test_a_model_binary_survives_the_volume_round_trip(dcs):
 
 
 def test_the_summary_is_written_to_the_volume(dcs):
-    path = f"{VOLUME}/forecast_files/runs/r1/summary.json"
+    path = f"{VOLUME}/upload_files/runs/r1/summary.json"
 
     storage.write_text(path, json.dumps({"run_id": "r1", "stages": []}))
 
@@ -162,7 +162,7 @@ def test_live_status_uses_a_single_put_when_there_is_no_mount(dcs):
     object wholesale, so a poller never sees half a document."""
     from forecast_engine.core.live_status import LiveStatusWriter
 
-    path = f"{VOLUME}/forecast_files/runs/r1/live_status.json"
+    path = f"{VOLUME}/upload_files/runs/r1/live_status.json"
     writer = LiveStatusWriter(path)
     context = type("C", (), {
         "run_id": "r1",

@@ -72,15 +72,15 @@ def staged(tmp_path):
 def test_a_directory_is_copied_file_by_file_preserving_its_shape(staged):
     client = _FakeClient()
     outcome = VolumeSync(client).run(
-        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1")]
+        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/upload_files/runs/run-1")]
     )
 
     assert outcome.ok
     assert set(client.files.uploaded) == {
-        "/Volumes/cat/sch/forecast_files/runs/run-1/summary.json",
-        "/Volumes/cat/sch/forecast_files/runs/run-1/live_status.json",
+        "/Volumes/cat/sch/upload_files/runs/run-1/summary.json",
+        "/Volumes/cat/sch/upload_files/runs/run-1/live_status.json",
     }
-    assert json.loads(client.files.uploaded["/Volumes/cat/sch/forecast_files/runs/run-1/summary.json"]) == {
+    assert json.loads(client.files.uploaded["/Volumes/cat/sch/upload_files/runs/run-1/summary.json"]) == {
         "run_id": "run-1"
     }
 
@@ -166,15 +166,15 @@ def test_a_permanent_failure_is_reported_never_swallowed(staged, monkeypatch):
 
 def test_one_failed_file_does_not_abandon_the_rest(staged, monkeypatch):
     monkeypatch.setattr("forecast_engine.s03_storage.volume_sync._RETRY_BACKOFF_SECONDS", 0)
-    doomed = "/Volumes/cat/sch/forecast_files/runs/run-1/summary.json"
+    doomed = "/Volumes/cat/sch/upload_files/runs/run-1/summary.json"
     client = _FakeClient(fail_for=[doomed], fail_times=99)
 
     outcome = VolumeSync(client).run(
-        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1")]
+        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/upload_files/runs/run-1")]
     )
 
     assert not outcome.ok
-    assert "/Volumes/cat/sch/forecast_files/runs/run-1/live_status.json" in client.files.uploaded
+    assert "/Volumes/cat/sch/upload_files/runs/run-1/live_status.json" in client.files.uploaded
 
 
 # --- only container runs sync ------------------------------------------
@@ -195,7 +195,7 @@ def test_the_backends_payload_shape_drives_the_copy(staged):
             "targets": [
                 {
                     "source": str(staged / "runs" / "run-1"),
-                    "destination": "/Volumes/cat/sch/forecast_files/runs/run-1",
+                    "destination": "/Volumes/cat/sch/upload_files/runs/run-1",
                 }
             ]
         }
@@ -238,7 +238,7 @@ def test_a_credential_failure_is_not_retried_per_file(staged, monkeypatch):
     client = _AuthFailingClient()
 
     outcome = VolumeSync(client).run(
-        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1")]
+        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/upload_files/runs/run-1")]
     )
 
     assert not outcome.ok
@@ -253,7 +253,7 @@ def test_a_credential_failure_stops_the_whole_sweep(staged, monkeypatch):
 
     VolumeSync(client).run(
         [
-            SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1"),
+            SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/upload_files/runs/run-1"),
             SyncTarget(staged / "models" / "run-1", "/Volumes/cat/sch/models_files/runs/run-1"),
             SyncTarget(staged / "forecasts" / "run-1_forecast.csv", "/Volumes/cat/sch/f.csv"),
         ]
@@ -268,7 +268,7 @@ def test_the_abort_is_reported_distinctly_from_a_file_failure(staged, monkeypatc
     monkeypatch.setattr("forecast_engine.s03_storage.volume_sync._RETRY_BACKOFF_SECONDS", 0)
 
     outcome = VolumeSync(_AuthFailingClient()).run(
-        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/forecast_files/runs/run-1")]
+        [SyncTarget(staged / "runs" / "run-1", "/Volumes/cat/sch/upload_files/runs/run-1")]
     )
 
     assert "ABORTED" in outcome.describe()

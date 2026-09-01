@@ -42,8 +42,8 @@ variables:
 
 
   volume:
-    description: Existing Unity Catalog external volume holding datasets and run output.
-    default: forecast_files
+    description: Existing Unity Catalog external volume holding the original uploaded datasets.
+    default: upload_files
 
 
   mlflow_experiment:
@@ -69,7 +69,7 @@ variables:
       pandas/pathlib, which need POSIX paths — UC Volumes provide those over the
       existing ADLS containers, where abfss:// URIs would not be directly
       readable. A UC volume path is /Volumes/<catalog>/<schema>/<volume>, so the
-      volume name must be included: forecastiq.forecasting.forecast_files is an
+      volume name must be included: forecastiq.forecasting.upload_files is an
       EXTERNAL volume over the deployment's `uploads` container.
     default: /Volumes/${var.catalog}/${var.schema}/${var.volume}
 
@@ -94,9 +94,6 @@ artifacts:
     path: ..
     
     build: python3 -m pip wheel . --no-deps --wheel-dir dist
-
-include:
-  - resources/*.yml
 
 # ---------------------------------------------------------------------
 # Targets

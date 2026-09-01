@@ -76,9 +76,10 @@ def settings(tmp_path):
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="t",
-        databricks_volumes_root="/Volumes/cat/sch/forecast_files",
+        databricks_uploads_volumes_root="/Volumes/cat/sch/upload_files",
         databricks_curated_volumes_root="/Volumes/cat/sch/curated_files",
         databricks_models_volumes_root="/Volumes/cat/sch/models_files",
+        databricks_artifacts_volumes_root="/Volumes/cat/sch/artifacts_files",
         upload_dir=str(tmp_path / "uploads"),
         mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
     )
@@ -102,7 +103,7 @@ def _request(dataset, run_id="dbx-run-curated"):
 
 
 def _submitted_config(workspace, run_id):
-    root = f"/Volumes/cat/sch/forecast_files/runs/{run_id}"
+    root = f"/Volumes/cat/sch/artifacts_files/runs/{run_id}"
     return json.loads(workspace.files.uploaded[f"{root}/forecast_configuration.json"])
 
 
@@ -147,7 +148,7 @@ def test_curated_volume_is_separate_from_the_uploads_volume(settings, dataset):
 
     config = _submitted_config(workspace, run_id)
     assert config["curated_storage"]["root_dir"].startswith("/Volumes/cat/sch/curated_files/")
-    assert _submitted_parameters(workspace)["dataset"].startswith("/Volumes/cat/sch/forecast_files/")
+    assert _submitted_parameters(workspace)["dataset"].startswith("/Volumes/cat/sch/upload_files/")
 
 
 
@@ -157,12 +158,13 @@ def test_existing_run_file_layout_is_unchanged(settings, dataset):
     runner = DatabricksRunner(settings, workspace_client=workspace)
     run_id = runner.submit(_request(dataset))
 
-    root = f"/Volumes/cat/sch/forecast_files/runs/{run_id}"
+    upload_root = f"/Volumes/cat/sch/upload_files/runs/{run_id}"
+    artifacts_root = f"/Volumes/cat/sch/artifacts_files/runs/{run_id}"
     parameters = _submitted_parameters(workspace)
-    assert parameters["dataset"] == f"{root}/sales.csv"
-    assert parameters["config"] == f"{root}/forecast_configuration.json"
-    assert parameters["summary_out"] == f"{root}/summary.json"
-    assert parameters["live_status_out"] == f"{root}/live_status.json"
+    assert parameters["dataset"] == f"{upload_root}/sales.csv"
+    assert parameters["config"] == f"{artifacts_root}/forecast_configuration.json"
+    assert parameters["summary_out"] == f"{artifacts_root}/summary.json"
+    assert parameters["live_status_out"] == f"{artifacts_root}/live_status.json"
 
 
 # ---------------------------------------------------------------------
