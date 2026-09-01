@@ -25,7 +25,6 @@ import pandas as pd
 
 from app.config.model_availability import (
     filter_available,
-    strip_silently_skipped,
     unavailable_models,
 )
 from app.config.settings import Settings, get_settings
@@ -403,7 +402,7 @@ class EstimationService:
         # model_availability.SILENTLY_SKIPPED_MODELS). Charging runtime for
         # work that will not happen is the same fiction the availability
         # filter above exists to remove.
-        return strip_silently_skipped(available) or []
+        return list(available)
 
     def _excluded_models(self, request: EstimationRequest, backend: str) -> list[str]:
         """Models the user asked for that this execution mode cannot run."""

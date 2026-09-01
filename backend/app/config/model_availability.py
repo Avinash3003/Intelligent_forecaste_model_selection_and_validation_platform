@@ -27,40 +27,53 @@ from __future__ import annotations
 # fallback, never a candidate models compete against.
 CANDIDATE_MODEL_IDS: tuple[str, ...] = ("prophet", "arima", "lightgbm", "xgboost", "tft")
 
+# Mirrors ModelConfig.DEFAULT_FALLBACK_MODEL (forecast_engine/config/
+# model_config.py) -- verified against the engine's own source text by
+# tests/backend/test_run_limits_match_the_engine.py, the same technique
+# used for the horizon bounds in run_limits.py. A run with no explicit
+# fallback_model falls back to exactly this on the engine side (see
+# build_execution_request); reported here purely so the Configure step can
+# pre-select the model a run will actually use, not a disconnected guess.
+DEFAULT_FALLBACK_MODEL = "seasonal_naive"
+
 # execution_mode -> {model id: why it cannot run there}. A mode absent from
 # this table can run everything the engine registers, which is the correct
 # default: a new mode is assumed capable until something is known to be
 # missing from it.
 _UNAVAILABLE_BY_MODE: dict[str, dict[str, str]] = {}
 
-# Models offered in the picker but NOT actually executed.
+# Models that only run on the ForecastIQ container runtime.
 #
-# TFT needs torch and pytorch-forecasting (~900 MB), which today's cloud
-# compute does not carry unless a Container Services image supplies them —
-# so on a plain runtime it genuinely cannot run. It is nonetheless left
-# selectable, by product decision,
-# because the picker is part of the demo narrative; it is then dropped from
-# the model list before the run is submitted (see
-# deployment_service.build_execution_request).
+# TFT needs torch and pytorch-forecasting (~900 MB). The DCS image installs
+# and import-asserts both at build time, so a container run can execute it;
+# a plain runtime cannot, and no amount of runtime pip installing should be
+# used to paper over that.
 #
-# The consequence, stated plainly so nobody debugs it as a fault: selecting
-# TFT changes nothing about a run. It will not appear in the results, the
-# comparison table or MLflow, because it was never trained. Removing this
-# entry is all it takes to make the selection real again once the runtime
-# carries torch.
-SILENTLY_SKIPPED_MODELS: frozenset[str] = frozenset({"tft"})
+# These used to be stripped from the model list silently, which meant
+# selecting TFT changed nothing about a run and left no trace anywhere —
+# not in the results, the comparison table or MLflow — with nothing to tell
+# the user why. A request the platform cannot honour is now refused with a
+# reason instead of being quietly discarded.
+CONTAINER_ONLY_MODELS: frozenset[str] = frozenset({"tft"})
 
 
-def strip_silently_skipped(model_ids: list[str] | None) -> list[str] | None:
-    """`model_ids` minus anything in SILENTLY_SKIPPED_MODELS, order kept.
+def unsupported_models(model_ids: list[str] | None, uses_container: bool) -> dict[str, str]:
+    """The requested models this compute cannot run, mapped to why.
 
-    Returns None unchanged so "no explicit selection" keeps meaning "the
-    engine's own defaults", rather than becoming an empty list that would
-    train nothing at all.
+    Empty means the selection is executable as asked. Callers refuse the
+    request on a non-empty result rather than trimming it: a model the user
+    explicitly chose is not something to drop on their behalf.
     """
-    if model_ids is None:
-        return None
-    return [m for m in model_ids if m.strip().lower() not in SILENTLY_SKIPPED_MODELS]
+    if model_ids is None or uses_container:
+        return {}
+    return {
+        model: (
+            "This model needs the ForecastIQ container runtime, which supplies torch and "
+            "pytorch-forecasting. Select New Job Compute to run it."
+        )
+        for model in model_ids
+        if model.strip().lower() in CONTAINER_ONLY_MODELS
+    }
 
 
 def unavailable_models(execution_mode: str | None) -> dict[str, str]:
@@ -77,3 +90,29 @@ def filter_available(model_ids: list[str], execution_mode: str | None) -> list[s
     """`model_ids` minus anything this execution mode cannot run, order kept."""
     blocked = unavailable_models(execution_mode)
     return [model for model in model_ids if model.strip().lower() not in blocked]
+
+
+def container_runtime_required(settings: object) -> bool:
+    """Whether ForecastIQ only accepts container-backed execution."""
+    return bool(getattr(settings, "databricks_require_container_runtime", False)) and bool(
+        (getattr(settings, "databricks_docker_image_url", "") or "").strip()
+    )
+
+
+def compute_rejection_reason(compute: object, settings: object) -> str | None:
+    """Why this compute selection cannot run a ForecastIQ pipeline, or None.
+
+    The one place that decides. Callers refuse on a non-empty reason rather
+    than quietly rerouting: a run that silently lands on a different runtime
+    than the user chose is how models ended up available on one compute and
+    missing on another.
+    """
+    if not container_runtime_required(settings):
+        return None
+    if getattr(compute, "mode", None) == "existing_compute":
+        return (
+            "ForecastIQ runs on its prebuilt container runtime, which carries every model "
+            "dependency. Existing Compute cannot load that image, so it is retained only as "
+            "legacy infrastructure. Select New Job Compute to run this pipeline."
+        )
+    return None

@@ -8,9 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth.dependencies import require
 from app.auth.models import Permission, Principal
-from app.config.model_availability import CANDIDATE_MODEL_IDS, unavailable_models
+from app.config.model_availability import CANDIDATE_MODEL_IDS, DEFAULT_FALLBACK_MODEL, unavailable_models
+from app.config.run_limits import DEFAULT_FORECAST_HORIZON, MAX_FORECAST_HORIZON, MIN_FORECAST_HORIZON
 from app.config.settings import Settings, get_settings
 from app.schemas.metadata import (
+    ForecastHorizonRange,
     MetadataRequest,
     MetadataValidationResponse,
     ModelAvailability,
@@ -74,4 +76,10 @@ def get_model_availability(
             )
             for model_id in CANDIDATE_MODEL_IDS
         ],
+        horizon=ForecastHorizonRange(
+            min_months=MIN_FORECAST_HORIZON,
+            max_months=MAX_FORECAST_HORIZON,
+            default_months=DEFAULT_FORECAST_HORIZON,
+        ),
+        default_fallback_model=DEFAULT_FALLBACK_MODEL,
     )

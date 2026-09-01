@@ -130,3 +130,113 @@ def test_an_unrecognised_reported_stage_is_kept_not_dropped():
 
     assert labels[: len(PHASE_LABELS)] == PHASE_LABELS
     assert "Some New Stage" in labels
+
+
+def test_a_ray_parallel_phase_reports_its_measured_time_not_near_zero_wall_clock():
+    """Train/Evaluate/Explain/Rank & Select each finish all their real work
+    inside Ray before the driver opens the stage, so started_at..completed_at
+    reads near-zero. measured_seconds is the engine's own real timing."""
+    reported = [
+        {
+            "name": "Evaluate Models",
+            "status": "Completed",
+            "started_at": "2026-08-15T10:49:10+00:00",
+            "completed_at": "2026-08-15T10:49:10+00:00",
+            "measured_seconds": 42.7,
+            "detail": "3 survived, 1 eliminated across 2 group(s).",
+        }
+    ]
+
+    stages = _service()._to_stage_statuses(_listing(reported))
+
+    by_label = {stage.label: stage for stage in stages}
+    assert by_label["Evaluate Models"].duration_seconds == 42.7
+    assert by_label["Evaluate Models"].detail == "3 survived, 1 eliminated across 2 group(s)."
+
+
+def test_a_sequential_phase_falls_back_to_wall_clock_duration():
+    reported = [
+        {"name": "Load Dataset", "status": "Completed", "started_at": "2026-08-15T10:00:00+00:00", "completed_at": "2026-08-15T10:00:02+00:00"},
+        {"name": "Detect Frequency", "status": "Completed", "started_at": "2026-08-15T10:00:02+00:00", "completed_at": "2026-08-15T10:00:03+00:00"},
+        {"name": "Assess Quality", "status": "Completed", "started_at": "2026-08-15T10:00:03+00:00", "completed_at": "2026-08-15T10:00:04+00:00"},
+        {"name": "Preprocess Dataset", "status": "Completed", "started_at": "2026-08-15T10:00:04+00:00", "completed_at": "2026-08-15T10:00:05+00:00"},
+        {"name": "Persist Curated", "status": "Completed", "started_at": "2026-08-15T10:00:05+00:00", "completed_at": "2026-08-15T10:00:06+00:00"},
+        {"name": "Verify Curated", "status": "Completed", "started_at": "2026-08-15T10:00:06+00:00", "completed_at": "2026-08-15T10:00:08+00:00"},
+    ]
+
+    stages = _service()._to_stage_statuses(_listing(reported, status=JobStatus.COMPLETED))
+
+    by_label = {stage.label: stage for stage in stages}
+    assert by_label["Load & Prepare"].duration_seconds == 8.0
+
+
+def test_a_pending_phase_reports_no_duration():
+    stages = _service()._to_stage_statuses(_listing([]))
+    assert all(stage.duration_seconds is None for stage in stages)
+
+
+def test_phase_detail_uses_the_last_reported_stage_in_a_multi_stage_phase():
+    reported = [
+        {"name": "Persist Models", "status": "Completed", "detail": "2 winning model(s) persisted."},
+        {"name": "Export Forecasts", "status": "Completed", "detail": "24 forecast row(s) exported."},
+        {"name": "Business Insights", "status": "Completed", "detail": "Business insights generated."},
+        {"name": "Mirror Artifacts", "status": "Completed", "detail": "1 artifact file(s) mirrored."},
+        {"name": "MLflow Tracking", "status": "Completed", "detail": "MLflow tracking logged."},
+    ]
+
+    stages = _service()._to_stage_statuses(_listing(reported, status=JobStatus.COMPLETED))
+
+    by_label = {stage.label: stage for stage in stages}
+    assert by_label["Publish Results"].detail == "MLflow tracking logged."
+
+
+def test_a_ray_stage_reports_its_genuine_parallel_task_counts():
+    reported = [
+        {
+            "name": "Train Models",
+            "status": "Completed",
+            "measured_seconds": 12.4,
+            "parallel_tasks": {
+                "stage": "train",
+                "executor": "ray",
+                "total_tasks": 4,
+                "completed_tasks": 3,
+                "failed_tasks": 1,
+                "running_tasks": 0,
+                "max_concurrent_tasks": 4,
+                "tasks": [
+                    {"group_id": "S1", "status": "Completed", "duration_seconds": 3.1, "worker_id": "w1"},
+                    {"group_id": "S2", "status": "Completed", "duration_seconds": 2.9, "worker_id": "w2"},
+                    {"group_id": "S3", "status": "Completed", "duration_seconds": 3.4, "worker_id": "w1"},
+                    {"group_id": "S4", "status": "Failed", "error": "boom"},
+                ],
+            },
+        }
+    ]
+
+    stages = _service()._to_stage_statuses(_listing(reported))
+
+    by_label = {stage.label: stage for stage in stages}
+    parallel = by_label["Train Models"].parallel_tasks
+    assert parallel is not None
+    assert parallel.executor == "ray"
+    assert parallel.total == 4
+    assert parallel.completed == 3
+    assert parallel.failed == 1
+    assert parallel.running == 0
+    assert parallel.max_concurrent == 4
+    assert len(parallel.tasks) == 4
+    assert parallel.tasks[0].group_id == "S1"
+    assert parallel.tasks[0].duration_seconds == 3.1
+    assert parallel.tasks[0].worker_id == "w1"
+    assert parallel.tasks[3].status == "Failed"
+    assert parallel.tasks[3].duration_seconds is None
+
+
+def test_a_sequential_stage_reports_no_parallel_tasks():
+    reported = [{"name": "Load Dataset", "status": "Completed"}]
+
+    stages = _service()._to_stage_statuses(_listing(reported))
+
+    by_label = {stage.label: stage for stage in stages}
+    assert by_label["Load & Prepare"].parallel_tasks is None

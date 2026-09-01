@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from app.config.run_limits import DEFAULT_FORECAST_HORIZON, MAX_FORECAST_HORIZON, MIN_FORECAST_HORIZON
 
 from app.schemas.compute import ComputeSelection
 from app.schemas.metadata import MetadataMapping
@@ -12,9 +13,11 @@ class DeploymentRequest(BaseModel):
     # Model used when every evaluated model fails validation. Must be one of
     # `selected_models`; None falls back to the engine's configured default.
     fallback_model: str | None = None
-    # Months to forecast forward (Section 3: minimum 12-month horizon,
-    # extended by this platform down to 6 and up to 60).
-    horizon: int = Field(12, ge=6, le=60)
+    # Months to forecast forward. Bounds and default come from
+    # app.config.run_limits, the one place this platform's horizon rule is
+    # defined — see that module for why it is duplicated from the engine
+    # rather than imported.
+    horizon: int = Field(DEFAULT_FORECAST_HORIZON, ge=MIN_FORECAST_HORIZON, le=MAX_FORECAST_HORIZON)
     # Derived feature columns (lag_*/rolling_mean_*/calendar) for the
     # tree-based models — Priority C. `None` (the field omitted) means
     # "every supported feature", reproducing pre-existing behavior exactly;
@@ -32,6 +35,34 @@ class DeploymentResponse(BaseModel):
     message: str
 
 
+class ParallelTask(BaseModel):
+    """One key's real Ray task within a parallel stage."""
+
+    group_id: str
+    status: str
+    # None only for a task that never got the chance to finish (Failed).
+    duration_seconds: float | None = None
+    worker_id: str | None = None
+    node_id: str | None = None
+    # Seconds from this stage's own start — a Gantt chart's x=0, not epoch
+    # time. None for a Failed task, which has no real span to report.
+    start: float | None = None
+    end: float | None = None
+
+
+class ParallelTaskSummary(BaseModel):
+    """A stage's genuine parallel-execution shape, from the engine's own
+    Ray fan-out — never inferred or estimated here."""
+
+    executor: str
+    total: int
+    completed: int
+    failed: int
+    running: int
+    max_concurrent: int | None = None
+    tasks: list[ParallelTask] = Field(default_factory=list)
+
+
 class StageStatus(BaseModel):
     label: str
     status: str
@@ -41,6 +72,15 @@ class StageStatus(BaseModel):
     # stage has not started yet, or has started but not finished.
     started_at: str | None = None
     completed_at: str | None = None
+    # The stage's own wall-clock boundary — from the engine's real Ray
+    # fan-out (or the driver clock for a sequential stage), never another
+    # stage's number reused. None only for a Pending phase.
+    duration_seconds: float | None = None
+    # One-line real outcome ("3 trained, 0 failed..."), from the engine's
+    # own stage record — never fabricated here.
+    detail: str | None = None
+    # Set only for a stage that ran real Ray tasks across keys.
+    parallel_tasks: ParallelTaskSummary | None = None
 
 
 class ComputeStatus(BaseModel):
@@ -70,12 +110,16 @@ class DeploymentStatus(BaseModel):
     duration: str
     progress: int
     current_stage: str
-    estimated_remaining: str
     stages: list[StageStatus]
     # Present only while the run is waiting on, or has just acquired, its
     # Databricks compute — None for local runs and once the engine reports
     # its first stage, at which point the phases speak for themselves.
     compute: ComputeStatus | None = None
+    # Deep link to this run in the Databricks workspace, or None when one
+    # is unavailable (a local run, or before Databricks has accepted the
+    # submission). The UI renders the "Open with Databricks" action only
+    # when this is set, so a run without a link still shows everything else.
+    databricks_run_url: str | None = None
     # Populated only for a failed run, so the UI can show why it failed
     # rather than a generic message.
     error: str | None = None

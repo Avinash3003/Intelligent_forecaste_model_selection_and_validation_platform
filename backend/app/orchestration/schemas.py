@@ -74,6 +74,21 @@ class RunListing(BaseModel):
     duration_seconds: float | None = None
     error: str | None = None
 
+    # Databricks' own run page, as the API reports it. Not constructed
+    # here: `run_page_url` is authoritative for both job and submitted
+    # runs, and guessing a URL shape produces links that 404. None for
+    # local runs and until Databricks has accepted the submission.
+    databricks_run_url: str | None = None
+    # The numeric id `databricks_run_url` above was resolved from, when a
+    # caller has one but hasn't resolved the URL yet — a listing rebuilt
+    # from MLflow history (backend restart) knows the id from the run's own
+    # `databricks_run_id` tag but has no live client to turn it into a URL.
+    # Resolving it is left to a caller that owns a workspace client, and
+    # only on a single-run read: doing it per row in list_runs would be the
+    # same N-live-calls-per-page mistake this codebase already paid for
+    # once in the run-history sweep.
+    databricks_run_id: int | None = None
+
     # Display names only — stable user ids live on the job record.
     started_by: str | None = None
     cancelled_by: str | None = None

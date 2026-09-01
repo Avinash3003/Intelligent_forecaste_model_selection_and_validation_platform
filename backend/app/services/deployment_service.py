@@ -2,7 +2,12 @@ from datetime import datetime
 from pathlib import Path
 
 from app.auth.models import Principal
-from app.config.model_availability import strip_silently_skipped
+from app.config.settings import Settings, get_settings
+from app.config.model_availability import (
+    compute_rejection_reason,
+    container_runtime_required,
+    unsupported_models,
+)
 from app.orchestration.executor import PipelineExecutor, get_pipeline_executor
 from app.orchestration.exceptions import UnknownRunError
 from app.orchestration.schemas import (
@@ -16,6 +21,8 @@ from app.schemas.deployment import (
     DeploymentRequest,
     DeploymentResponse,
     DeploymentStatus,
+    ParallelTask,
+    ParallelTaskSummary,
     StageStatus,
 )
 
@@ -36,6 +43,40 @@ _TERMINAL_STATUSES = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED
 _PIPELINE_STAGE_SET = frozenset(PIPELINE_STAGES)
 
 
+class UnsupportedComputeError(ValueError):
+    """The chosen compute is not a supported ForecastIQ execution runtime."""
+
+
+class UnsupportedModelError(ValueError):
+    """One or more requested models cannot run on the chosen compute."""
+
+
+def _reject_unsupported_models(request: DeploymentRequest, settings: Settings) -> None:
+    """Refuse a selection this compute cannot honour, naming each model.
+
+    `uses_container` mirrors DatabricksRunner._uses_container_image: the
+    image is attached to a job cluster this platform creates and to nothing
+    else, so existing compute runs on whatever runtime that cluster has.
+    """
+    compute = request.compute
+    reason = compute_rejection_reason(compute, settings)
+    if reason:
+        raise UnsupportedComputeError(reason)
+
+    uses_container = (
+        getattr(compute, "mode", None) == "new_job_compute"
+        and bool((settings.databricks_docker_image_url or "").strip())
+    )
+    # With the container mandated, every accepted run carries the image, so
+    # every model the image installs is available to every run.
+    if container_runtime_required(settings):
+        uses_container = True
+    unsupported = unsupported_models(request.selected_models, uses_container)
+    if unsupported:
+        detail = "; ".join(f"{model}: {reason}" for model, reason in sorted(unsupported.items()))
+        raise UnsupportedModelError(detail)
+
+
 def build_execution_request(
     request: DeploymentRequest, dataset_path: Path, principal: Principal
 ) -> PipelineExecutionRequest:
@@ -45,14 +86,16 @@ def build_execution_request(
     principal is the authenticated caller, never read from the request body —
     DeploymentRequest has no started_by field for a client to override.
     """
+    _reject_unsupported_models(request, get_settings())
     return PipelineExecutionRequest(
         dataset_path=str(dataset_path),
         dataset_name=request.dataset_name,
         forecast_configuration=request.metadata.model_dump(),
-        # TFT is offered in the picker but never executed — see
-        # model_availability.SILENTLY_SKIPPED_MODELS. Stripped here, the one
-        # place every mode's request is built, so no runner has to know.
-        selected_models=strip_silently_skipped(request.selected_models) or None,
+        # Passed through exactly as chosen. Models this compute cannot run
+        # are refused before we get here (see _reject_unsupported_models),
+        # never silently dropped: a run that quietly omits a model the user
+        # picked is indistinguishable from one where the model lost.
+        selected_models=list(request.selected_models) if request.selected_models else None,
         fallback_model=request.fallback_model,
         horizon=request.horizon,
         derived_features=request.derived_features,
@@ -147,11 +190,9 @@ class DeploymentService:
             # While compute is still being acquired there is no engine stage
             # to name, and "Queued" reads as if nothing is happening.
             current_stage=compute.label if compute else _current_stage(listing, stages),
-            # No estimate is produced rather than a fabricated one: the
-            # engine reports no per-stage timing until a run has finished.
-            estimated_remaining="0 min" if listing.job_status is JobStatus.COMPLETED else "—",
             stages=stages,
             compute=compute,
+            databricks_run_url=listing.databricks_run_url,
             error=listing.error,
             started_by=listing.started_by,
             cancelled_by=listing.cancelled_by,
@@ -213,6 +254,9 @@ class DeploymentService:
                     status=status,
                     started_at=starts[0] if starts else None,
                     completed_at=max(e for e in ends if e) if status == "Completed" and any(ends) else None,
+                    duration_seconds=_phase_duration_seconds(members, starts, ends, status),
+                    detail=_phase_detail(members),
+                    parallel_tasks=_phase_parallel_tasks(members),
                 )
             )
 
@@ -232,6 +276,68 @@ class DeploymentService:
         )
 
         return phases
+
+
+# The phase's real work time, not driver wall clock where a better number
+# exists. A Ray-parallel stage (Train/Evaluate/Explain/Rank & Select) has
+# already finished all its real work by the time the driver opens it, so
+# started_at..completed_at reads near-zero — measured_seconds carries the
+# engine's own timing instead. Falls back to wall clock for phases with no
+# measured value (sequential stages, where the driver's span is the work).
+def _phase_duration_seconds(
+    members: list[dict], starts: list[str], ends: list[str | None], status: str
+) -> float | None:
+    measured = [m["measured_seconds"] for m in members if m.get("measured_seconds") is not None]
+    if measured:
+        return round(sum(measured), 3)
+    if status == "Completed" and starts and any(ends):
+        from datetime import datetime
+
+        start = datetime.fromisoformat(starts[0])
+        end = datetime.fromisoformat(max(e for e in ends if e))
+        return round((end - start).total_seconds(), 3)
+    return None
+
+
+# The phase's genuine Ray fan-out, straight from the engine's own
+# per-stage telemetry — never inferred or estimated here. None for a
+# phase that never ran independent parallel units.
+def _phase_parallel_tasks(members: list[dict]) -> ParallelTaskSummary | None:
+    for member in members:
+        raw = member.get("parallel_tasks")
+        if not raw:
+            continue
+        return ParallelTaskSummary(
+            executor=raw.get("executor", "none"),
+            total=raw.get("total_tasks", 0),
+            completed=raw.get("completed_tasks", 0),
+            failed=raw.get("failed_tasks", 0),
+            running=raw.get("running_tasks", 0),
+            max_concurrent=raw.get("max_concurrent_tasks"),
+            tasks=[
+                ParallelTask(
+                    group_id=task["group_id"],
+                    status=task.get("status", "Pending"),
+                    duration_seconds=task.get("duration_seconds"),
+                    worker_id=task.get("worker_id"),
+                    node_id=task.get("node_id"),
+                    start=task.get("start"),
+                    end=task.get("end"),
+                )
+                for task in raw.get("tasks", [])
+            ],
+        )
+    return None
+
+
+# The phase's real outcome, from whichever of its stages last reported one —
+# never fabricated here, only relayed.
+def _phase_detail(members: list[dict]) -> str | None:
+    for member in reversed(members):
+        detail = member.get("detail")
+        if detail:
+            return detail
+    return None
 
 
 # Infrastructure progress, from the run's real Databricks lifecycle state.

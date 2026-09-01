@@ -7,6 +7,7 @@ a fixed placeholder. See estimation_service.py for how each is computed.
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
+from app.config.run_limits import DEFAULT_FORECAST_HORIZON, MAX_FORECAST_HORIZON, MIN_FORECAST_HORIZON
 
 from app.schemas.metadata import MetadataMapping
 
@@ -18,7 +19,9 @@ class EstimationRequest(BaseModel):
     file_id: str
     metadata: MetadataMapping
     selected_models: list[str] = Field(default_factory=list)
-    horizon: int = Field(12, ge=6, le=60)
+    # Same bounds and default as the deploy request -- see
+    # app.config.run_limits.
+    horizon: int = Field(DEFAULT_FORECAST_HORIZON, ge=MIN_FORECAST_HORIZON, le=MAX_FORECAST_HORIZON)
 
 
 class EstimateComponent(BaseModel):

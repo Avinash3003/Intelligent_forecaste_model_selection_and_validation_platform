@@ -34,6 +34,9 @@ FAILED_STAGE_TAG = "failed_stage"
 # run_summary.py for why these exist alongside the tags above.
 STARTED_BY_USER_ID_TAG = "started_by_user_id"
 STARTED_BY_DISPLAY_NAME_TAG = "started_by_display_name"
+# Mirrors forecast_engine/s12_tracking/run_summary.py — see there for why
+# the engine tags its own Databricks run id.
+DATABRICKS_RUN_ID_TAG = "databricks_run_id"
 # Written by this module alone (`mark_cancelled`), never by the engine: a
 # cancellation is requested from *outside* the process being cancelled, so
 # there is no engine-side code path that could ever set these.
@@ -453,8 +456,10 @@ class MLflowHistoryStore:
         if status is JobStatus.FAILED and not error and run.info.status == "RUNNING":
             error = "The run did not finish — its process ended without recording an outcome."
 
+        raw_databricks_run_id = tags.get(DATABRICKS_RUN_ID_TAG)
         return RunListing(
             run_id=platform_run_id,
+            databricks_run_id=int(raw_databricks_run_id) if raw_databricks_run_id else None,
             dataset_name=tags.get(DATASET_NAME_TAG) or None,
             job_status=status,
             execution_backend=ExecutionBackend(self._settings.execution_mode),

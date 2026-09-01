@@ -165,7 +165,7 @@ def dbx_settings(tmp_path, mlflow_db):
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="test-token",
-        databricks_volumes_root="/Volumes/forecastiq/forecasting/forecast_files",
+        databricks_uploads_volumes_root="/Volumes/forecastiq/forecasting/upload_files",
         upload_dir=str(tmp_path / "uploads"),
         mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
     )
@@ -273,7 +273,7 @@ def test_databricks_started_by_travels_through_the_job_configuration(dbx_setting
     )
     run_id = runner.submit(request)
 
-    config_bytes = workspace.files.uploaded[f"/Volumes/forecastiq/forecasting/forecast_files/runs/{run_id}/forecast_configuration.json"]
+    config_bytes = workspace.files.uploaded[f"/Volumes/forecastiq/forecasting/artifacts_files/runs/{run_id}/forecast_configuration.json"]
     payload = json.loads(config_bytes)
     assert payload["started_by_user_id"] == "u-1"
     assert payload["started_by_display_name"] == "Avinash Reddy"

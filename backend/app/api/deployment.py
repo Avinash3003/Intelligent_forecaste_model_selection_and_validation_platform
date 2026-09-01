@@ -4,7 +4,11 @@ from app.auth.dependencies import require
 from app.auth.models import Permission, Principal
 from app.orchestration.exceptions import ExecutionError, UnknownRunError
 from app.schemas.deployment import DeploymentRequest, DeploymentResponse, DeploymentStatus
-from app.services.deployment_service import DeploymentService
+from app.services.deployment_service import (
+    DeploymentService,
+    UnsupportedComputeError,
+    UnsupportedModelError,
+)
 from app.services.derived_feature_registry import validate_derived_features
 from app.utils.errors import safe_detail
 from app.utils.exceptions import FileResolutionError
@@ -31,6 +35,13 @@ def deploy(
 
     try:
         return deployment_service.deploy(request, principal)
+    except UnsupportedComputeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UnsupportedModelError as exc:
+        # A model the chosen compute cannot run. Refused with the reason
+        # rather than silently dropped, which is what used to happen and
+        # left the user with a run that simply never mentioned it again.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileResolutionError as exc:
         raise HTTPException(
             status_code=404,

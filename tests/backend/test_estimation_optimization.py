@@ -336,7 +336,10 @@ def test_a_history_store_that_fails_mid_sweep_still_estimates():
 # ---------------------------------------------------------------------
 
 
-def test_the_databricks_mode_excludes_tft_from_the_estimated_workload():
+def test_tft_is_charged_because_it_actually_runs():
+    """TFT used to be stripped from every selection, so the estimate
+    deliberately did not bill for it. It now runs on the container runtime,
+    so an estimate that ignored it would under-quote real work."""
     df = _frame(groups=4, months_per_group=72)  # long enough to clear tft's 60-obs bar
     settings = Settings(execution_mode="databricks")
 
@@ -344,56 +347,45 @@ def test_the_databricks_mode_excludes_tft_from_the_estimated_workload():
         df, _request(models=("tft", "lightgbm"))
     )
 
-    assert "tft" not in estimate.dataset.selected_models
-    assert estimate.dataset.selected_models == ["lightgbm"]
-    assert estimate.workload.models_per_group == 1
-    assert estimate.workload.model_evaluations == 4
+    assert "tft" in estimate.dataset.selected_models
+    assert estimate.workload.models_per_group == 2
+    assert estimate.workload.model_evaluations == 8
 
 
-def test_a_silently_skipped_model_is_not_charged_runtime():
-    """TFT is offered in the picker but never executed, so the estimate must
-    not bill for it — the same fiction the availability filter removes."""
-    df = _frame(groups=2, months_per_group=72)
-    estimate = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0)).estimate(
-        df, _request(models=("tft", "arima"))
-    )
-    assert "tft" not in estimate.dataset.selected_models
-    assert "arima" in estimate.dataset.selected_models
-
-
-def test_dropping_tft_lowers_the_estimated_workload():
-    """TFT is the heaviest per-fit weight, so not running it must show up as
-    less estimated work than a selection that is actually executed."""
+def test_the_heaviest_model_raises_the_estimate():
+    """TFT carries the largest per-fit weight, so selecting it must estimate
+    more work than a lighter pair — the opposite of the old behaviour, where
+    it estimated less because it was silently dropped."""
     df = _frame(groups=5, months_per_group=72)
     svc = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0))
 
     with_tft = svc.estimate(df, _request(models=("tft", "lightgbm")))
-    two_real = svc.estimate(df, _request(models=("arima", "lightgbm")))
+    without = svc.estimate(df, _request(models=("arima", "lightgbm")))
 
-    assert with_tft.workload.model_evaluations < two_real.workload.model_evaluations
+    # Both selections are two models over the same groups, so the workload
+    # COUNTS are identical -- the per-fit weight shows up in the duration.
+    assert with_tft.workload.model_evaluations == without.workload.model_evaluations
+    assert with_tft.estimated_minutes_low > without.estimated_minutes_low
+    assert with_tft.estimated_minutes_high > without.estimated_minutes_high
 
 
-def test_tft_is_skipped_in_local_execution_too():
-    """The skip is unconditional, not mode-dependent: a model that is offered
-    but never run must estimate the same way everywhere, or local and cloud
-    would quote different numbers for identical work."""
+def test_the_estimate_is_the_same_in_local_and_cloud():
+    """Estimation quotes the work asked for; which compute can honour it is
+    the deploy path's decision, not the estimator's."""
     df = _frame(groups=3, months_per_group=72)
-    estimate = _service(Settings(execution_mode="local"), _CountingHistory(n_runs=0)).estimate(
-        df, _request(models=("tft", "lightgbm"))
-    )
-    assert "tft" not in estimate.dataset.selected_models
-    assert "lightgbm" in estimate.dataset.selected_models
+    args = dict(models=("tft", "lightgbm"))
+    cloud = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0)).estimate(df, _request(**args))
+    local = _service(Settings(execution_mode="local"), _CountingHistory(n_runs=0)).estimate(df, _request(**args))
+
+    assert cloud.dataset.selected_models == local.dataset.selected_models
+    assert "tft" in cloud.dataset.selected_models
 
 
-
-def test_the_registry_default_is_also_filtered_by_execution_mode():
-    """An empty selection means "everything" — and everything must still
-    exclude what the mode cannot run."""
+def test_an_empty_selection_still_means_everything():
     df = _frame(groups=2, months_per_group=72)
     estimate = _service(Settings(execution_mode="databricks"), _CountingHistory(n_runs=0)).estimate(
         df, _request(models=())
     )
-    assert "tft" not in estimate.dataset.selected_models
     assert len(estimate.dataset.selected_models) > 1
 
 

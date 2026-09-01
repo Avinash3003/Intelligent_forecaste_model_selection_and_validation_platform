@@ -151,6 +151,28 @@ class ModelAvailability(BaseModel):
     reason: str | None = None
 
 
+class ForecastHorizonRange(BaseModel):
+    """The business rule this platform enforces on forecast horizon,
+    read from app.config.run_limits -- the same bounds the deploy and
+    estimate requests validate against, so a value the picker allows is
+    never one the backend then rejects."""
+
+    min_months: int
+    max_months: int
+    default_months: int
+
+
 class ModelAvailabilityResponse(BaseModel):
     execution_mode: str
     models: list[ModelAvailability]
+    # Fetched once, at the same time as model availability, because both
+    # answer the same question for the Configure step: "what can this run
+    # actually be." horizon stays optional so an older cached frontend
+    # build (which does not read this field) keeps working unchanged.
+    horizon: ForecastHorizonRange
+    # ModelConfig.DEFAULT_FALLBACK_MODEL, the same value a submitted run
+    # falls back to when fallback_model is omitted (see
+    # build_execution_request) -- read here only so the picker can
+    # pre-select the same model it will actually run with, not a second,
+    # disconnected guess of what that model is.
+    default_fallback_model: str
