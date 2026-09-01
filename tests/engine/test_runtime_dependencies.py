@@ -19,8 +19,11 @@ from pathlib import Path
 
 import pytest
 
-REQUIREMENTS = Path("forecast_engine/requirements.txt")
-DOCKERFILE = Path("Dockerfile")
+REQUIREMENTS = Path(__file__).resolve().parents[2] / "forecast_engine" / "requirements.txt"
+# Anchored to this file, not the working directory. As a bare relative path
+# these tests silently *skipped* when pytest ran from forecast_engine/ —
+# including the one below asserting the Dockerfile carries no secrets.
+DOCKERFILE = Path(__file__).resolve().parents[2] / "Dockerfile"
 
 # The version the ML runtime this platform was measured on provides, so a
 # container reproduces those runs rather than resolving to whatever is

@@ -18,6 +18,11 @@ from app.services.deployment_service import PIPELINE_STAGES, DeploymentService
 from app.services.pipeline_stages import PHASE_LABELS
 
 
+# Anchored to this file, not the working directory: pytest finds the same
+# source whether it is started from the repo root or from backend/.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 def _listing(stages: list[dict], status: JobStatus = JobStatus.RUNNING) -> RunListing:
     return RunListing(
         run_id="dbx-run-test",
@@ -36,7 +41,7 @@ def _service() -> DeploymentService:
 def test_canonical_stage_list_matches_the_engine_exactly():
     """PIPELINE_STAGES is the progress denominator, so a stage missing from
     it silently overstates how far along every run is."""
-    source = Path("forecast_engine/run_pipeline.py").read_text()
+    source = (_REPO_ROOT / "forecast_engine" / "run_pipeline.py").read_text()
     engine_stages = re.findall(r'begin_stage\("([^"]+)"\)', source)
 
     assert engine_stages == PIPELINE_STAGES

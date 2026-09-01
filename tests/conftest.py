@@ -34,6 +34,30 @@ os.environ.setdefault("FORECAST_ENGINE_PYTHON", sys.executable)
 # Never write staged uploads into the working tree during a test run.
 os.environ.setdefault("UPLOAD_DIR", str(ROOT / ".pytest-uploads"))
 
+# The suite must never read a developer's real `.env`.
+#
+# `Settings.model_config` sets env_file=".env", which pydantic-settings
+# resolves against the *working directory*. From the repository root that
+# names nothing, so the suite ran on its own fixtures; from `backend/` it
+# names the developer's live configuration, and 14 tests failed on values
+# no test set. Worse than the noise is the direction it can fail in: real
+# credentials silently satisfying a test that is supposed to prove the code
+# supplies them, which is how a missing MLflow URI and missing Azure OpenAI
+# credentials both passed review this way.
+#
+# Pinned to None (pydantic-settings for "no env file") rather than to a
+# path, so the answer cannot depend on where pytest was started from.
+#
+# Guarded because this same conftest serves tests/engine, which runs under
+# the engine's own interpreter — that venv has no pydantic-settings, and no
+# engine test constructs Settings.
+try:  # noqa: SIM105 - the except needs a comment, contextlib.suppress cannot carry one
+    from app.config.settings import Settings  # noqa: E402 - needs sys.path above
+
+    Settings.model_config["env_file"] = None
+except ImportError:
+    pass
+
 
 @pytest.fixture(scope="session")
 def _migrated_mlflow_db(tmp_path_factory) -> Path:

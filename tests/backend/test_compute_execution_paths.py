@@ -21,6 +21,12 @@ from app.orchestration.schemas import PipelineExecutionRequest
 from app.schemas.compute import ComputeSelection, JobComputeConfig
 
 
+# Anchored to this file, not the working directory: the source-reading tests
+# below must find the same files whether pytest starts at the repo root or in
+# backend/.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 class _FakeFiles:
     def __init__(self) -> None:
         self.uploaded: dict[str, bytes] = {}
@@ -666,7 +672,7 @@ FORBIDDEN_ROUTING = ("_resolve_job_id", "databricks_job_name", "databricks_job_i
 
 def test_no_application_module_routes_a_run_to_a_foreign_job():
     offenders = []
-    for path in Path("backend/app").rglob("*.py"):
+    for path in (_REPO_ROOT / "backend" / "app").rglob("*.py"):
         source = path.read_text()
         for token in FORBIDDEN_ROUTING:
             if token in source:
@@ -680,7 +686,9 @@ def test_the_engine_is_never_asked_to_run_a_serverless_stage_group():
     checkpoint-dir CLI flag — the checkpoint handoff lives entirely inside
     forecast_engine/core/checkpoint.py, resolved from the run's own
     persisted artifacts config, never a path passed on the command line."""
-    settings_source = Path("backend/app/orchestration/databricks_runner.py").read_text()
+    settings_source = (
+        _REPO_ROOT / "backend" / "app" / "orchestration" / "databricks_runner.py"
+    ).read_text()
     assert "--stage-group" not in settings_source
     assert "--checkpoint-dir" not in settings_source
 
@@ -788,3 +796,39 @@ def test_the_scope_is_read_once_not_per_cluster(settings, dataset):
     runner._engine_cluster_env()
 
     assert workspace.secrets.scopes_listed == ["forecastiq"]
+
+
+# --- the suite must not depend on where it was started ----------------
+#
+# `Settings` resolves env_file=".env" against the working directory, and
+# several tests read source files by relative path. From backend/ the first
+# loaded the developer's real credentials and 14 tests failed on values no
+# test set; from forecast_engine/ the second silently *skipped* three
+# checks, one of them "the Dockerfile mentions no secrets". Both directions
+# are dangerous: real config can satisfy a test whose whole purpose is to
+# prove the code supplies that config.
+
+
+# Touching the filesystem through a literal path, on the same line or via a
+# module constant read later. A Path() built only to be passed as an argument
+# never resolves against the disk, so it is not a finding.
+_READS_DISK = (".read_text(", ".rglob(", ".glob(", ".exists(", ".open(", ".iterdir(", ".is_file(")
+
+
+def test_no_test_reads_a_source_file_by_a_working_directory_relative_path():
+    offenders = []
+    for path in (_REPO_ROOT / "tests").rglob("test_*.py"):
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#") or 'Path("' not in stripped or "__file__" in stripped:
+                continue
+            module_constant = line[:1].isupper() or line[:1] == "_"
+            if module_constant or any(marker in stripped for marker in _READS_DISK):
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{number}: {stripped}")
+
+    assert not offenders, "anchor these to __file__ instead:\n" + "\n".join(offenders)
+
+
+def test_settings_in_the_suite_never_read_a_developer_env_file():
+    """tests/conftest.py pins this; without it the answer depends on cwd."""
+    assert Settings.model_config["env_file"] is None
