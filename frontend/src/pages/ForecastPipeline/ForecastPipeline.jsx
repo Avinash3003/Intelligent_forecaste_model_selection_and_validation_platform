@@ -272,19 +272,31 @@ export default function ForecastPipeline() {
     setErrors((prev) => ({ ...prev, [field]: undefined }))
   }
 
+  // A deploy error describes the run the user last submitted, so it dies the
+  // moment they go back to change that run. Without this, refusing a model
+  // on Existing Compute left the refusal on screen after the user returned
+  // to the Compute step, switched to New Job Compute and came forward again
+  // — still telling them to "Select New Job Compute", which they just had.
   const goToStep = (step) => {
     if (isBusy) return
-    if (step <= maxReachedStep) setCurrentStep(step)
+    if (step <= maxReachedStep) {
+      setCurrentStep(step)
+      setDeployError(null)
+    }
   }
 
   const advanceTo = (step) => {
     setCurrentStep(step)
     setMaxReachedStep((prev) => Math.max(prev, step))
+    setDeployError(null)
   }
 
   const handlePrevious = () => {
     if (isBusy) return
-    if (currentStep > 1) setCurrentStep(currentStep - 1)
+    if (currentStep > 1) {
+      setCurrentStep(currentStep - 1)
+      setDeployError(null)
+    }
   }
 
   // Validation is an explicit, user-triggered action rather than a side
