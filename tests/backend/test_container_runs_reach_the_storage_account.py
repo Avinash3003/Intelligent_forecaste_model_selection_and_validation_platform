@@ -99,7 +99,7 @@ def _request(dataset, compute):
 EXISTING = ComputeSelection(mode="existing_compute", cluster_id="test-cluster")
 JOB = ComputeSelection(
     mode="new_job_compute",
-    job_compute=JobComputeConfig(node_type_id="Standard_DS3_v2", runtime_key="15.4"),
+    job_compute=JobComputeConfig(node_type_id="Standard_DS3_v2", runtime_key="15.4.x-cpu-ml-scala2.12"),
 )
 
 

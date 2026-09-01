@@ -23,7 +23,7 @@ from app.services.deployment_service import UnsupportedComputeError, build_execu
 EXISTING = ComputeSelection(mode="existing_compute", cluster_id="test-cluster")
 JOB = ComputeSelection(
     mode="new_job_compute",
-    job_compute=JobComputeConfig(node_type_id="Standard_DS3_v2", runtime_key="15.4"),
+    job_compute=JobComputeConfig(node_type_id="Standard_DS3_v2", runtime_key="15.4.x-cpu-ml-scala2.12"),
 )
 
 
@@ -151,3 +151,63 @@ def test_the_requirement_is_off_unless_a_deployment_asks_for_it():
 
     assert settings.databricks_require_container_runtime is False
     assert compute_rejection_reason(EXISTING, settings) is None
+
+
+# --- an unknown runtime fails before a cluster boots ------------------
+#
+# Databricks only rejects an unknown spark version when it starts the
+# cluster: a typo ("15.4" for "15.4.x-cpu-ml-scala2.12") surfaced as
+# "Invalid spark version" about five minutes into a doomed run.
+
+
+def test_a_runtime_this_platform_does_not_offer_is_refused(tmp_path, monkeypatch):
+    import app.services.deployment_service as deployment_service_module
+
+    monkeypatch.setattr(deployment_service_module, "get_settings", _settings)
+    dataset = tmp_path / "sales.csv"
+    dataset.write_text("date,store,sales\n2024-01-01,1,10\n")
+    typo = ComputeSelection(
+        mode="new_job_compute",
+        job_compute=JobComputeConfig(node_type_id="Standard_DC4as_v5", runtime_key="15.4"),
+    )
+
+    with pytest.raises(UnsupportedComputeError, match="not one ForecastIQ offers"):
+        build_execution_request(_request(typo, dataset), dataset, _Principal())
+
+
+def test_the_refusal_names_the_runtimes_that_would_work(tmp_path, monkeypatch):
+    from app.config.compute_presets import RUNTIME_PRESETS
+
+    import app.services.deployment_service as deployment_service_module
+
+    monkeypatch.setattr(deployment_service_module, "get_settings", _settings)
+    dataset = tmp_path / "sales.csv"
+    dataset.write_text("date,store,sales\n2024-01-01,1,10\n")
+    typo = ComputeSelection(
+        mode="new_job_compute",
+        job_compute=JobComputeConfig(node_type_id="Standard_DC4as_v5", runtime_key="nonsense"),
+    )
+
+    with pytest.raises(UnsupportedComputeError) as raised:
+        build_execution_request(_request(typo, dataset), dataset, _Principal())
+
+    for runtime in RUNTIME_PRESETS:
+        assert runtime.key in str(raised.value)
+
+
+def test_every_offered_runtime_is_accepted(tmp_path, monkeypatch):
+    """Guards the reverse mistake: a validator stricter than the picker."""
+    from app.config.compute_presets import RUNTIME_PRESETS
+
+    import app.services.deployment_service as deployment_service_module
+
+    monkeypatch.setattr(deployment_service_module, "get_settings", _settings)
+    dataset = tmp_path / "sales.csv"
+    dataset.write_text("date,store,sales\n2024-01-01,1,10\n")
+
+    for runtime in RUNTIME_PRESETS:
+        offered = ComputeSelection(
+            mode="new_job_compute",
+            job_compute=JobComputeConfig(node_type_id="Standard_DC4as_v5", runtime_key=runtime.key),
+        )
+        assert build_execution_request(_request(offered, dataset), dataset, _Principal())

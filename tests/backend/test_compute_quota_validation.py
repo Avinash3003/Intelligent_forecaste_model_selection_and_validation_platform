@@ -51,7 +51,7 @@ WORKSPACE = {
 def _config(node_type, workers, autoscale=False, max_workers=2):
     return JobComputeConfig(
         node_type_id=node_type,
-        runtime_key="15.4.x-scala2.12",
+        runtime_key="15.4.x-cpu-ml-scala2.12",
         autoscale=autoscale,
         num_workers=workers,
         max_workers=max_workers,

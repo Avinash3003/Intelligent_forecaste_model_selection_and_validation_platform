@@ -76,6 +76,35 @@ def _reject_unsupported_models(request: DeploymentRequest, settings: Settings) -
         detail = "; ".join(f"{model}: {reason}" for model, reason in sorted(unsupported.items()))
         raise UnsupportedModelError(detail)
 
+    _reject_unknown_runtime(compute)
+
+
+def _reject_unknown_runtime(compute: object) -> None:
+    """Refuse a runtime this platform does not offer, before a cluster boots.
+
+    Databricks only rejects an unknown spark version when it starts the
+    cluster, so a typo surfaced as "Invalid spark version" roughly five
+    minutes into a run that was never going to work. The offered set is
+    small and closed (the engine needs an ML runtime for Ray/xgboost/
+    lightgbm/shap), so the answer is known at request time.
+
+    Imported here rather than at module scope: compute_presets imports from
+    app.schemas.compute, so a top-level import would close a cycle.
+    """
+    from app.config.compute_presets import RUNTIME_PRESETS
+
+    config = getattr(compute, "job_compute", None)
+    requested = (getattr(config, "runtime_key", "") or "").strip()
+    if not requested:
+        return
+
+    offered = {runtime.key for runtime in RUNTIME_PRESETS}
+    if requested not in offered:
+        raise UnsupportedComputeError(
+            f"Runtime {requested!r} is not one ForecastIQ offers. "
+            f"Choose one of: {', '.join(sorted(offered))}."
+        )
+
 
 def build_execution_request(
     request: DeploymentRequest, dataset_path: Path, principal: Principal
