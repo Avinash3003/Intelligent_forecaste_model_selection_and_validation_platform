@@ -9,6 +9,7 @@ import ConfirmDialog from '../../components/ui/ConfirmDialog'
 import EmptyState from '../../components/ui/EmptyState'
 import Loader from '../../components/ui/Loader'
 import PipelineTimeline from '../../components/common/PipelineTimeline'
+import OpenInDatabricksButton from '../../components/ui/OpenInDatabricksButton'
 import RunSummaryBar from './components/RunSummaryBar'
 import { cancelDeployment, fetchDeployment, isTerminalStatus } from '../../services'
 
@@ -160,6 +161,10 @@ export default function PipelineDetails() {
         </div>
 
         <div className="flex items-center gap-2.5">
+          {/* Prominent here on purpose: this is the page a user watches a
+              run on, so "open the actual Databricks run" is the action they
+              reach for. Renders only when the backend supplied a URL. */}
+          <OpenInDatabricksButton url={run.databricksRunUrl} />
           {CANCELLABLE_STATUSES.includes(run.status) && (
             <Button variant="danger" icon={XCircle} onClick={() => setShowCancelConfirm(true)}>
               Cancel Run

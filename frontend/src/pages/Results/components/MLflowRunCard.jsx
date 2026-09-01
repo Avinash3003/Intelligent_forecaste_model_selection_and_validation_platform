@@ -2,7 +2,7 @@ import { FlaskConical } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import Badge from '../../../components/ui/Badge'
-import OpenInDatabricksLink from '../../../components/ui/OpenInDatabricksLink'
+import OpenInDatabricksButton from '../../../components/ui/OpenInDatabricksButton'
 
 const fields = [
   { key: 'runId', label: 'MLflow Run ID' },
@@ -43,13 +43,12 @@ export default function MLflowRunCard({ run, resultRunId }) {
           >
             View run details
           </Link>
-          {/* "Open in Databricks" hidden: it deep-links to the Databricks
-              workspace, which applies its own sign-in, and ForecastIQ users
-              are not provisioned there — so it reliably shows a permission
-              error. "View run details" above covers the same need in-app.
-              Restore by uncommenting once workspace access exists.
-          <OpenInDatabricksLink url={run.databricksRunUrl} />
-          */}
+          {/* Restored: the condition this was hidden for no longer holds.
+              ForecastIQ-Admins / -DataScientists / -Analysts are assigned to
+              the workspace with the workspace-access entitlement, so a user
+              arriving here gets their own role's view rather than a
+              permission error. */}
+          <OpenInDatabricksButton url={run.databricksRunUrl} size="sm" />
           {run.status ? (
             <Badge status={run.status === 'logged' ? 'Completed' : 'neutral'}>{run.status}</Badge>
           ) : null}

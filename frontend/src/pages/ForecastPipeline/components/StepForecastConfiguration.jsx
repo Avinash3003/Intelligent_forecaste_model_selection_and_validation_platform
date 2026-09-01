@@ -9,14 +9,16 @@ import { formatMonths, formatMonthsShort } from '../../../utils/formatMonths'
 import {
   forecastModels,
   fallbackModelOptions,
-  forecastHorizonRange,
   forecastHorizonTicks,
+  defaultFallbackModel,
 } from '../../../data/appConfig'
 
 export default function StepForecastConfiguration({ config, onChange, errors }) {
   // { modelId: reason } for models the configured execution mode cannot
-  // run — empty when every model is runnable or the lookup failed.
-  const unavailableModels = useModelAvailability()
+  // run, and the {min, max, default} horizon bounds this platform
+  // enforces — both empty/local-fallback when the lookup failed, per
+  // useModelAvailability's own contract.
+  const { unavailable: unavailableModels, horizonRange, fallbackModel: authoritativeFallback } = useModelAvailability()
 
   // The default selection is "every model", chosen before this component
   // knows which ones the environment supports. Once it does, anything
@@ -31,6 +33,29 @@ export default function StepForecastConfiguration({ config, onChange, errors }) 
       onChange('selectedModels', kept)
     }
   }, [unavailableModels, config.selectedModels, onChange])
+
+  // The horizon value was set from the local fallback default before the
+  // authoritative range arrived. If the server's real bounds are narrower,
+  // re-clamp rather than let the slider hold a value outside its own
+  // min/max — the same "correct once we know better" pattern as the model
+  // list above.
+  useEffect(() => {
+    if (config.horizon < horizonRange.min) {
+      onChange('horizon', horizonRange.min)
+    } else if (config.horizon > horizonRange.max) {
+      onChange('horizon', horizonRange.max)
+    }
+  }, [horizonRange, config.horizon, onChange])
+
+  // Same correction for the fallback model, guarded so it never overwrites
+  // an actual user choice: only swaps in the authoritative default while
+  // the field still holds the (possibly wrong) local fallback constant it
+  // was initialised with.
+  useEffect(() => {
+    if (authoritativeFallback !== defaultFallbackModel && config.fallbackModel === defaultFallbackModel) {
+      onChange('fallbackModel', authoritativeFallback)
+    }
+  }, [authoritativeFallback, config.fallbackModel, onChange])
 
   const toggleModel = (modelId, checked) => {
     const next = checked
@@ -61,9 +86,9 @@ export default function StepForecastConfiguration({ config, onChange, errors }) 
         <div className="max-w-2xl">
           <RangeSlider
             value={config.horizon}
-            min={forecastHorizonRange.min}
-            max={forecastHorizonRange.max}
-            step={forecastHorizonRange.step}
+            min={horizonRange.min}
+            max={horizonRange.max}
+            step={1}
             onChange={(value) => onChange('horizon', value)}
             ticks={forecastHorizonTicks}
             // Headline reads as a duration ("1 year 1 month"); the raw month

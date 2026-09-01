@@ -19,7 +19,6 @@ export default function RunSummaryBar({ run }) {
         <SummaryItem label="Started By" value={run.startedBy || '—'} />
         <SummaryItem label="Started" value={run.startTime} />
         <SummaryItem label="Current Stage" value={run.currentStage} />
-        <SummaryItem label="Remaining" value={run.estimatedRemaining} />
         {run.cancelledBy && <SummaryItem label="Cancelled By" value={run.cancelledBy} />}
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Progress</p>

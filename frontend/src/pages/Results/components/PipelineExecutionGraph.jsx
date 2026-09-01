@@ -3,113 +3,111 @@ import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import Loader from '../../../components/ui/Loader'
 import RayParallelTimeline from './RayParallelTimeline'
-import { fetchDebugSummary, fetchDeployment, isTerminalStatus } from '../../../services'
+import { fetchDeployment, isTerminalStatus } from '../../../services'
 import { formatDuration, formatISTTime, secondsBetween } from '../../../utils/formatDateTime'
 import { cn } from '../../../utils/cn'
 
 // The application's own execution graph — the seven display phases the
 // backend already reports (services/pipeline_stages.py PIPELINE_PHASES),
-// drawn as a flow.
+// drawn as a compact stepper, with the Ray parallel-execution view as its
+// own full-width section below.
 //
-// Deliberately NOT a Databricks DAG: this pipeline is one Databricks task,
-// and these phases are the engine's own internal stages. Presenting them as
-// Databricks tasks would misrepresent the architecture. This reads the same
+// A view over the same seven phases Databricks itself now runs as real
+// tasks (see backend/app/orchestration/databricks_runner.py's TASK_KEYS) —
+// not a substitute for opening the run in Databricks, which is what shows
+// the actual multi-task DAG with real per-task timing and logs (see the
+// "Open in Databricks" link elsewhere on this page). This reads the same
 // /deployments/{run_id} payload the Deployments page already renders, so
 // the two can never disagree, and it is strictly a view — nothing here can
 // influence execution.
+//
+// The stepper used to be seven expanded cards (icon, label, status,
+// duration, timestamp — four stacked lines each) with the Ray view nested
+// inside whichever one card matched the Train Models phase, squeezed into that one
+// card's ~150px column. Ray parallel execution is the thing actually worth
+// studying on this page; the phase list is a status summary. The stepper
+// below carries the same information in one line per phase, and the
+// reclaimed width goes to Ray having the section's full breadth to render
+// in, not a seventh of it.
 const REFRESH_INTERVAL_MS = 3000
 
 // Same status vocabulary and colours as components/common/PipelineTimeline,
-// so a phase looks identical wherever it appears in the product.
+// so a phase reads identically wherever it appears in the product.
 const STATUS_STYLES = {
   Completed: {
     icon: CheckCircle2,
-    node: 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20',
-    icon_: 'text-emerald-600 dark:text-emerald-400',
+    dot: 'border-emerald-500 bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400',
+    connector: 'bg-emerald-400 dark:bg-emerald-600',
   },
   Running: {
     icon: Loader2,
-    node: 'border-blue-500 bg-blue-50 ring-2 ring-blue-100 dark:bg-blue-900/20 dark:ring-blue-900/40',
-    icon_: 'text-blue-600 dark:text-blue-400',
+    dot: 'border-blue-500 bg-blue-50 text-blue-600 ring-2 ring-blue-100 dark:bg-blue-900/30 dark:text-blue-400 dark:ring-blue-900/40',
+    connector: 'bg-slate-200 dark:bg-slate-700',
     spin: true,
   },
   Failed: {
     icon: XCircle,
-    node: 'border-rose-500 bg-rose-50 dark:bg-rose-900/20',
-    icon_: 'text-rose-600 dark:text-rose-400',
+    dot: 'border-rose-500 bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400',
+    connector: 'bg-slate-200 dark:bg-slate-700',
   },
   Pending: {
     icon: Circle,
-    node: 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900',
-    icon_: 'text-slate-300 dark:text-slate-600',
+    dot: 'border-slate-200 bg-white text-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-600',
+    connector: 'bg-slate-200 dark:bg-slate-700',
   },
 }
 
-// The phase the Ray key-level view belongs under. Matches the backend's own
-// phase label exactly (PIPELINE_PHASES); a rename there without one here
-// simply means the panel stops rendering, never a crash.
-const RAY_PHASE_LABEL = 'Train Models'
-
-function PhaseNode({ stage, keyExecution }) {
+function PhaseStep({ stage, prevStatus, isFirst, isLast }) {
   const style = STATUS_STYLES[stage.status] || STATUS_STYLES.Pending
+  const prevStyle = STATUS_STYLES[prevStatus] || STATUS_STYLES.Pending
   const Icon = style.icon
-  const elapsed = secondsBetween(stage.startedAt, stage.completedAt)
+  // The engine's own measured time when it has one (real Ray-parallel
+  // work), falling back to driver wall clock only when it does not.
+  const elapsed = stage.durationSeconds ?? secondsBetween(stage.startedAt, stage.completedAt)
 
   return (
-    <div className="min-w-0 flex-1">
-      <div className={cn('rounded-xl border p-3 transition-colors', style.node)}>
-        <div className="flex items-start gap-2">
-          <Icon
-            size={15}
-            className={cn('mt-0.5 shrink-0', style.icon_, style.spin && 'animate-spin')}
-          />
-          <div className="min-w-0">
-            <p className="truncate text-xs font-semibold text-slate-800 dark:text-slate-100">
-              {stage.label}
-            </p>
-            <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">{stage.status}</p>
-            {elapsed != null && (
-              <p className="mt-0.5 text-[11px] tabular-nums text-slate-400">
-                {formatDuration(elapsed)}
-              </p>
-            )}
-            {stage.startedAt && (
-              <p className="mt-0.5 text-[10px] text-slate-400">{formatISTTime(stage.startedAt)}</p>
-            )}
-          </div>
+    <div className="flex min-w-[104px] flex-1 flex-col items-center text-center">
+      <div className="flex w-full items-center">
+        {/* The line between two dots is drawn in two flush halves — no gap
+            between adjacent PhaseStep boxes (see the parent's gap-0) — so
+            each half must carry a real connector color or the halves
+            visibly fail to meet in the middle. The left half takes the
+            previous step's color (what led into this dot), the right half
+            this step's own (what leads out of it), exactly mirroring the
+            trailing half drawn by the step before this one. */}
+        <span className={cn('h-px flex-1', prevStyle.connector, isFirst && 'invisible')} />
+        <div
+          className={cn(
+            'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border transition-colors',
+            style.dot
+          )}
+          title={`${stage.label} — ${stage.status}${elapsed != null ? ` (${formatDuration(elapsed)})` : ''}${stage.detail ? `: ${stage.detail}` : ''}`}
+        >
+          <Icon size={13} className={cn(style.spin && 'animate-spin')} />
         </div>
+        <span className={cn('h-px flex-1', style.connector, isLast && 'invisible')} />
       </div>
-      {stage.label === RAY_PHASE_LABEL && <RayParallelTimeline keyExecution={keyExecution} />}
+      <p className="mt-1.5 w-full truncate text-[11px] font-medium text-slate-700 dark:text-slate-200">
+        {stage.label}
+      </p>
+      <p className="text-[10px] tabular-nums text-slate-400">
+        {elapsed != null ? formatDuration(elapsed) : stage.status}
+      </p>
+      {stage.parallelTasks && stage.parallelTasks.total > 0 && (
+        <p className="text-[9px] tabular-nums text-brand-500 dark:text-brand-400">
+          {stage.parallelTasks.completed}/{stage.parallelTasks.total} parallel
+        </p>
+      )}
     </div>
   )
 }
 
 export default function PipelineExecutionGraph({ runId }) {
   const [run, setRun] = useState(null)
-  const [keyExecution, setKeyExecution] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const cancelledRef = useRef(false)
   const timeoutRef = useRef(null)
-
-  // Ray telemetry comes from the debug endpoint, which already serves this
-  // page and already accepts an unfinished run. Fetched once rather than on
-  // the poll loop: key_execution is written when Train Models finishes and
-  // does not change afterwards, so re-reading it every 3s would be a cold
-  // artifact read per tick for a value that cannot have moved.
-  useEffect(() => {
-    let cancelled = false
-    fetchDebugSummary(runId)
-      .then((summary) => {
-        if (!cancelled) setKeyExecution(summary?.key_execution ?? null)
-      })
-      // A missing debug summary only means the parallel view stays hidden;
-      // the phase graph above it is unaffected.
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [runId])
 
   const load = useCallback(async () => {
     try {
@@ -159,17 +157,30 @@ export default function PipelineExecutionGraph({ runId }) {
       }`}
     >
       <div className="overflow-x-auto">
-        <div className="flex min-w-max items-start gap-2 pb-2">
+        {/* No gap between steps — see PhaseStep's comment on why the
+            connector line depends on adjacent boxes sitting flush. */}
+        <div className="flex min-w-max items-start pb-1 sm:min-w-0">
           {run.stages.map((stage, index) => (
-            <div key={stage.label} className="flex min-w-[150px] items-start gap-2">
-              <PhaseNode stage={stage} keyExecution={keyExecution} />
-              {index < run.stages.length - 1 && (
-                <span className="mt-6 shrink-0 text-slate-300 dark:text-slate-600">→</span>
-              )}
-            </div>
+            <PhaseStep
+              key={stage.label}
+              stage={stage}
+              prevStatus={index > 0 ? run.stages[index - 1].status : undefined}
+              isFirst={index === 0}
+              isLast={index === run.stages.length - 1}
+            />
           ))}
         </div>
       </div>
+
+      {/* Full section width, not one phase's sliver of it — see the
+          module comment above for why this moved out of the stepper. One
+          timeline per Ray-parallel stage — each is that stage's own real
+          fan-out, never one run-wide blob standing in for all of them. */}
+      {run.stages
+        .filter((stage) => stage.parallelTasks)
+        .map((stage) => (
+          <RayParallelTimeline key={stage.label} stageLabel={stage.label} parallelTasks={stage.parallelTasks} />
+        ))}
     </SectionContainer>
   )
 }

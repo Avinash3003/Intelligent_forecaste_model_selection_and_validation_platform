@@ -1,4 +1,5 @@
-import { CheckCircle2, Loader2, Circle, XCircle } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { CheckCircle2, Cpu, Loader2, Circle, XCircle } from 'lucide-react'
 import { cn } from '../../utils/cn'
 import ProgressBar from '../ui/ProgressBar'
 import { formatISTTime } from '../../utils/formatDateTime'
@@ -46,12 +47,21 @@ const computeConfig = {
     title: 'text-blue-700 dark:text-blue-300',
     tone: 'text-blue-600 dark:text-blue-400',
   },
+  // Databricks itself reports the cluster RUNNING here, which is the
+  // accurate word for what Databricks did — but the pipeline is not
+  // actually executing yet: Spark still has to initialize and the run's
+  // dependencies (wheel or container image) still have to pull, commonly
+  // another ~7 minutes on a cold cluster. Styled and animated the same as
+  // "starting" rather than as a finished/success state, so this doesn't
+  // read as done right when the real wait is only beginning — see
+  // ComputeBootStages below for the rotating captions that fill that gap.
   ready: {
-    icon: CheckCircle2,
-    box: 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-800 dark:bg-emerald-900/15',
-    icon_: 'text-emerald-600 dark:text-emerald-400',
-    title: 'text-emerald-700 dark:text-emerald-300',
-    tone: 'text-emerald-600 dark:text-emerald-400',
+    icon: Loader2,
+    spin: true,
+    box: 'border-blue-200 bg-blue-50/60 dark:border-blue-900 dark:bg-blue-900/15',
+    icon_: 'text-blue-600 dark:text-blue-400',
+    title: 'text-blue-700 dark:text-blue-300',
+    tone: 'text-blue-600 dark:text-blue-400',
   },
   failed: {
     icon: XCircle,
@@ -75,11 +85,46 @@ const phaseDescriptions = {
   'Publish Results': 'Persisting models, exporting forecasts and recording the run',
 }
 
-// Wall clock across a phase, shown only once it has actually finished
-function elapsedLabel(startedAt, completedAt) {
-  if (!startedAt || !completedAt) return null
-  const seconds = Math.round((new Date(completedAt) - new Date(startedAt)) / 1000)
-  if (!Number.isFinite(seconds) || seconds < 0) return null
+// Cosmetic only, never checked against Databricks: a cold cluster spends
+// real time here (Spark initializing, the wheel or container image
+// pulling) with nothing to poll for progress on any of it individually.
+// Rather than one static "Compute Ready" message sitting motionless for
+// up to several minutes, which is exactly what "stuck" looks like, this
+// cycles through the stages that are plausibly happening underneath —
+// giving the wait a pulse without claiming to verify any single one.
+const BOOT_STAGE_MESSAGES = [
+  'Databricks compute is ready. Starting the forecast pipeline…',
+  'Initializing the Spark runtime…',
+  'Pulling the ForecastIQ engine wheel…',
+  'Pulling the container image…',
+  'Finishing cluster setup…',
+]
+const BOOT_STAGE_INTERVAL_MS = 14000
+
+function ComputeBootStages() {
+  const [index, setIndex] = useState(0)
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setIndex((current) => Math.min(current + 1, BOOT_STAGE_MESSAGES.length - 1))
+    }, BOOT_STAGE_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [])
+
+  return <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">{BOOT_STAGE_MESSAGES[index]}</p>
+}
+
+// A phase's real duration: the engine's own measurement when it has one,
+// else the driver's wall clock, shown only once the phase has finished.
+function elapsedLabel(stage) {
+  const measured = stage.durationSeconds
+  const seconds =
+    measured != null
+      ? Math.round(measured)
+      : stage.startedAt && stage.completedAt
+        ? Math.round((new Date(stage.completedAt) - new Date(stage.startedAt)) / 1000)
+        : null
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return null
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
   return seconds % 60 ? `${minutes}m ${seconds % 60}s` : `${minutes}m`
@@ -149,7 +194,11 @@ export default function PipelineTimeline({ stages, progress, runStatus, compute,
             />
             <div className="min-w-0">
               <p className={cn('text-sm font-semibold', computeCfg.title)}>{compute.label}</p>
-              <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">{compute.message}</p>
+              {compute.state === 'ready' ? (
+                <ComputeBootStages />
+              ) : (
+                <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">{compute.message}</p>
+              )}
               {compute.detail && (
                 <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{compute.detail}</p>
               )}
@@ -163,7 +212,7 @@ export default function PipelineTimeline({ stages, progress, runStatus, compute,
           const cfg = statusConfig[stage.status] || statusConfig.Pending
           const Icon = cfg.icon
           const isLast = idx === stages.length - 1
-          const elapsed = elapsedLabel(stage.startedAt, stage.completedAt)
+          const elapsed = elapsedLabel(stage)
           const description = phaseDescriptions[stage.label]
 
           return (
@@ -193,9 +242,19 @@ export default function PipelineTimeline({ stages, progress, runStatus, compute,
                   {elapsed && (
                     <span className="text-xs text-slate-400 tabular-nums">{elapsed}</span>
                   )}
+                  {stage.parallelTasks && stage.parallelTasks.total > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-brand-50 px-1.5 py-0.5 text-[10px] font-medium text-brand-600 dark:bg-brand-900/30 dark:text-brand-400">
+                      <Cpu size={10} />
+                      {stage.parallelTasks.completed}/{stage.parallelTasks.total} parallel
+                      {stage.parallelTasks.failed > 0 && `, ${stage.parallelTasks.failed} failed`}
+                    </span>
+                  )}
                 </div>
                 {description && stage.status !== 'Pending' && (
                   <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{description}</p>
+                )}
+                {stage.detail && stage.status === 'Completed' && (
+                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{stage.detail}</p>
                 )}
                 <p className="mt-0.5 text-xs text-slate-400">
                   {stage.status}

@@ -76,6 +76,12 @@ export const defaultAggregationMethod = 'sum'
 // robust model — not another learner that can flatline when extrapolating.
 // `seasonal_naive` replays the last observed season, so it always carries
 // the history's own seasonality through the horizon.
+//
+// FALLBACK value only, same as forecastHorizonRange above -- the
+// authoritative value is ModelConfig.DEFAULT_FALLBACK_MODEL, fetched by
+// useModelAvailability from GET /metadata/models and verified against the
+// engine's own source by
+// tests/backend/test_estimation_constants_match_the_engine.py.
 export const defaultFallbackModel = 'seasonal_naive'
 
 
@@ -153,6 +159,14 @@ export const fallbackModelOptions = [
   })),
 ]
 
+// The FALLBACK bounds only -- used before useModelAvailability's fetch of
+// GET /metadata/models resolves, or if it fails. The authoritative bounds
+// come from the backend's app.config.run_limits (kept in lockstep with the
+// engine's own MIN/MAX_FORECAST_HORIZON by
+// tests/backend/test_run_limits_match_the_engine.py), never from here --
+// this literal existing on its own, with no connection to that source, is
+// exactly the drift this platform's horizon rule already had three other
+// copies of before useModelAvailability started fetching it.
 export const forecastHorizonRange = { min: 6, max: 60, step: 1 }
 
 export const forecastHorizonTicks = [
@@ -164,4 +178,6 @@ export const forecastHorizonTicks = [
   { value: 60, label: '5y' },
 ]
 
+// Also fallback-only -- see forecastHorizonRange above. ForecastPipeline.jsx
+// uses this as the initial value before the real default has been fetched.
 export const defaultForecastHorizon = 12

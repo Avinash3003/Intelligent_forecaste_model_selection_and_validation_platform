@@ -12,7 +12,7 @@ import { useDatasetRunFilter } from '../../hooks/useDatasetRunFilter'
 import { fetchDeployments, fetchMLflowRun } from '../../services'
 import { fallbackModelOptions, forecastModels } from '../../data/appConfig'
 import { cn } from '../../utils/cn'
-import OpenInDatabricksLink from '../../components/ui/OpenInDatabricksLink'
+import OpenInDatabricksButton from '../../components/ui/OpenInDatabricksButton'
 
 // Display names the platform already defines (appConfig.js) rather than a
 // second hardcoded label set — `xgboost` -> "XGBoost", `seasonal_naive` ->
@@ -451,7 +451,7 @@ export default function MLflowExperiments() {
             {/* "Open in Databricks" hidden — see MLflowRunCard.jsx for why.
             {detail.databricks_run_url ? (
               <div className="mb-3 flex justify-end">
-                <OpenInDatabricksLink url={detail.databricks_run_url} />
+                <OpenInDatabricksButton url={detail.databricks_run_url} size="sm" />
               </div>
             ) : null}
             */}

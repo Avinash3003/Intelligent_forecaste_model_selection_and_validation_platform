@@ -95,22 +95,38 @@ function ValidationBanner({ state, message, idleText, busyText }) {
   )
 }
 
-function ExistingComputeCard({ result, loading, validation, onValidate }) {
+// One line of metadata per cluster in the dropdown, so a workspace with
+// several clusters reads as "which one" rather than a wall of identical
+// names — cores/memory are exactly what tells two clusters apart at a
+// glance.
+function clusterSublabel(cluster) {
+  const capacity = cluster.numCores ? `${cluster.numCores} vCPU · ${formatMemory(cluster.memoryMb) ?? '—'}` : null
+  const shape = cluster.singleNode ? 'single node' : `${cluster.numWorkers} worker(s)`
+  return [capacity, shape, cluster.state].filter(Boolean).join(' · ')
+}
+
+function ExistingComputeCard({ result, loading, selectedClusterId, validation, onValidate, onSelectCluster }) {
   if (loading) {
-    return <Loader label="Loading the existing compute…" />
+    return <Loader label="Loading available compute…" />
   }
-  if (!result?.available) {
+  if (!result?.available || !result.clusters?.length) {
     return (
       <p className="text-sm text-slate-400">
-        {result?.message ?? 'No existing compute is configured for this workspace.'}
+        {result?.message ?? 'No existing compute is available in this workspace.'}
       </p>
     )
   }
 
-  const compute = result.compute
+  const clusters = result.clusters
+  const compute = clusters.find((c) => c.clusterId === selectedClusterId) ?? clusters[0]
+
+  const clusterOptions = clusters.map((cluster) => ({
+    value: cluster.clusterId,
+    label: cluster.clusterName,
+    sublabel: clusterSublabel(cluster),
+  }))
 
   const rows = [
-    ['Name', compute.clusterName],
     ['Status', compute.state],
     ['Machine type', compute.nodeTypeId],
     ['Runtime', compute.runtime],
@@ -127,8 +143,16 @@ function ExistingComputeCard({ result, loading, validation, onValidate }) {
       <div className="mb-4 flex items-center gap-2">
         <Server size={16} className="text-brand-600" />
         <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Existing compute</p>
+        <span className="ml-auto text-xs text-slate-400">
+          {clusters.length} cluster{clusters.length === 1 ? '' : 's'} available
+        </span>
       </div>
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3">
+
+      <Field label="Cluster" hint="Every all-purpose cluster in the workspace, fetched live — nothing here is fixed in configuration.">
+        <Select value={compute.clusterId} onChange={onSelectCluster} options={clusterOptions} placeholder="Select a cluster" />
+      </Field>
+
+      <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-100 pt-5 dark:border-slate-800 sm:grid-cols-3">
         {rows.map(([label, value]) => (
           <div key={label} className="min-w-0">
             <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt>
@@ -150,14 +174,14 @@ function ExistingComputeCard({ result, loading, validation, onValidate }) {
             onClick={onValidate}
             loading={validation.state === 'validating'}
           >
-            Validate existing compute
+            Validate selected compute
           </Button>
         </div>
         <ValidationBanner
           state={validation.state}
           message={validation.message}
           idleText="Check this compute is available before continuing."
-          busyText="Checking the existing compute…"
+          busyText="Checking the selected compute…"
         />
       </div>
     </Card>
@@ -174,6 +198,7 @@ export default function StepComputeConfiguration({
   onChange,
   onValidate,
   onValidateExisting,
+  onSelectExistingCluster,
 }) {
   const isNew = compute.mode === 'new_job_compute'
   const nodeOptions = (options?.nodeTypes ?? []).map((node) => ({
@@ -304,8 +329,10 @@ export default function StepComputeConfiguration({
           <ExistingComputeCard
             result={existingCompute}
             loading={existingComputeLoading}
+            selectedClusterId={compute.existingClusterId}
             validation={existingValidation}
             onValidate={onValidateExisting}
+            onSelectCluster={onSelectExistingCluster}
           />
         )}
       </div>

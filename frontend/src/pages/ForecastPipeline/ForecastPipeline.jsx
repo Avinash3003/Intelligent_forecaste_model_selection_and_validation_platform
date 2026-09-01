@@ -152,6 +152,13 @@ export default function ForecastPipeline() {
   const [deployError, setDeployError] = useState(null)
   const [deployed, setDeployed] = useState(false)
   const [runId, setRunId] = useState(null)
+  // A second click that lands before React commits the re-render this
+  // triggers (setDeploying(true) does not disable the button
+  // synchronously) used to slip past the disabled prop entirely and
+  // submit the same run twice -- two Databricks jobs from one click
+  // sequence. A ref flips immediately, with no render in between, so the
+  // second click sees it already set and bails before calling deployRun.
+  const deployInFlightRef = useRef(false)
   // Bumped on every loadEstimate() call so a response can tell whether it
   // is still the most recent request — going Next -> Previous -> edit
   // config -> Next again fires a second estimate before the first
@@ -381,13 +388,15 @@ export default function ForecastPipeline() {
         setExistingCompute(result)
         setCompute((current) => ({
           ...current,
-          existingClusterId: result.compute?.clusterId ?? null,
+          // The first cluster is only a starting point -- StepComputeConfiguration's
+          // dropdown lets the user pick any of them.
+          existingClusterId: result.clusters?.[0]?.clusterId ?? null,
           mode: result.available ? current.mode : 'new_job_compute',
         }))
       })
       .catch(() => {
         if (!cancelled) {
-          setExistingCompute({ available: false, message: 'The existing compute could not be reached.' })
+          setExistingCompute({ available: false, message: 'The existing compute could not be reached.', clusters: [] })
         }
       })
       .finally(() => {
@@ -411,7 +420,7 @@ export default function ForecastPipeline() {
   const handleValidateExistingCompute = async () => {
     setExistingValidation({ state: 'validating', message: '' })
     try {
-      const result = await validateExistingCompute()
+      const result = await validateExistingCompute(compute.existingClusterId)
       setExistingValidation({
         state: result.valid ? 'valid' : 'invalid',
         message: result.message,
@@ -419,6 +428,13 @@ export default function ForecastPipeline() {
     } catch (err) {
       setExistingValidation({ state: 'invalid', message: err.message })
     }
+  }
+
+  // Picking a different cluster invalidates whatever the button above last
+  // checked -- it was never about this one.
+  const handleSelectExistingCluster = (clusterId) => {
+    setCompute((current) => ({ ...current, existingClusterId: clusterId }))
+    setExistingValidation({ state: 'idle', message: '' })
   }
 
   // `quick`: the fast checks only — Databricks connectivity, auth, config
@@ -511,6 +527,8 @@ export default function ForecastPipeline() {
     }
 
     if (currentStep === 6) {
+      if (deployInFlightRef.current) return
+      deployInFlightRef.current = true
       setDeploying(true)
       setDeployError(null)
       try {
@@ -531,6 +549,7 @@ export default function ForecastPipeline() {
         setDeployError(err.message)
       } finally {
         setDeploying(false)
+        deployInFlightRef.current = false
       }
     }
   }
@@ -624,13 +643,16 @@ export default function ForecastPipeline() {
               onChange={handleComputeChange}
               onValidate={handleValidateCompute}
               onValidateExisting={handleValidateExistingCompute}
+              onSelectExistingCluster={handleSelectExistingCluster}
             />
           )}
 
           {currentStep === 6 && (
             <StepReviewDeploy
               compute={compute}
-              existingCompute={existingCompute?.compute}
+              existingCompute={existingCompute?.clusters?.find(
+                (cluster) => cluster.clusterId === compute.existingClusterId
+              )}
               file={file}
               mapping={mapping}
               config={config}

@@ -37,19 +37,21 @@ export async function fetchComputeOptions() {
   }
 }
 
-// The fallback compute, looked up separately so it never blocks the form.
+// Every all-purpose cluster in the workspace the picker can offer, looked
+// up separately so it never blocks the form. One workspace call regardless
+// of how many clusters come back — see ComputeService.list_existing_compute.
 export async function fetchExistingCompute() {
   const payload = await apiClient.get('/compute/existing')
   return {
     available: payload.available,
     message: payload.message,
-    compute: normalizeExistingCompute(payload.compute),
+    clusters: (payload.clusters ?? []).map(normalizeExistingCompute),
   }
 }
 
-// Checks the configured existing cluster can actually run the workload.
-export async function validateExistingCompute() {
-  const payload = await apiClient.post('/compute/existing/validate', {})
+// Checks the selected existing cluster can actually run the workload.
+export async function validateExistingCompute(clusterId) {
+  const payload = await apiClient.post('/compute/existing/validate', { cluster_id: clusterId })
   return {
     valid: payload.valid,
     message: payload.message,

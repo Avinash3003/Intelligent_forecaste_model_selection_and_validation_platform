@@ -68,12 +68,35 @@ function normalizeDeployment(payload) {
     duration: payload.duration,
     progress: payload.progress,
     currentStage: payload.current_stage,
-    estimatedRemaining: payload.estimated_remaining,
     stages: (payload.stages ?? []).map((stage) => ({
       label: stage.label,
       status: stage.status,
       startedAt: stage.started_at,
       completedAt: stage.completed_at,
+      // The engine's own measured time where it has one — real Ray-parallel
+      // work, not the driver's near-zero wall clock. See StageStatus.
+      durationSeconds: stage.duration_seconds ?? null,
+      detail: stage.detail ?? null,
+      // Real Ray fan-out counts for this stage, straight from the engine.
+      parallelTasks: stage.parallel_tasks
+        ? {
+            executor: stage.parallel_tasks.executor,
+            total: stage.parallel_tasks.total,
+            completed: stage.parallel_tasks.completed,
+            failed: stage.parallel_tasks.failed,
+            running: stage.parallel_tasks.running,
+            maxConcurrent: stage.parallel_tasks.max_concurrent ?? null,
+            tasks: (stage.parallel_tasks.tasks ?? []).map((task) => ({
+              groupId: task.group_id,
+              status: task.status,
+              durationSeconds: task.duration_seconds ?? null,
+              workerId: task.worker_id ?? null,
+              nodeId: task.node_id ?? null,
+              start: task.start ?? null,
+              end: task.end ?? null,
+            })),
+          }
+        : null,
     })),
     // Infrastructure progress before the engine starts — present only
     // while a Databricks run is acquiring its compute. Null otherwise.
@@ -85,6 +108,7 @@ function normalizeDeployment(payload) {
           detail: payload.compute.detail ?? null,
         }
       : null,
+    databricksRunUrl: payload.databricks_run_url ?? null,
     error: payload.error ?? null,
     startedBy: payload.started_by ?? null,
     cancelledBy: payload.cancelled_by ?? null,
