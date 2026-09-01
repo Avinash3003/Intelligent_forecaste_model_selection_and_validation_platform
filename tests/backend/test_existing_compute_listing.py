@@ -204,3 +204,65 @@ def test_live_capacity_wins_over_the_catalog_while_running():
     offered = service.list_existing_compute().clusters[0]
     assert offered.num_cores == 8
     assert offered.memory_mb == 32768
+
+
+# --- dedicated clusters belong to one principal -----------------------
+#
+# ForecastIQ authenticates as a service principal, and the clusters it is
+# meant to use are created Dedicated (single user) to that SP -- the SP is
+# then the only identity that can attach, whoever created the cluster.
+# A cluster dedicated to somebody else is unusable to this backend, so
+# offering it in the picker only produces a run that fails at attach time.
+
+
+def _service_as(clusters, identity):
+    """A service whose Databricks identity is `identity`, as the SP is."""
+    service = ComputeService(settings=object(), workspace=object())
+    service._client = lambda: type(
+        "C",
+        (),
+        {
+            "clusters": type("X", (), {"list": staticmethod(lambda: clusters)})(),
+            "current_user": type(
+                "U", (), {"me": staticmethod(lambda: type("M", (), {"user_name": identity})())}
+            )(),
+        },
+    )()
+    return service
+
+
+SP = "a02994a9-7811-4846-9cf9-f0345531d5d8"
+
+
+def test_a_cluster_dedicated_to_this_service_principal_is_offered():
+    """The real forecastiq-ray-dev shape: created by a human, dedicated to
+    the SP. The creator is irrelevant — single_user_name is what governs
+    who may attach."""
+    cluster = _FakeCluster("c1", "forecastiq-ray-dev")
+    cluster.single_user_name = SP
+    cluster.creator_user_name = "someone.else@example.com"
+
+    result = _service_as([cluster], SP).list_existing_compute()
+
+    assert [c.cluster_id for c in result.clusters] == ["c1"]
+
+
+def test_a_cluster_dedicated_to_another_principal_is_excluded():
+    mine = _FakeCluster("c1", "sp-cluster")
+    mine.single_user_name = SP
+    theirs = _FakeCluster("c2", "someone-elses-cluster")
+    theirs.single_user_name = "ambatiniharika.apply@gmail.com"
+
+    result = _service_as([mine, theirs], SP).list_existing_compute()
+
+    assert [c.cluster_id for c in result.clusters] == ["c1"]
+
+
+def test_only_another_principal_s_cluster_reads_as_nothing_available():
+    theirs = _FakeCluster("c2", "someone-elses-cluster")
+    theirs.single_user_name = "ambatiniharika.apply@gmail.com"
+
+    result = _service_as([theirs], SP).list_existing_compute()
+
+    assert result.available is False
+    assert result.clusters == []
