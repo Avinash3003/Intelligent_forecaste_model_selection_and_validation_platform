@@ -1,11 +1,13 @@
 """LLM configuration and connectivity diagnostics.
 
-Production cloud runs currently show provider=template, call_count=0 —
-the jobs.submit path never passes Azure OpenAI credentials to the wheel
-task. These diagnostics exist so that gap is visible on its own terms
-(a config check that never touches the network) and so a single real
-request can prove the deployment credentials actually work, independent
-of which compute backend eventually calls them.
+Written when cloud runs showed provider=template, call_count=0 because the
+backend passed Azure OpenAI credentials to a local engine subprocess but
+not to a Databricks job cluster. That gap is closed — the cluster is given
+them as secret references (backend/app/orchestration/databricks_runner.py,
+`_llm_secret_refs`) — but these diagnostics remain the way to tell the two
+halves apart: a config check that never touches the network, and a single
+real request that proves the deployment's credentials work, independent of
+which compute backend eventually calls them.
 """
 
 from __future__ import annotations

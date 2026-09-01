@@ -7,9 +7,12 @@ supported way to read the real value from running code.
 
 Only a Databricks Jobs API python_wheel_task whose job parameters reference
 a secret template hits this (currently: databricks.yml's dev-only
-forecast_pipeline_compute job); local runs set real environment variables
-directly, and a run submitted via jobs.submit (backend/app/orchestration/
-databricks_runner.py) never passes these flags at all.
+forecast_pipeline_compute job). Local runs set real environment variables
+directly, and a run from the backend (backend/app/orchestration/
+databricks_runner.py) never passes these flags either: it puts the same
+references in the job cluster's spark_env_vars, which Databricks does
+expand, so the engine reads already-resolved values straight from the
+environment.
 """
 
 from __future__ import annotations

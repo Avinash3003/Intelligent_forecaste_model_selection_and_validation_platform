@@ -147,6 +147,21 @@ _JOB_PARAMETER_REFS = {
     for name in ("dataset", "config", "summary_out", "live_status_out")
 }
 
+# Engine env var -> key inside `Settings.databricks_secret_scope`. The engine
+# reads these names (forecast_engine/config/llm_config.py); the key names are
+# the scope's own. Only the scope is configurable — a deployment points at its
+# own scope, it does not get to rename what lives inside one.
+_LLM_SECRET_KEYS = {
+    "AZURE_OPENAI_ENDPOINT": "azure-openai-endpoint",
+    "AZURE_OPENAI_API_KEY": "azure-openai-api-key",
+    "AZURE_OPENAI_DEPLOYMENT_NAME": "azure-openai-deployment",
+}
+
+
+# spark_env_vars takes strings; a None stays None here so the caller drops it.
+def _as_env_text(value: float | int | None) -> str | None:
+    return None if value is None else str(value)
+
 
 # The engine CLI arguments one task passes to the wheel entry point.
 def _engine_parameters(parameters: dict[str, str], stage: str) -> list[str]:
@@ -254,6 +269,7 @@ class DatabricksRunner(PipelineRunner):
         # history behave the same in both execution modes.
         self._history = history or MLflowHistoryStore(settings)
         self._client = workspace_client
+        self._secret_key_cache: frozenset[str] | None = None
         # Which reported backend and which deployed Job — everything else
         # (staging, submit/poll/retrieve, error translation) is identical
         # three-line subclass instead of a second implementation.
@@ -366,7 +382,7 @@ class DatabricksRunner(PipelineRunner):
         # It cannot run inline: the dataset is uploaded to the UC Volume
         # byte-for-byte, and a real 17.3 MB dataset measured 56.97s against
         # this workspace — on its own already past the frontend's 30s
-        # request timeout, before the config upload and jobs.submit that
+        # request timeout, before the config upload and job submission that
         # follow it. The client aborted every time while the backend kept
         # going and often did submit the run, which is the worst of both:
         # the user sees "the request took too long" for a forecast that is
@@ -962,8 +978,9 @@ class DatabricksRunner(PipelineRunner):
     # would give, without giving up per-run compute selection (a real,
     # already-shipped feature a single static job's fixed task spec cannot
     # express — Databricks has no per-run-now cluster override).
-    # `jobs.submit()` accepts an access_control_list on the one-time-run job
-    # it creates, so this is one atomic call, not a submit-then-share race.
+    # `jobs.create()` accepts an access_control_list on the job it creates,
+    # so the job is shared as it is defined, not in a later call that could
+    # fail and leave it private.
     # The selected compute is the compute that runs; there is no fallback.
     # new_job_compute attaches by job_cluster_key so all seven tasks share
     # the one job cluster defined alongside them; existing_compute attaches
@@ -1031,8 +1048,55 @@ class DatabricksRunner(PipelineRunner):
             "MLFLOW_TRACKING_URI": self._settings.mlflow_tracking_uri_resolved,
             "MLFLOW_EXPERIMENT_NAME": self._settings.mlflow_experiment_name_resolved,
             "MLFLOW_REGISTRY_URI": self._settings.mlflow_registry_uri,
+            # Not a secret and not kept in the scope — a version string.
+            "AZURE_OPENAI_API_VERSION": self._settings.azure_openai_api_version,
+            "LLM_MAX_TOKENS_PER_RUN": _as_env_text(self._settings.llm_max_tokens_per_run),
+            "AZURE_OPENAI_PRICE_INPUT_PER_1K": _as_env_text(self._settings.azure_openai_price_input_per_1k),
+            "AZURE_OPENAI_PRICE_OUTPUT_PER_1K": _as_env_text(self._settings.azure_openai_price_output_per_1k),
         }
+        forwarded.update(self._llm_secret_refs())
         return {key: value for key, value in forwarded.items() if (value or "").strip()}
+
+    # Azure OpenAI credentials, as Databricks secret references.
+    #
+    # Without these the engine finds no endpoint on the cluster and every
+    # insight silently falls back to a template — the local path forwards
+    # them (Settings.subprocess_env) and the Databricks path did not, so the
+    # LLM only ever ran locally.
+    #
+    # Emitted only for keys the scope actually holds: a reference to a key
+    # that does not exist fails the *cluster start*, which would take down
+    # every run to fix insight text. A missing key just leaves that variable
+    # unset, and the engine degrades to templates the way it does today.
+    def _llm_secret_refs(self) -> dict[str, str]:
+        scope = (self._settings.databricks_secret_scope or "").strip()
+        if not scope:
+            return {}
+
+        present = self._secret_keys(scope)
+        if not present:
+            return {}
+        return {
+            env_var: f"{{{{secrets/{scope}/{key}}}}}"
+            for env_var, key in _LLM_SECRET_KEYS.items()
+            if key in present
+        }
+
+    def _secret_keys(self, scope: str) -> frozenset[str]:
+        """Key names in `scope`, cached for the life of this runner.
+
+        Never the secret *values* — Databricks does not serve those to an
+        API caller at all, which is the property that makes a reference the
+        only safe way to hand one to a cluster.
+        """
+        if self._secret_key_cache is None:
+            try:
+                listed = self._workspace.secrets.list_secrets(scope)
+                self._secret_key_cache = frozenset(s.key for s in listed if s.key)
+            except Exception as exc:  # noqa: BLE001 - insights degrade, the run continues
+                logger.warning("Could not read secret scope %r; LLM insights will use templates: %s", scope, exc)
+                self._secret_key_cache = frozenset()
+        return self._secret_key_cache
 
     # Databricks Container Services: a new job cluster pulls the configured
     # image instead of resolving its dependencies from the runtime, when one
@@ -1050,7 +1114,7 @@ class DatabricksRunner(PipelineRunner):
     # to its Standard (non-ML) equivalent.
     #
     # `use_ml_runtime` is deliberately left untouched, not forced to False —
-    # verified against the real Jobs API (a live `jobs.submit` call), which
+    # verified against the real Jobs API with a live call, which
     # rejects the field outright when set explicitly on a spec with no
     # `kind`: "use_ml_runtime is not allowed with unspecified kind." Setting
     # `kind` (currently only `CLASSIC_PREVIEW`) is a bigger, preview-feature

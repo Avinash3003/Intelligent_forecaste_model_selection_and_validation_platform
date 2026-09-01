@@ -148,6 +148,16 @@ class Settings(BaseSettings):
     databricks_docker_image_username: str | None = None
     databricks_docker_image_password: str | None = None
 
+    # Databricks secret scope holding the engine's Azure OpenAI credentials.
+    #
+    # A job cluster is given them as `{{secrets/<scope>/<key>}}` references,
+    # which Databricks resolves at cluster start — so the API key never
+    # appears in the job definition, where every plaintext spark_env_var is
+    # readable by anyone who can view the job. Blank disables the LLM on
+    # Databricks runs (insights fall back to templates, visibly); the key is
+    # never sent as plaintext instead. See DatabricksRunner._engine_cluster_env.
+    databricks_secret_scope: str = "forecastiq"
+
     # UC volume for the ORIGINAL uploaded dataset only — nothing else.
     #
     # Still "forecast_files": that is the volume's real name in Databricks.
