@@ -20,13 +20,14 @@ from app.config.compute_presets import (
     NODE_TYPE_PRESETS,
     RUNTIME_PRESETS,
 )
+from app.config.model_availability import container_runtime_required
 from app.config.settings import Settings, get_settings
-from app.orchestration.databricks_runner import DatabricksRunner
+from app.orchestration.databricks_runner import RUN_CLUSTER_TAG, DatabricksRunner
 from app.schemas.compute import (
     ComputeOptions,
     ComputeValidationResult,
     ExistingCompute,
-    ExistingComputeResponse,
+    ExistingComputeListResponse,
     ExistingComputeValidationResult,
     JobComputeConfig,
 )
@@ -111,6 +112,33 @@ def _to_existing_compute(cluster_id: str, cluster: Any) -> ExistingCompute:
     )
 
 
+# All-purpose vs. job compute is a real Databricks distinction
+# (`cluster_source`), not one this platform invents: a JOB/PIPELINE-sourced
+# cluster is ephemeral infrastructure a job created for itself, never
+# something a *different* run should be pointed at. Our own validation
+# probes (compute_service's create-probe clusters) are excluded the same
+# way the orphan sweep already recognizes them, by name prefix, since a
+# probe is created with `cluster_source` left at its default (API/UI) —
+# nothing in the source enum marks it as ours.
+#
+# A cluster this app creates for one run's new_job_compute (see
+# databricks_runner._create_shared_cluster) also reports ClusterSource.UI —
+# jobs.submit() has no job-cluster concept, so it is made via the plain
+# Clusters API — so it is excluded by its RUN_CLUSTER_TAG instead of source.
+_NON_ALL_PURPOSE_SOURCES = {"JOB", "PIPELINE", "PIPELINE_MAINTENANCE"}
+
+
+def _is_all_purpose(cluster: Any) -> bool:
+    name = getattr(cluster, "cluster_name", "") or ""
+    if name.startswith(PROBE_NAME_PREFIX):
+        return False
+    if RUN_CLUSTER_TAG in (getattr(cluster, "custom_tags", None) or {}):
+        return False
+    source = getattr(cluster, "cluster_source", None)
+    source_value = str(getattr(source, "value", source) or "").upper()
+    return source_value not in _NON_ALL_PURPOSE_SOURCES
+
+
 def _existing_lookup_message(error: Exception) -> str:
     text = str(error).lower()
     if "does not exist" in text or "not found" in text or "invalid_parameter_value" in text:
@@ -120,7 +148,12 @@ def _existing_lookup_message(error: Exception) -> str:
     return "Existing compute could not be reached right now."
 
 
-# Why this cluster cannot run the engine, or None when it can.
+# Why this cluster cannot run the engine, or None when it can. Runs off
+# fields clusters.list() already returns, so listing every candidate costs
+# no extra per-cluster call. GPU vs CPU is never checked here — the engine
+# needs an ML runtime's dependencies (torch, xgboost, prophet, ...), not a
+# GPU; a GPU cluster with an ML runtime is compatible, a CPU one without
+# one is not.
 def _incompatibility(cluster: Any, caller: str | None) -> str | None:
     single_user = getattr(cluster, "single_user_name", None)
     if single_user and caller and single_user != caller:
@@ -130,6 +163,21 @@ def _incompatibility(cluster: Any, caller: str | None) -> str | None:
     if not getattr(cluster, "use_ml_runtime", False) and "ml" not in runtime:
         return "Existing compute does not use a machine learning runtime, which this forecast requires."
     return None
+
+
+# Whether `cluster` can be offered at all: compatible AND in a state a run
+# could actually attach to (not a per-cluster call — same list() fields).
+def _listable(cluster: Any, caller: str | None) -> str | None:
+    reason = _incompatibility(cluster, caller)
+    if reason:
+        return reason
+
+    state = str(getattr(getattr(cluster, "state", None), "value", "") or "").upper()
+    if state in USABLE_STATES:
+        return None
+    if state in STARTABLE_STATES:
+        return _termination_failure(cluster)
+    return f"Existing compute is in state {state or 'UNKNOWN'}."
 
 
 # A terminated cluster's reason, when it represents a real failure.
@@ -196,32 +244,66 @@ class ComputeService:
 
     # ---- existing compute (one lookup) --------------------------------
 
-    def get_existing_compute(self) -> ExistingComputeResponse:
-        cluster_id = (self._settings.databricks_existing_cluster_id or "").strip()
-        if not cluster_id:
-            return ExistingComputeResponse(
-                available=False, message="No existing compute is configured for this workspace."
+    def list_existing_compute(self) -> ExistingComputeListResponse:
+        # ForecastIQ's one supported runtime is the prebuilt container
+        # image; a plain cluster cannot load it. Reported through the same
+        # available/message shape the picker already renders for "no
+        # clusters available" or "unreachable", so a user sees why before
+        # choosing it rather than after submitting and being refused.
+        if container_runtime_required(self._settings):
+            return ExistingComputeListResponse(
+                available=False,
+                message=(
+                    "ForecastIQ runs on its prebuilt container runtime, which carries every "
+                    "model's dependencies. Existing Compute cannot load that image, so it is "
+                    "kept only as legacy infrastructure. Use New Job Compute to run a pipeline."
+                ),
             )
+
+        # One call lists every cluster in the workspace, all-purpose and
+        # job alike, with the exact fields _to_existing_compute already
+        # reads off a single cluster.get() — so offering every all-purpose
+        # cluster instead of one hardcoded id costs nothing extra: the same
+        # one round trip either way, never a lookup per cluster.
         try:
-            cluster = self._client().clusters.get(cluster_id=cluster_id)
+            clusters = list(self._client().clusters.list())
         except Exception as exc:  # noqa: BLE001 - a missing fallback is not fatal
-            logger.warning("Could not read existing compute %s: %s", cluster_id, exc)
-            return ExistingComputeResponse(
-                available=False, message="The existing compute could not be reached right now."
+            logger.warning("Could not list existing compute: %s", exc)
+            return ExistingComputeListResponse(
+                available=False, message="Existing compute could not be reached right now."
             )
-        return ExistingComputeResponse(available=True, compute=_to_existing_compute(cluster_id, cluster))
+
+        caller = self._current_user_name()
+        options = []
+        for cluster in clusters:
+            cluster_id = getattr(cluster, "cluster_id", None)
+            if not cluster_id or not _is_all_purpose(cluster):
+                continue
+            reason = _listable(cluster, caller)
+            if reason:
+                logger.info("Excluding cluster %s from Existing Compute: %s", cluster_id, reason)
+                continue
+            options.append(_to_existing_compute(cluster_id, cluster))
+
+        if not options:
+            return ExistingComputeListResponse(
+                available=False, message="No compatible all-purpose compute is available in this workspace."
+            )
+        return ExistingComputeListResponse(available=True, clusters=options)
 
     # ---- existing compute validation ----------------------------------
 
-    def validate_existing_compute(self) -> ExistingComputeValidationResult:
-        """Check the configured cluster can actually run this workload.
+    def validate_existing_compute(self, cluster_id: str | None) -> ExistingComputeValidationResult:
+        """Check the selected cluster can actually run this workload.
 
         Reads the cluster and its permissions only — nothing is created,
-        started, resized or modified.
+        started, resized or modified. `cluster_id` is whichever cluster the
+        user picked from list_existing_compute(); there is no longer a
+        single configured fallback to validate in its absence.
         """
-        cluster_id = (self._settings.databricks_existing_cluster_id or "").strip()
+        cluster_id = (cluster_id or "").strip()
         if not cluster_id:
-            return self._existing_invalid("No existing compute is configured for this workspace.")
+            return self._existing_invalid("No existing compute was selected.")
 
         try:
             cluster = self._client().clusters.get(cluster_id=cluster_id)

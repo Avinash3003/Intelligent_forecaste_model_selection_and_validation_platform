@@ -36,16 +36,23 @@ class ComputeOptions(BaseModel):
     default_runtime_key: str | None = None
 
 
-class ExistingComputeResponse(BaseModel):
-    """The fallback compute, or why it cannot be offered."""
+class ExistingComputeListResponse(BaseModel):
+    """Every all-purpose cluster in the workspace the picker can offer, or
+    why none can be. One workspace call (`clusters.list()`) already returns
+    every field each cluster's card needs, so this costs the same one
+    round trip regardless of how many clusters come back."""
 
     available: bool
     message: str | None = None
-    compute: "ExistingCompute | None" = None
+    clusters: list["ExistingCompute"] = Field(default_factory=list)
+
+
+class ExistingComputeValidationRequest(BaseModel):
+    cluster_id: str
 
 
 class ExistingComputeValidationResult(BaseModel):
-    """Whether the configured existing compute can run this workload."""
+    """Whether the selected existing compute can run this workload."""
 
     valid: bool
     # One short, user-facing sentence. Never a raw Databricks error.
@@ -134,4 +141,4 @@ class ComputeValidationResult(BaseModel):
     checked_at: str | None = None
 
 
-ExistingComputeResponse.model_rebuild()
+ExistingComputeListResponse.model_rebuild()

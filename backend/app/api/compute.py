@@ -6,7 +6,8 @@ from app.schemas.compute import (
     ComputeOptions,
     ComputeValidationRequest,
     ComputeValidationResult,
-    ExistingComputeResponse,
+    ExistingComputeListResponse,
+    ExistingComputeValidationRequest,
     ExistingComputeValidationResult,
 )
 from app.services.compute_service import ComputeService
@@ -25,25 +26,26 @@ def compute_options(
 
 @router.get(
     "/compute/existing",
-    response_model=ExistingComputeResponse,
-    summary="The existing compute offered as a fallback",
+    response_model=ExistingComputeListResponse,
+    summary="Every all-purpose cluster in the workspace the picker can offer",
 )
 def existing_compute(
     principal: Principal = Depends(require(Permission.FORECAST_RUN)),
-) -> ExistingComputeResponse:
-    return compute_service.get_existing_compute()
+) -> ExistingComputeListResponse:
+    return compute_service.list_existing_compute()
 
 
 @router.post(
     "/compute/existing/validate",
     response_model=ExistingComputeValidationResult,
-    summary="Check the existing compute can run this workload",
+    summary="Check the selected existing compute can run this workload",
 )
 def validate_existing_compute(
+    request: ExistingComputeValidationRequest,
     principal: Principal = Depends(require(Permission.FORECAST_RUN)),
 ) -> ExistingComputeValidationResult:
     # Reads only; never starts, resizes or modifies the cluster.
-    return compute_service.validate_existing_compute()
+    return compute_service.validate_existing_compute(request.cluster_id)
 
 
 @router.post(

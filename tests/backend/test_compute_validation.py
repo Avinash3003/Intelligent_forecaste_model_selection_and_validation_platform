@@ -213,7 +213,7 @@ class _FakeCluster:
 
 
 def _existing_service(cluster=None, error=None, levels=("CAN_MANAGE",), caller="me@example.com"):
-    settings = type("S", (), {"databricks_existing_cluster_id": "cid"})()
+    settings = type("S", (), {})()
     service = ComputeService(settings=settings, workspace=object())
 
     def get(cluster_id):
@@ -228,7 +228,7 @@ def _existing_service(cluster=None, error=None, levels=("CAN_MANAGE",), caller="
 
 
 def test_existing_running_cluster_is_valid():
-    result = _existing_service(_FakeCluster(state="RUNNING")).validate_existing_compute()
+    result = _existing_service(_FakeCluster(state="RUNNING")).validate_existing_compute("cid")
     assert result.valid
     assert result.state == "RUNNING"
     assert not result.starts_on_demand
@@ -237,7 +237,7 @@ def test_existing_running_cluster_is_valid():
 
 def test_existing_terminated_cluster_is_valid_and_starts_on_demand():
     cluster = _FakeCluster(state="TERMINATED", reason=_FakeReason("INACTIVITY", "SUCCESS"))
-    result = _existing_service(cluster).validate_existing_compute()
+    result = _existing_service(cluster).validate_existing_compute("cid")
     assert result.valid
     assert result.starts_on_demand
     assert "stopped but will start" in result.message
@@ -277,14 +277,14 @@ def test_terminated_validation_never_starts_or_waits_for_the_cluster(monkeypatch
     )
 
     clusters = _Clusters(_FakeCluster(state="TERMINATED", reason=_FakeReason("INACTIVITY", "SUCCESS")))
-    settings = type("S", (), {"databricks_existing_cluster_id": "cid"})()
+    settings = type("S", (), {})()
     service = ComputeService(settings=settings, workspace=object())
     service._client = lambda: type("C", (), {"clusters": clusters})()
     service._current_user_name = lambda: "me@example.com"
     service._permissions_for = lambda cluster_id: {"CAN_MANAGE"}
 
     started = time.monotonic()
-    result = service.validate_existing_compute()
+    result = service.validate_existing_compute("cid")
     elapsed = time.monotonic() - started
 
     assert result.valid
@@ -299,49 +299,49 @@ def test_terminated_validation_never_starts_or_waits_for_the_cluster(monkeypatch
 def test_existing_cluster_terminated_by_failure_is_invalid():
     cluster = _FakeCluster(state="TERMINATED",
                            reason=_FakeReason("AZURE_QUOTA_EXCEEDED_EXCEPTION", "CLOUD_FAILURE"))
-    result = _existing_service(cluster).validate_existing_compute()
+    result = _existing_service(cluster).validate_existing_compute("cid")
     assert not result.valid
     assert "quota" in result.message.lower()
 
 
 def test_existing_cluster_not_found_is_invalid():
     service = _existing_service(error=Exception("Cluster cid does not exist"))
-    result = service.validate_existing_compute()
+    result = service.validate_existing_compute("cid")
     assert not result.valid
     assert "could not be found" in result.message
 
 
 def test_existing_cluster_permission_denied_is_invalid():
     service = _existing_service(error=Exception("User is not authorized to access cluster"))
-    result = service.validate_existing_compute()
+    result = service.validate_existing_compute("cid")
     assert not result.valid
     assert "not accessible" in result.message
 
 
 def test_existing_cluster_without_attach_permission_is_invalid():
     service = _existing_service(_FakeCluster(), levels=("CAN_VIEW",))
-    result = service.validate_existing_compute()
+    result = service.validate_existing_compute("cid")
     assert not result.valid
     assert "permissions" in result.message
 
 
 def test_stopped_cluster_without_restart_permission_is_invalid():
     cluster = _FakeCluster(state="TERMINATED", reason=_FakeReason("INACTIVITY", "SUCCESS"))
-    result = _existing_service(cluster, levels=("CAN_ATTACH_TO",)).validate_existing_compute()
+    result = _existing_service(cluster, levels=("CAN_ATTACH_TO",)).validate_existing_compute("cid")
     assert not result.valid
     assert "cannot be started" in result.message
 
 
 def test_cluster_reserved_for_another_user_is_invalid():
     service = _existing_service(_FakeCluster(single_user="someone.else@example.com"))
-    result = service.validate_existing_compute()
+    result = service.validate_existing_compute("cid")
     assert not result.valid
     assert "reserved for another user" in result.message
 
 
 def test_cluster_without_ml_runtime_is_invalid():
     cluster = _FakeCluster(use_ml_runtime=False, spark_version="15.4.x-scala2.12")
-    result = _existing_service(cluster).validate_existing_compute()
+    result = _existing_service(cluster).validate_existing_compute("cid")
     assert not result.valid
     assert "machine learning runtime" in result.message
 
@@ -349,30 +349,38 @@ def test_cluster_without_ml_runtime_is_invalid():
 def test_ml_runtime_detected_from_the_version_string():
     """Some clusters carry the ML stack via the version name instead of the flag."""
     cluster = _FakeCluster(use_ml_runtime=False, spark_version="15.4.x-cpu-ml-scala2.12")
-    assert _existing_service(cluster).validate_existing_compute().valid
+    assert _existing_service(cluster).validate_existing_compute("cid").valid
 
 
 def test_terminating_cluster_is_invalid():
-    result = _existing_service(_FakeCluster(state="TERMINATING")).validate_existing_compute()
+    result = _existing_service(_FakeCluster(state="TERMINATING")).validate_existing_compute("cid")
     assert not result.valid
 
 
-def test_no_configured_cluster_is_invalid():
-    settings = type("S", (), {"databricks_existing_cluster_id": ""})()
+def test_no_selected_cluster_is_invalid():
+    settings = type("S", (), {})()
     service = ComputeService(settings=settings, workspace=object())
-    result = service.validate_existing_compute()
+    result = service.validate_existing_compute(None)
     assert not result.valid
-    assert "No existing compute is configured" in result.message
+    assert "No existing compute was selected" in result.message
+
+
+def test_a_blank_selected_cluster_id_is_invalid():
+    settings = type("S", (), {})()
+    service = ComputeService(settings=settings, workspace=object())
+    result = service.validate_existing_compute("   ")
+    assert not result.valid
+    assert "No existing compute was selected" in result.message
 
 
 def test_existing_validation_never_fetches_the_node_catalog():
     """The catalog costs seconds; the existing-compute check must not use it."""
     service = _existing_service(_FakeCluster())
     service._node_info = lambda node_type_id: pytest.fail("node catalog must not be read")
-    assert service.validate_existing_compute().valid
+    assert service.validate_existing_compute("cid").valid
 
 
 def test_existing_validation_messages_stay_short_and_clean():
     service = _existing_service(error=Exception("Traceback:\n  RESOURCE_EXHAUSTED at 0x7f"))
-    message = service.validate_existing_compute().message
+    message = service.validate_existing_compute("cid").message
     assert "\n" not in message and "Traceback" not in message
