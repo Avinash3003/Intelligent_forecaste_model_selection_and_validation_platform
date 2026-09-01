@@ -36,19 +36,19 @@ from forecast_engine.config.pipeline_config import PipelineConfig
 from forecast_engine.config.ranking_config import RankingConfig
 from forecast_engine.core.databricks_secrets import apply_azure_openai_cli_overrides
 from forecast_engine.core.forecast_configuration import AggregationMethod, ForecastConfiguration
-from forecast_engine.core import storage
+from forecast_engine.core import checkpoint, storage
 from forecast_engine.core.live_status import LiveStatusWriter
 from forecast_engine.core.pipeline_context import PipelineContext, StageStatus
 from forecast_engine.core.pipeline_result import PipelineResultBuilder
-from forecast_engine.parallel.key_workflow import KeyReports, KeyWorkflowConfig
-from forecast_engine.parallel.ray_executor import execute_keys
+from forecast_engine.parallel.key_workflow import KeyWorkflowConfig
+from forecast_engine.parallel.ray_executor import StagedKeyExecution
 from forecast_engine.s01_preprocessing.data_preprocessor import DataPreprocessor
 from forecast_engine.s01_preprocessing.dataset_loader import DatasetLoader
 from forecast_engine.s01_preprocessing.frequency_detector import FrequencyDetector
 from forecast_engine.s01_preprocessing.group_generator import GroupGenerator
 from forecast_engine.s01_preprocessing.series_builder import SeriesBuilder
 from forecast_engine.s02_quality.quality_assessor import DataQualityAssessor
-from forecast_engine.s03_storage.curated_writer import CuratedDatasetWriter
+from forecast_engine.s03_storage.curated_writer import CuratedDatasetWriter, read_curated_dataset
 from forecast_engine.s03_storage.model_writer import WinningModelWriter
 from forecast_engine.s03_storage.forecast_export_writer import ForecastExportWriter
 from forecast_engine.s03_storage.artifacts_mirror_writer import ArtifactsMirrorWriter
@@ -67,6 +67,41 @@ from forecast_engine.utils.exceptions import ConfigurationError, DataQualityErro
 # 12-month horizon, extended by the platform down to 6 and up to 60).
 MIN_FORECAST_HORIZON = 6
 MAX_FORECAST_HORIZON = 60
+
+# The seven Databricks task boundaries, each a tuple of the private stage
+# methods below it runs in order. Mirrors backend/app/services/
+# pipeline_stages.py's PIPELINE_PHASES exactly (kept in sync by hand, same
+# convention as PIPELINE_STAGES — see the NAMING CONTRACT note on the class)
+# since the two packages never import each other.
+PHASE_STAGE_METHODS: dict[str, tuple[str, ...]] = {
+    "load_prepare": (
+        "_load_dataset",
+        "_detect_frequency",
+        "_assess_quality",
+        "_preprocess",
+        "_persist_curated_dataset",
+        "_verify_curated_dataset",
+    ),
+    "build_series": ("_generate_groups", "_build_series"),
+    "train_models": ("_train_models",),
+    "evaluate_models": ("_evaluate_models",),
+    "explain_models": ("_generate_explainability",),
+    "rank_select": ("_select_production_models",),
+    "publish_results": (
+        "_persist_winning_models",
+        "_export_forecasts",
+        "_generate_business_insights",
+        "_mirror_artifacts",
+        "_track_to_mlflow",
+    ),
+}
+PHASE_ORDER: tuple[str, ...] = tuple(PHASE_STAGE_METHODS)
+FIRST_PHASE = PHASE_ORDER[0]
+LAST_PHASE = PHASE_ORDER[-1]
+# Phases that resume the Ray key-execution state a prior task built —
+# Train is the first phase to touch it (builds fresh) and Publish never
+# touches it at all, so neither belongs here.
+_PHASES_RESUMING_KEY_EXECUTION = frozenset({"evaluate_models", "explain_models", "rank_select"})
 
 
 class ForecastEnginePipeline:
@@ -229,33 +264,83 @@ class ForecastEnginePipeline:
             started_by_display_name=started_by_display_name,
         )
 
+        for phase in PHASE_ORDER:
+            self.run_phase(phase, context)
+        return context
+
+    # Run one phase's stages against an existing context — the shared
+    # sequencing every entry point (run() above, and the Databricks
+    # multi-task path below) actually executes. A phase failure records the
+    # failed stage on MLflow and re-raises; the caller's context still holds
+    # everything completed before it.
+    def run_phase(self, phase: str, context: PipelineContext) -> PipelineContext:
+        methods = PHASE_STAGE_METHODS.get(phase)
+        if methods is None:
+            raise ConfigurationError(f"Unknown pipeline phase '{phase}'.")
+
         try:
-            self._load_dataset(context)
-            self._detect_frequency(context)
-            self._assess_quality(context)
-            self._preprocess(context)
-            self._persist_curated_dataset(context)
-            self._verify_curated_dataset(context)
-            self._generate_groups(context)
-            self._build_series(context)
-            self._train_models(context)
-            self._evaluate_models(context)
-            self._generate_explainability(context)
-            self._select_production_models(context)
-            self._persist_winning_models(context)
-            self._export_forecasts(context)
-            self._generate_business_insights(context)
-            self._mirror_artifacts(context)
-            self._track_to_mlflow(context)
+            for method_name in methods:
+                getattr(self, method_name)(context)
         except Exception as exc:
-            # The stage trail already records which stage failed; passing it
-            # to MLflow as a tag makes a failed run searchable by where it
-            # died, not just that it did.
             context.tracking_result = self._tracking_pipeline.fail(context.run_id, exc, _failed_stage(context))
             context.finish()
             raise
 
-        context.finish()
+        if phase == LAST_PHASE:
+            context.finish()
+        return context
+
+    # One Databricks task's slice of a run: start fresh (first phase) or
+    # resume from the previous task's checkpoint, run exactly one phase,
+    # then checkpoint the result — success or failure — so the next task (or
+    # a retry of this one) has real persisted state to resume from.
+    def run_checkpointed_stage(
+        self,
+        stage: str,
+        run_id: str,
+        dataset_path: str | Path,
+        configuration: ForecastConfiguration,
+        artifacts_root: str,
+        selected_models: list[str] | None = None,
+        fallback_model: str | None = None,
+        dataset_name: str | None = None,
+        live_status_path: str | Path | None = None,
+        started_by_user_id: str | None = None,
+        started_by_display_name: str | None = None,
+        derived_features: list[str] | None = None,
+    ) -> PipelineContext:
+        if fallback_model:
+            self._apply_fallback_model(fallback_model)
+
+        if stage == FIRST_PHASE:
+            context = PipelineContext.create(
+                dataset_path=dataset_path,
+                configuration=configuration,
+                pipeline_config=self._config,
+                run_id=run_id,
+            )
+            context.selected_models = selected_models
+            context.fallback_model = self._model_config.fallback_model
+            context.derived_features = derived_features
+            context.tracking_result = self._tracking_pipeline.begin(
+                context.run_id,
+                dataset_name or Path(dataset_path).name,
+                started_by_user_id=started_by_user_id,
+                started_by_display_name=started_by_display_name,
+            )
+        else:
+            context, snapshot = checkpoint.load(artifacts_root, run_id)
+            if snapshot is not None and stage in _PHASES_RESUMING_KEY_EXECUTION:
+                context.key_stage_executor = StagedKeyExecution.resume(self._key_workflow_config(context), snapshot)
+
+        if live_status_path is not None:
+            context.on_stage_change = LiveStatusWriter(live_status_path)
+
+        try:
+            self.run_phase(stage, context)
+        finally:
+            checkpoint.save(context, artifacts_root)
+
         return context
 
     # Override the configured fallback model for this run
@@ -391,6 +476,18 @@ class ForecastEnginePipeline:
     def _generate_groups(self, context: PipelineContext) -> None:
         record = context.begin_stage("Generate Groups")
         try:
+            # A Databricks task resuming from a checkpoint never carries the
+            # prepared DataFrame in memory (see checkpoint.save) — read it
+            # back from where Load & Prepare persisted it instead.
+            if context.prepared_dataset is None:
+                if not context.curated_dataset_uri:
+                    raise ConfigurationError(
+                        "Build Series requires a curated dataset, but none was persisted for this run."
+                    )
+                context.prepared_dataset = read_curated_dataset(
+                    context.curated_dataset_uri, context.configuration.date_column
+                )
+
             context.groups = self._group_generator.generate(
                 context.prepared_dataset, context.configuration
             )
@@ -422,35 +519,45 @@ class ForecastEnginePipeline:
             context.fail_stage(record, exc)
             raise
 
-    # Run every key's complete workflow as an independent Ray task, once
-    def _key_reports(self, context: PipelineContext) -> KeyReports:
-        if context.key_reports is None:
-            reports, telemetry = execute_keys(
-                context.series,
-                KeyWorkflowConfig(
-                    model=self._model_config,
-                    evaluation=self._evaluation_config,
-                    explainability=self._explainability_config,
-                    ranking=self._ranking_config,
-                    drift=self._drift_config,
-                    selected_models=(
-                        None if context.selected_models is None else tuple(context.selected_models)
-                    ),
-                ),
-            )
-            context.key_reports = reports
-            context.record(key_execution=telemetry)
-        return context.key_reports
+    # The immutable config every key-parallel stage shares — built from
+    # this pipeline's own collaborators plus what the run itself chose.
+    def _key_workflow_config(self, context: PipelineContext) -> KeyWorkflowConfig:
+        return KeyWorkflowConfig(
+            model=self._model_config,
+            evaluation=self._evaluation_config,
+            explainability=self._explainability_config,
+            ranking=self._ranking_config,
+            drift=self._drift_config,
+            selected_models=(None if context.selected_models is None else tuple(context.selected_models)),
+        )
 
-    # Stage 9 — train every selected model on every forecasting group
+    # One executor, shared by all four key-parallel stages below — built
+    # once so Evaluate can see Train's real per-key output, not a copy.
+    def _stage_executor(self, context: PipelineContext) -> StagedKeyExecution:
+        if context.key_stage_executor is None:
+            context.key_stage_executor = StagedKeyExecution(context.series, self._key_workflow_config(context))
+        return context.key_stage_executor
+
+    # Live task-by-task progress for one stage, while it is still running —
+    # not just its final count once every key has finished.
+    def _progress(self, context: PipelineContext, record):
+        def on_progress(_stage_name: str, telemetry: dict[str, Any]) -> None:
+            context.update_stage_progress(record, telemetry)
+
+        return on_progress
+
+    # Stage 9 — train every selected model on every forecasting group.
+    # A genuine Ray fan-out across every key when parallel; every task asks
+    # for one CPU and completes independently before this stage closes.
     def _train_models(self, context: PipelineContext) -> None:
         record = context.begin_stage("Train Models")
         try:
             # Individual training failures are captured in the report rather
             # than raised, so one bad key or model never ends the run. Only
             # a configuration fault (unknown model, broken adapter) propagates.
+            telemetry = None
             if self._parallel_keys:
-                report = self._key_reports(context).training
+                report, telemetry = self._stage_executor(context).run_training(self._progress(context, record))
             else:
                 report = self._trainer.train_all(context.series, context.selected_models)
             context.training_report = report
@@ -466,20 +573,24 @@ class ForecastEnginePipeline:
                 f"{report.trained_count:,} trained, {report.failed_count:,} failed, "
                 f"{report.skipped_count:,} skipped, {report.unavailable_count:,} unavailable "
                 f"across {report.groups_trained:,} group(s).",
+                measured_seconds=telemetry["wall_seconds"] if telemetry else report.duration_seconds,
+                parallel_tasks=telemetry,
             )
         except ForecastEngineError as exc:
             context.fail_stage(record, exc)
             raise
 
-    # Stage 10 — backtest, forecast forward and eliminate
+    # Stage 10 — backtest, forecast forward and eliminate. A genuine Ray
+    # fan-out of its own, depending only on Train's real per-key output.
     def _evaluate_models(self, context: PipelineContext) -> None:
         record = context.begin_stage("Evaluate Models")
         try:
             # Produces the surviving-model set that ranking consumes.
             # Individual (group, model) failures are captured in the report
             # rather than raised, so one bad pair never ends the run.
+            telemetry = None
             if self._parallel_keys:
-                report = self._key_reports(context).evaluation
+                report, telemetry = self._stage_executor(context).run_evaluation(self._progress(context, record))
             else:
                 trained = context.training_report.trained_models() if context.training_report else []
                 report = self._evaluator.evaluate_all(context.series, trained)
@@ -490,9 +601,14 @@ class ForecastEnginePipeline:
                 models_eliminated=report.eliminated_count,
                 models_evaluation_failed=report.failed_count,
             )
+            # This stage's own real Ray fan-out, timed at its own
+            # orchestration boundary — not the driver clock of a different
+            # stage, and not another stage's task durations reused here.
             context.complete_stage(
                 record,
-                f"{report.survived_count:,} survived, {report.eliminated_count:,} eliminated, "
+                measured_seconds=telemetry["wall_seconds"] if telemetry else report.duration_seconds,
+                parallel_tasks=telemetry,
+                detail=f"{report.survived_count:,} survived, {report.eliminated_count:,} eliminated, "
                 f"{report.failed_count:,} failed across {report.groups_evaluated:,} group(s). "
                 f"{report.model_fit_count:,} model fit(s) "
                 f"({report.backtest_windows_evaluated:,} backtest fold(s) "
@@ -505,7 +621,8 @@ class ForecastEnginePipeline:
             context.fail_stage(record, exc)
             raise
 
-    # Stage 11 — SHAP / feature importance generation (Section 6.10)
+    # Stage 11 — SHAP / feature importance generation (Section 6.10). A
+    # genuine Ray fan-out depending only on Evaluate's real per-key output.
     def _generate_explainability(self, context: PipelineContext) -> None:
         # Runs on every surviving (group, model) pair, strictly before Model
         # Ranking — its output is one of Ranking's composite inputs. Per-pair
@@ -514,22 +631,28 @@ class ForecastEnginePipeline:
         # rest of its group.
         record = context.begin_stage("Explain Models")
         try:
+            telemetry = None
             if self._parallel_keys:
-                report = self._key_reports(context).explainability
+                report, telemetry = self._stage_executor(context).run_explainability(self._progress(context, record))
             else:
                 trained = context.training_report.trained_models() if context.training_report else []
                 report = self._explainability_generator.generate_all(context.evaluation_report, trained, context.series)
             context.explainability_report = report
 
             context.record(explainability_results=len(report.results))
+            # This stage's own real Ray fan-out — see Evaluate Models above.
             context.complete_stage(
-                record, f"Explainability generated for {len(report.results):,} surviving model(s)."
+                record,
+                measured_seconds=telemetry["wall_seconds"] if telemetry else report.duration_seconds,
+                parallel_tasks=telemetry,
+                detail=f"Explainability generated for {len(report.results):,} surviving model(s).",
             )
         except ForecastEngineError as exc:
             context.fail_stage(record, exc)
             raise
 
-    # Stage 12 — rank survivors and select each group's production model
+    # Stage 12 — rank survivors and select each group's production model.
+    # A genuine Ray fan-out depending only on Explain's real per-key output.
     def _select_production_models(self, context: PipelineContext) -> None:
         record = context.begin_stage("Rank & Select")
         try:
@@ -538,9 +661,11 @@ class ForecastEnginePipeline:
             # Selection each isolate failure at their own grain (per group);
             # a configuration-level fault is the only thing that reaches
             # this try/except.
+            telemetry = None
             if self._parallel_keys:
-                key_reports = self._key_reports(context)
-                ranking_report, selection_report = key_reports.ranking, key_reports.selection
+                ranking_report, selection_report, telemetry = self._stage_executor(context).run_rank_select(
+                    self._progress(context, record)
+                )
             else:
                 ranking_report, selection_report = self._production_selector.run(
                     context.evaluation_report, context.explainability_report, context.series
@@ -553,9 +678,17 @@ class ForecastEnginePipeline:
                 models_fallback_used=selection_report.fallback_count,
                 groups_with_no_model_available=selection_report.unavailable_count,
             )
+            # "Rank & Select" is one UI stage over two reports (ranking,
+            # then final selection); their measured durations are summed so
+            # the displayed time covers both rather than only the second —
+            # this stage's own real Ray fan-out when parallel.
+            ranking_seconds = getattr(ranking_report, "duration_seconds", None) or 0.0
+            selection_seconds = getattr(selection_report, "duration_seconds", None) or 0.0
             context.complete_stage(
                 record,
-                f"{selection_report.selected_count:,} selected, {selection_report.fallback_count:,} used "
+                measured_seconds=telemetry["wall_seconds"] if telemetry else ranking_seconds + selection_seconds,
+                parallel_tasks=telemetry,
+                detail=f"{selection_report.selected_count:,} selected, {selection_report.fallback_count:,} used "
                 f"the fallback model, {selection_report.unavailable_count:,} had no model available "
                 f"across {len(selection_report.results):,} group(s).",
             )
@@ -877,6 +1010,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "omit to run every key sequentially in one process."
         ),
     )
+    parser.add_argument(
+        "--stage",
+        choices=PHASE_ORDER,
+        default=None,
+        help=(
+            "Run only this phase as one Databricks task, resuming from --run-id's checkpoint "
+            "(the first phase starts fresh instead). Omit to run the full pipeline in one process."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -938,18 +1080,38 @@ def main(argv: list[str] | None = None) -> int:
             model_config=model_config,
             parallel_keys=args.parallel_keys,
         )
-        context = pipeline.run(
-            args.dataset,
-            configuration,
-            run_id=args.run_id,
-            selected_models=args.models,
-            fallback_model=args.fallback_model,
-            dataset_name=args.dataset_name,
-            live_status_path=args.live_status_out,
-            started_by_user_id=args.started_by_user_id,
-            started_by_display_name=args.started_by_display_name,
-            derived_features=args.derived_features,
-        )
+        if args.stage:
+            # One Databricks task's phase — resumes from --run-id's
+            # checkpoint under the same artifacts root every other run
+            # output already lives under, never a hardcoded path.
+            artifacts_root = (pipeline_config or PipelineConfig.default()).artifacts_mirror.root_dir
+            context = pipeline.run_checkpointed_stage(
+                args.stage,
+                run_id=args.run_id,
+                dataset_path=args.dataset,
+                configuration=configuration,
+                artifacts_root=artifacts_root,
+                selected_models=args.models,
+                fallback_model=args.fallback_model,
+                dataset_name=args.dataset_name,
+                live_status_path=args.live_status_out,
+                started_by_user_id=args.started_by_user_id,
+                started_by_display_name=args.started_by_display_name,
+                derived_features=args.derived_features,
+            )
+        else:
+            context = pipeline.run(
+                args.dataset,
+                configuration,
+                run_id=args.run_id,
+                selected_models=args.models,
+                fallback_model=args.fallback_model,
+                dataset_name=args.dataset_name,
+                live_status_path=args.live_status_out,
+                started_by_user_id=args.started_by_user_id,
+                started_by_display_name=args.started_by_display_name,
+                derived_features=args.derived_features,
+            )
     except ForecastEngineError as exc:
         print(f"Forecast Engine failed: {exc}", file=sys.stderr)
         return 1

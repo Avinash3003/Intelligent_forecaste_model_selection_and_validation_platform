@@ -69,7 +69,7 @@ def settings(tmp_path):
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="test-token",
-        databricks_volumes_root="/Volumes/forecastiq/forecasting/forecast_files",
+        databricks_uploads_volumes_root="/Volumes/forecastiq/forecasting/upload_files",
         upload_dir=str(tmp_path / "uploads"),
         mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
     )
@@ -102,7 +102,7 @@ def _request(dataset):
 
 def _complete_run(runner: DatabricksRunner, workspace: _CountingWorkspace, dataset) -> str:
     run_id = runner.submit(_request(dataset))
-    root = f"/Volumes/forecastiq/forecasting/forecast_files/runs/{run_id}"
+    root = f"/Volumes/forecastiq/forecasting/artifacts_files/runs/{run_id}"
     workspace.files.uploaded[f"{root}/summary.json"] = json.dumps(
         {
             "run_id": run_id,

@@ -25,7 +25,7 @@ import logging
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -114,14 +114,38 @@ def _require_compute(compute: Any) -> Any:
     return compute
 
 
-# The engine CLI arguments a submitted run passes to the wheel entry point.
-def _engine_parameters(parameters: dict[str, str]) -> list[str]:
+# The seven Databricks task boundaries, in dependency order. Mirrors
+# forecast_engine/run_pipeline.py's PHASE_ORDER exactly — kept in sync by
+# hand, since the two packages are process-isolated and never import each
+# other (same convention as this file's NAMING CONTRACT for stage names).
+# Each task_key doubles as the --stage value its wheel task is invoked
+# with, so the DAG node Databricks shows and the phase the engine actually
+# runs can never drift apart.
+# Tags a cluster this app created for one run — never a real user's
+# all-purpose cluster. compute_service excludes it from Existing Compute.
+RUN_CLUSTER_TAG = "forecastiq_run_id"
+
+TASK_KEYS: tuple[str, ...] = (
+    "load_prepare",
+    "build_series",
+    "train_models",
+    "evaluate_models",
+    "explain_models",
+    "rank_select",
+    "publish_results",
+)
+
+
+
+# The engine CLI arguments one task passes to the wheel entry point.
+def _engine_parameters(parameters: dict[str, str], stage: str) -> list[str]:
     return [
         "--dataset", parameters["dataset"],
         "--config", parameters["config"],
         "--summary-out", parameters["summary_out"],
         "--live-status-out", parameters["live_status_out"],
         "--parallel-keys",
+        "--stage", stage,
     ]
 
 
@@ -174,6 +198,14 @@ class _DatabricksJobRecord:
     started_at: str
     dataset_name: str | None = None
     databricks_run_id: int | None = None
+    databricks_run_url: str | None = None
+    # Distinguishes "never tried" from "tried and Databricks had nothing
+    # to give" — a plain `databricks_run_url is None` check cannot tell
+    # those apart, which meant a run whose URL genuinely never resolves
+    # (an SDK response with no run_page_url at all) triggered a fresh
+    # jobs.get_run() call on every single poll forever, even long after
+    # the run went terminal.
+    databricks_run_url_attempted: bool = False
     dataset_uri: str | None = None
     summary_uri: str | None = None
     live_status_uri: str | None = None
@@ -190,6 +222,12 @@ class _DatabricksJobRecord:
     # paths follow. Held here because cancellation has to delete exactly
     # what the run wrote, long after the request that chose it is gone.
     uses_container: bool = False
+    # Set only when this run created its own cluster for new_job_compute
+    # (see _create_shared_cluster) — never for the user's own existing
+    # cluster. Terminated once the run goes terminal (_maybe_terminate_
+    # managed_cluster); this flag stops that from being attempted twice.
+    managed_cluster_id: str | None = None
+    managed_cluster_terminated: bool = False
 
 
 class DatabricksRunner(PipelineRunner):
@@ -363,7 +401,7 @@ class DatabricksRunner(PipelineRunner):
         run_id = record.run_id
         try:
             dataset_uri = self._upload_data_to_storage(run_id, request)
-            databricks_run_id = self._trigger_databricks_job(run_id, request, dataset_uri)
+            databricks_run_id, managed_cluster_id = self._trigger_databricks_job(run_id, request, dataset_uri)
         except ExecutionError as exc:
             with self._lock:
                 record.status = JobStatus.FAILED
@@ -380,10 +418,36 @@ class DatabricksRunner(PipelineRunner):
 
         with self._lock:
             record.dataset_uri = dataset_uri
-            run_root = self._run_root(run_id, record.uses_container)
-            record.summary_uri = f"{run_root}/summary.json"
-            record.live_status_uri = f"{run_root}/live_status.json"
+            run_artifacts_root = f"{self._artifacts_root(record.uses_container)}/{run_id}"
+            record.summary_uri = f"{run_artifacts_root}/summary.json"
+            record.live_status_uri = f"{run_artifacts_root}/live_status.json"
             record.databricks_run_id = databricks_run_id
+            record.managed_cluster_id = managed_cluster_id
+
+        # A breadcrumb, not the source of truth: the in-memory record above
+        # is that, but it does not survive a process restart, and MLflow
+        # only has a run to restore once the engine's own tracking_pipeline
+        # has started inside the job (see _DatabricksJobRecord's docstring).
+        # A run still queued or booting compute at the moment of a restart
+        # falls in the gap between those two — this is what closes it,
+        # cheaply, once, right after Databricks has actually accepted the
+        # submission.
+        try:
+            self._upload_run_file(
+                f"{run_artifacts_root}/registry.json",
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "databricks_run_id": databricks_run_id,
+                        "started_at": record.started_at,
+                        "dataset_name": record.dataset_name,
+                        "started_by_user_id": record.started_by_user_id,
+                        "started_by_display_name": record.started_by_display_name,
+                    }
+                ).encode("utf-8"),
+            )
+        except Exception:  # noqa: BLE001 - a missing breadcrumb only narrows recovery, never fails the run
+            logger.warning("Could not write the run registry breadcrumb for %s", run_id)
 
     def get_status(self, run_id: str) -> JobStatus:
         record = self._find_job(run_id)
@@ -483,7 +547,71 @@ class DatabricksRunner(PipelineRunner):
         if record is not None:
             self._refresh(record)
             return self._to_listing(record)
-        return self._history.get_listing(run_id, with_stages=True)
+
+        listing = self._history.get_listing(run_id, with_stages=True)
+        # One live call, bounded to a single-run detail read (never
+        # list_runs): a listing rebuilt from MLflow history after a backend
+        # restart knows its Databricks run id from the run's own tag but
+        # has no resolved run_page_url yet.
+        if listing is not None and listing.databricks_run_id is not None and listing.databricks_run_url is None:
+            listing.databricks_run_url = self._run_page_url(listing.databricks_run_id)
+        if listing is not None:
+            return listing
+
+        # Neither the in-memory record nor MLflow has this run: a restart
+        # landed in the gap between "Databricks accepted the submission"
+        # and "the engine's own tracking_pipeline logged the MLflow run" —
+        # queued or still booting compute. The registry breadcrumb written
+        # right after submission is the only thing left that knows this run
+        # exists, so recover from it with one bounded live Jobs API call.
+        return self._reconstruct_listing_from_registry(run_id)
+
+    def _reconstruct_listing_from_registry(self, run_id: str) -> RunListing | None:
+        registry = self._read_volume_json(f"{self._artifacts_root(False)}/{run_id}/registry.json")
+        if registry is None:
+            return None
+
+        databricks_run_id = registry.get("databricks_run_id")
+        if not isinstance(databricks_run_id, int):
+            return None
+
+        try:
+            status, error, duration = self._monitor_job_status(databricks_run_id)
+        except ExecutionError as exc:
+            return RunListing(
+                run_id=run_id,
+                dataset_name=registry.get("dataset_name"),
+                job_status=JobStatus.FAILED,
+                execution_backend=self._execution_backend,
+                started_at=registry.get("started_at") or _now_iso(),
+                completed_at=None,
+                duration_seconds=None,
+                error=safe_detail(exc),
+                databricks_run_id=databricks_run_id,
+                databricks_run_url=self._run_page_url(databricks_run_id),
+                started_by=registry.get("started_by_display_name"),
+                cancelled_by=None,
+                stages=[],
+            )
+
+        return RunListing(
+            run_id=run_id,
+            dataset_name=registry.get("dataset_name"),
+            job_status=status,
+            execution_backend=self._execution_backend,
+            started_at=registry.get("started_at") or _now_iso(),
+            # Unknown, not fabricated: _monitor_job_status reports duration
+            # but not a completion timestamp, and a guessed "now" would be
+            # wrong by however long this recovery path took to run.
+            completed_at=None,
+            duration_seconds=duration,
+            error=error,
+            databricks_run_id=databricks_run_id,
+            databricks_run_url=self._run_page_url(databricks_run_id),
+            started_by=registry.get("started_by_display_name"),
+            cancelled_by=None,
+            stages=[],
+        )
 
     def cancel(
         self,
@@ -522,6 +650,7 @@ class DatabricksRunner(PipelineRunner):
             record.completed_at = cancelled_at
             record.cancelled_by_user_id = cancelled_by_user_id
             record.cancelled_by_display_name = cancelled_by_display_name
+        self._maybe_terminate_managed_cluster(record)
 
         # Requesting cancellation and the job actually stopping are not the
         # same instant — Databricks gives no synchronous "wait until fully
@@ -549,10 +678,12 @@ class DatabricksRunner(PipelineRunner):
         """
         errors: list[str] = []
         for label, path in (
-            ("uploaded dataset/config/status", self._run_root(run_id, uses_container)),
+            ("uploaded dataset", self._run_root(run_id, uses_container)),
             ("curated dataset", f"{self._curated_root(run_id, uses_container)}/{run_id}"),
             ("trained models", f"{self._models_root(uses_container)}/{run_id}"),
-            ("mirrored artifacts", f"{self._artifacts_root(uses_container)}/{run_id}"),
+            # Covers config, summary, live status and the registry
+            # breadcrumb too — all under this same per-run folder now.
+            ("run artifacts", f"{self._artifacts_root(uses_container)}/{run_id}"),
         ):
             try:
                 self._delete_volume_directory(path)
@@ -600,8 +731,8 @@ class DatabricksRunner(PipelineRunner):
     # ------------------------------------------------------------------
 
     def _upload_data_to_storage(self, run_id: str, request: PipelineExecutionRequest) -> str:
-        """Stage the dataset and run config in the volume, under one per-run
-        directory so cleanup is a single delete.
+        """Stage the original dataset in the uploads volume, and the run's
+        config alongside its other artifacts — never in uploads.
 
         Returns the staged dataset's volume path, which the job passes to --dataset.
         """
@@ -610,9 +741,8 @@ class DatabricksRunner(PipelineRunner):
             raise ExecutionError("The dataset for this run could not be found. Please upload it again.")
 
         uses_container = self._uses_container_image(request.compute)
-        run_root = self._run_root(run_id, uses_container)
-        dataset_uri = f"{run_root}/{source.name}"
-        config_uri = f"{run_root}/forecast_configuration.json"
+        dataset_uri = f"{self._run_root(run_id, uses_container)}/{source.name}"
+        config_uri = f"{self._artifacts_root(uses_container)}/{run_id}/forecast_configuration.json"
 
         try:
             self._upload_run_file(dataset_uri, source.read_bytes())
@@ -675,37 +805,6 @@ class DatabricksRunner(PipelineRunner):
         # inert without being deleted, and a single revert here restores it.
         return payload
 
-    def _volume_sync_targets(self, run_id: str) -> list[dict[str, str]]:
-        """Where a container run's outputs have to be copied to.
-
-        Every pair is one logical location resolved twice by the very same
-        helper — once under the workspace layout the container can write,
-        once under the UC Volume layout the storage account is behind — so
-        the two can never drift apart as the layout changes.
-        """
-        return [
-            {
-                "source": self._run_root(run_id, True),
-                "destination": self._run_root(run_id, False),
-            },
-            {
-                "source": f"{self._curated_root(run_id, True)}/{run_id}",
-                "destination": f"{self._curated_root(run_id, False)}/{run_id}",
-            },
-            {
-                "source": f"{self._models_root(True)}/{run_id}",
-                "destination": f"{self._models_root(False)}/{run_id}",
-            },
-            {
-                "source": f"{self._artifacts_root(True)}/{run_id}",
-                "destination": f"{self._artifacts_root(False)}/{run_id}",
-            },
-            {
-                "source": f"{self._forecasts_root(True)}/{run_id}_forecast.csv",
-                "destination": f"{self._forecasts_root(False)}/{run_id}_forecast.csv",
-            },
-        ]
-
     # The engine writes its outputs to four further roots. Under DCS these
     # cannot be UC Volumes either — the container has no `uc-volumes` scheme
     # handler at all, so every one of them fails the same way the run root
@@ -737,32 +836,52 @@ class DatabricksRunner(PipelineRunner):
 
     def _trigger_databricks_job(
         self, run_id: str, request: PipelineExecutionRequest, dataset_uri: str
-    ) -> int:
-        """Submit the engine wheel to the compute the user selected."""
+    ) -> tuple[int, str | None]:
+        """Submit one Databricks Job Run containing all seven pipeline
+        tasks, wired load_prepare -> build_series -> train_models ->
+        evaluate_models -> explain_models -> rank_select -> publish_results
+        via depends_on — so Databricks' own Jobs UI renders the real
+        workflow graph, not just this app's.
+
+        Ray parallelism stays entirely inside train/evaluate/explain/
+        rank_select's own tasks (see forecast_engine.parallel.ray_executor):
+        the DAG below is the orchestration graph, never one Databricks task
+        per forecast key.
+        """
         compute = _require_compute(request.compute)
-        run_root = self._run_root(run_id, self._uses_container_image(compute))
+        uses_container = self._uses_container_image(compute)
+        run_artifacts_root = f"{self._artifacts_root(uses_container)}/{run_id}"
         parameters = {
             "dataset": dataset_uri,
-            "config": f"{run_root}/forecast_configuration.json",
-            "summary_out": f"{run_root}/summary.json",
-            "live_status_out": f"{run_root}/live_status.json",
+            "config": f"{run_artifacts_root}/forecast_configuration.json",
+            "summary_out": f"{run_artifacts_root}/summary.json",
+            "live_status_out": f"{run_artifacts_root}/live_status.json",
         }
 
         compute_sdk, jobs_sdk = _databricks_service_modules()
-        task = jobs_sdk.SubmitTask(
-            task_key="forecast_pipeline",
-            python_wheel_task=jobs_sdk.PythonWheelTask(
-                package_name="forecast_engine",
-                entry_point="forecast-engine",
-                parameters=_engine_parameters(parameters),
-            ),
-            libraries=self._engine_libraries(compute_sdk),
-        )
-        self._attach_compute(task, run_id, compute, compute_sdk)
+        cluster_id, managed_cluster_id = self._resolve_shared_cluster(run_id, compute, compute_sdk)
+        libraries = self._engine_libraries(compute_sdk)
+
+        tasks = []
+        for index, task_key in enumerate(TASK_KEYS):
+            task = jobs_sdk.SubmitTask(
+                task_key=task_key,
+                depends_on=(
+                    [jobs_sdk.TaskDependency(task_key=TASK_KEYS[index - 1])] if index > 0 else None
+                ),
+                existing_cluster_id=cluster_id,
+                python_wheel_task=jobs_sdk.PythonWheelTask(
+                    package_name="forecast_engine",
+                    entry_point="forecast-engine",
+                    parameters=_engine_parameters(parameters, task_key),
+                ),
+                libraries=libraries,
+            )
+            tasks.append(task)
 
         try:
-            submitted = self._workspace.jobs.submit(run_name=f"forecastiq-{run_id}", tasks=[task])
-            return int(submitted.run_id)
+            submitted = self._submit_shared(jobs_sdk, run_id, tasks)
+            return int(submitted.run_id), managed_cluster_id
         except ExecutionError:
             raise
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
@@ -770,19 +889,86 @@ class DatabricksRunner(PipelineRunner):
                 safe_detail(exc, fallback="The forecast could not be started on the selected compute.")
             ) from exc
 
-    # The selected compute is the compute that runs; there is no fallback.
-    def _attach_compute(self, task: Any, run_id: str, compute: Any, compute_sdk: Any) -> None:
+    # One cluster, shared by every task — this SDK's jobs.submit() (a
+    # one-time run) has no job_clusters/job_cluster_key support at all
+    # (confirmed against the installed databricks-sdk: SubmitTask has no
+    # such field, and JobsAPI.submit() takes no such parameter — that
+    # exists only for jobs.create()'s persistent job definitions). For
+    # existing_compute the user's own cluster already is that one cluster.
+    # For new_job_compute, a real cluster is created here — once, before
+    # any task references it by existing_cluster_id — instead of letting
+    # each of the seven tasks boot (and pay for) its own.
+    #
+    # Returns (cluster_id, managed_cluster_id): the second is only set when
+    # this call created the cluster, so the caller knows to terminate it
+    # once the run finishes — never set for the user's own existing cluster.
+    def _resolve_shared_cluster(self, run_id: str, compute: Any, compute_sdk: Any) -> tuple[str, str | None]:
         if compute.mode == "existing_compute":
-            task.existing_cluster_id = compute.cluster_id
-        else:
-            task.new_cluster = self._new_cluster_spec(run_id, compute.job_compute, compute_sdk)
+            return compute.cluster_id, None
+        cluster_id = self._create_shared_cluster(run_id, compute.job_compute, compute_sdk)
+        return cluster_id, cluster_id
+
+    # A real, ordinary cluster — not a "job cluster" construct, since one-time
+    # submitted runs have no such thing — created and left to run every one
+    # of the seven tasks, then torn down once the run reaches a terminal
+    # state (see _terminate_managed_cluster). autotermination is the backstop
+    # if that teardown is ever missed.
+    _MANAGED_CLUSTER_AUTOTERMINATE_MINUTES = 15
+
+    def _create_shared_cluster(self, run_id: str, config: Any, compute_sdk: Any) -> str:
+        spec = self._new_cluster_spec(run_id, config, compute_sdk)
+        spec.cluster_name = f"forecastiq-{run_id}"
+        spec.autotermination_minutes = self._MANAGED_CLUSTER_AUTOTERMINATE_MINUTES
+        # Blocks until the cluster is actually RUNNING. Submitting tasks
+        # against a not-yet-running cluster works, but Databricks then
+        # counts the whole boot wait as load_prepare's own task duration —
+        # this waits here instead, on the already-async staging thread, so
+        # every task's reported time is its real work, not compute startup.
+        kwargs = {f.name: getattr(spec, f.name) for f in fields(spec)}
+        cluster = self._workspace.clusters.create(**kwargs).result()
+        return cluster.cluster_id
+
+    # Every run is a shared enterprise resource, not a personal one: whoever
+    # submits it, the same three role groups can see it in Databricks
+    # afterwards — the same visibility a persistent, permanently-shared job
+    # would give, without giving up per-run compute selection (a real,
+    # already-shipped feature a single static job's fixed task spec cannot
+    # express — Databricks has no per-run-now cluster override).
+    # `jobs.submit()` accepts an access_control_list on the one-time-run job
+    # it creates, so this is one atomic call, not a submit-then-share race.
+    def _submit_shared(self, jobs_sdk: Any, run_id: str, tasks: list[Any]) -> Any:
+        acl = self._shared_run_acl(jobs_sdk)
+        if acl:
+            try:
+                return self._workspace.jobs.submit(
+                    run_name=f"forecastiq-{run_id}", tasks=tasks, access_control_list=acl
+                )
+            except Exception as exc:  # noqa: BLE001 - sharing must never block the run itself
+                logger.warning(
+                    "Could not share run %s with the ForecastIQ groups at submit time: %s",
+                    run_id,
+                    safe_detail(exc),
+                )
+        return self._workspace.jobs.submit(run_name=f"forecastiq-{run_id}", tasks=tasks)
+
+    def _shared_run_acl(self, jobs_sdk: Any) -> list[Any]:
+        groups = [
+            (self._settings.databricks_admins_group, jobs_sdk.JobPermissionLevel.CAN_MANAGE),
+            (self._settings.databricks_datascientists_group, jobs_sdk.JobPermissionLevel.CAN_VIEW),
+            (self._settings.databricks_analysts_group, jobs_sdk.JobPermissionLevel.CAN_VIEW),
+        ]
+        return [
+            jobs_sdk.JobAccessControlRequest(group_name=group_name, permission_level=level)
+            for group_name, level in groups
+            if (group_name or "").strip()
+        ]
 
     def _new_cluster_spec(self, run_id: str, config: Any, compute_sdk: Any) -> Any:
         cluster = compute_sdk.ClusterSpec(
             spark_version=config.runtime_key,
             node_type_id=config.node_type_id,
             data_security_mode=compute_sdk.DataSecurityMode.SINGLE_USER,
-            custom_tags={"forecastiq_run_id": run_id},
+            custom_tags={RUN_CLUSTER_TAG: run_id},
         )
         self._attach_docker_image(cluster, compute_sdk)
 
@@ -856,6 +1042,18 @@ class DatabricksRunner(PipelineRunner):
     def _engine_libraries(self, compute_sdk: Any) -> list[Any]:
         wheel = (self._settings.databricks_engine_wheel_path or "").strip()
         return [compute_sdk.Library(whl=wheel)] if wheel else []
+
+    def _run_page_url(self, databricks_run_id: int) -> str | None:
+        """Databricks' own link to the run page, or None.
+
+        Read from the API rather than assembled from a host and ids: the
+        shape differs between a job run and a submitted run, and a guessed
+        URL 404s for the user who trusted it.
+        """
+        try:
+            return getattr(self._workspace.jobs.get_run(run_id=databricks_run_id), "run_page_url", None)
+        except Exception:  # noqa: BLE001 - a missing link must never fail a poll
+            return None
 
     def _monitor_job_status(self, databricks_run_id: int) -> tuple[JobStatus, str | None, float | None]:
         """Poll one run: returns its JobStatus, a safe error message, and duration."""
@@ -946,9 +1144,9 @@ class DatabricksRunner(PipelineRunner):
     def _uses_container_image(self, compute: Any) -> bool:
         """Whether *this run* executes inside the custom container image.
 
-        The image is attached to a job cluster this runner creates, and to
-        nothing else — see _attach_compute. An existing-compute run
-        therefore executes on whatever runtime that cluster already has,
+        The image is attached to the cluster this runner creates for
+        new_job_compute, and to nothing else — see _create_shared_cluster.
+        An existing-compute run therefore executes on whatever runtime that cluster already has,
         with a working UC Volumes mount, no matter what
         DATABRICKS_DOCKER_IMAGE_URL is set to.
 
@@ -961,7 +1159,9 @@ class DatabricksRunner(PipelineRunner):
         return bool((self._settings.databricks_docker_image_url or "").strip())
 
     def _run_root(self, run_id: str, uses_container: bool) -> str:
-        """One directory per run, holding its dataset, config and output.
+        """One directory per run, holding ONLY its original uploaded
+        dataset — config, summary, status and every other artifact live
+        under `_artifacts_root` instead, never here.
 
         Always a UC Volume, for both execution modes. The container's lack
         of a `/Volumes` POSIX mount is handled where it belongs — in
@@ -973,7 +1173,7 @@ class DatabricksRunner(PipelineRunner):
         old workspace-staging branch is kept one revert away while both
         execution modes are being proven end to end.
         """
-        root = f"{self._settings.databricks_volumes_root.rstrip('/')}/runs"
+        root = f"{self._settings.databricks_uploads_volumes_root.rstrip('/')}/runs"
         return f"{root.rstrip('/')}/{run_id}"
 
     # Workspace files and UC Volumes are different APIs on the same client.
@@ -1009,9 +1209,33 @@ class DatabricksRunner(PipelineRunner):
         Called on read rather than from a polling thread, so a backend with
         many historical runs does no background work.
         """
-        if record.status not in (JobStatus.PENDING, JobStatus.RUNNING):
-            return
         if record.databricks_run_id is None:
+            return
+
+        # Resolved unconditionally, even for an already-terminal record.
+        # This used to sit behind the same PENDING/RUNNING gate as the
+        # status poll below, which meant a run that finished before the
+        # frontend's first poll ever observed it in a non-terminal state
+        # — e.g. Existing Compute against an already-warm cluster, fast
+        # enough to complete inside one 3-second poll interval — got a
+        # `databricks_run_url` that stayed None forever: nothing ever
+        # fetched it, because the very next call hit the early return
+        # below before reaching this line. The frontend then rendered no
+        # "Open with Databricks" button at all for such a run — never a
+        # broken link, just a silently missing one.
+        #
+        # Attempted exactly once: `databricks_run_url_attempted` is set
+        # regardless of the outcome, so a genuinely absent URL (the SDK
+        # response carried none) is remembered as "checked, nothing there"
+        # rather than retried on every later poll — which is what a bare
+        # `databricks_run_url is None` check did, and is exactly the
+        # per-poll Jobs API call this method exists to avoid for a
+        # terminal run.
+        if not record.databricks_run_url_attempted:
+            record.databricks_run_url = self._run_page_url(record.databricks_run_id)
+            record.databricks_run_url_attempted = True
+
+        if record.status not in (JobStatus.PENDING, JobStatus.RUNNING):
             return
 
         try:
@@ -1038,6 +1262,27 @@ class DatabricksRunner(PipelineRunner):
             if status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED) and not record.completed_at:
                 record.completed_at = _now_iso()
 
+        if status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            self._maybe_terminate_managed_cluster(record)
+
+    # The cluster this run created for itself (new_job_compute only — see
+    # _create_shared_cluster) has no job to auto-terminate it when the run's
+    # tasks finish, unlike a real job cluster. autotermination_minutes is
+    # the backstop; this is the prompt path, tried once per run.
+    def _maybe_terminate_managed_cluster(self, record: _DatabricksJobRecord) -> None:
+        if record.managed_cluster_id is None or record.managed_cluster_terminated:
+            return
+        record.managed_cluster_terminated = True
+        try:
+            self._workspace.clusters.delete(cluster_id=record.managed_cluster_id)
+        except Exception as exc:  # noqa: BLE001 - the autotermination backstop still applies
+            logger.warning(
+                "Could not terminate the cluster created for run %s (%s): %s",
+                record.run_id,
+                record.managed_cluster_id,
+                safe_detail(exc),
+            )
+
     def _to_listing(self, record: _DatabricksJobRecord) -> RunListing:
         stages = record.stages
         if record.summary is not None:
@@ -1051,6 +1296,7 @@ class DatabricksRunner(PipelineRunner):
             completed_at=record.completed_at,
             duration_seconds=record.duration_seconds,
             error=record.error,
+            databricks_run_url=record.databricks_run_url,
             started_by=record.started_by_display_name,
             cancelled_by=record.cancelled_by_display_name,
             stages=stages,

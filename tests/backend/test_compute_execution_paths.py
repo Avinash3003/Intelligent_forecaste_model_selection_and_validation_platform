@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config.settings import Settings
-from app.orchestration.databricks_runner import DatabricksRunner
+from app.orchestration.databricks_runner import TASK_KEYS, DatabricksRunner
 from app.orchestration.exceptions import ExecutionError
 from app.orchestration.schemas import PipelineExecutionRequest
 from app.schemas.compute import ComputeSelection, JobComputeConfig
@@ -35,8 +35,10 @@ class _FakeJobs:
     def __init__(self) -> None:
         self.submit_calls: list[dict] = []
 
-    def submit(self, run_name=None, tasks=None):
-        self.submit_calls.append({"run_name": run_name, "tasks": tasks})
+    def submit(self, run_name=None, tasks=None, access_control_list=None):
+        self.submit_calls.append(
+            {"run_name": run_name, "tasks": tasks, "access_control_list": access_control_list}
+        )
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):
@@ -44,6 +46,28 @@ class _FakeJobs:
             state=SimpleNamespace(life_cycle_state="RUNNING", result_state=None, state_message=""),
             run_duration=1,
         )
+
+
+class _FakeClusters:
+    """Stands in for the real Clusters API — jobs.submit() (a one-time run)
+    has no job_clusters/job_cluster_key support in the installed SDK, so a
+    new_job_compute run creates one real cluster here and every task
+    attaches to it by existing_cluster_id (see _create_shared_cluster)."""
+
+    def __init__(self) -> None:
+        self.create_calls: list[dict] = []
+        self.created_ids: list[str] = []
+        self.deleted_ids: list[str] = []
+
+    def create(self, **kwargs):
+        cluster_id = f"managed-cluster-{len(self.create_calls)}"
+        self.create_calls.append(kwargs)
+        self.created_ids.append(cluster_id)
+        details = SimpleNamespace(cluster_id=cluster_id)
+        return SimpleNamespace(response=details, result=lambda timeout=None: details)
+
+    def delete(self, cluster_id=None):
+        self.deleted_ids.append(cluster_id)
 
 
 class _FakeWorkspaceFiles:
@@ -84,6 +108,7 @@ class _FakeWorkspace:
     def __init__(self) -> None:
         self.files = _FakeFiles()
         self.jobs = _FakeJobs()
+        self.clusters = _FakeClusters()
         self.current_user = _FakeCurrentUser()
         self.workspace = _FakeWorkspaceFiles()
 
@@ -120,8 +145,22 @@ def _request(dataset: Path, compute) -> PipelineExecutionRequest:
     )
 
 
+def _submitted_tasks(workspace):
+    return workspace.jobs.submit_calls[0]["tasks"]
+
+
 def _submitted_task(workspace):
-    return workspace.jobs.submit_calls[0]["tasks"][0]
+    """The first DAG task (Load & Prepare). Every task in a run shares the
+    same existing_cluster_id, so this is enough for compute-attachment
+    assertions — the cluster spec itself now lives in what was passed to
+    clusters.create() (_submitted_job_cluster), not on any one task."""
+    return _submitted_tasks(workspace)[0]
+
+
+def _submitted_job_cluster(workspace):
+    calls = workspace.clusters.create_calls
+    assert calls, "expected one shared cluster to be created for new_job_compute"
+    return SimpleNamespace(**calls[0])
 
 
 def _run(settings, dataset, compute):
@@ -144,12 +183,13 @@ NEW_COMPUTE = ComputeSelection(
 
 def test_new_compute_reaches_submit_with_the_selected_values(settings, dataset):
     workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.node_type_id == "Standard_E8ads_v7"
     assert cluster.spark_version == "16.4.x-cpu-ml-scala2.12"
     assert cluster.num_workers == 3
-    assert _submitted_task(workspace).existing_cluster_id is None
+    created_id = workspace.clusters.created_ids[0]
+    assert _submitted_task(workspace).existing_cluster_id == created_id
 
 
 def test_new_compute_carries_autoscale_bounds(settings, dataset):
@@ -164,7 +204,7 @@ def test_new_compute_carries_autoscale_bounds(settings, dataset):
         ),
     )
     workspace, _, _ = _run(settings, dataset, compute)
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.autoscale.min_workers == 2
     assert cluster.autoscale.max_workers == 7
@@ -179,7 +219,7 @@ def test_single_node_new_compute_is_marked_single_node(settings, dataset):
         ),
     )
     workspace, _, _ = _run(settings, dataset, compute)
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.num_workers == 0
     assert cluster.custom_tags["ResourceClass"] == "SingleNode"
@@ -199,7 +239,7 @@ def test_docker_image_is_absent_when_dcs_is_not_configured(settings, dataset):
     so a new job cluster must come back with no docker_image at all --
     this must never require an explicit opt-out."""
     workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.docker_image is None
 
@@ -215,7 +255,7 @@ def test_new_compute_attaches_the_configured_docker_image(settings, dataset):
     workspace = _FakeWorkspace()
     runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
     runner.submit(_request(dataset, NEW_COMPUTE))
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.docker_image.url == "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"
     assert cluster.docker_image.basic_auth.username == "sp-forecastiq-dcs-acrpull"
@@ -241,7 +281,7 @@ def test_dcs_downgrades_the_runtime_to_its_standard_non_ml_equivalent(settings, 
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     # NEW_COMPUTE selects "16.4.x-cpu-ml-scala2.12" -- an ML runtime preset.
     assert cluster.spark_version == "16.4.x-scala2.12"
@@ -258,7 +298,7 @@ def test_dcs_sets_the_single_user_name_for_the_job_triggered_cluster(settings, d
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.single_user_name == "sp-forecastiq-cicd"
 
@@ -269,7 +309,7 @@ def test_without_dcs_the_runtime_and_ml_flag_are_left_alone(settings, dataset):
     before this change."""
     workspace = _FakeWorkspace()
     DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.spark_version == "16.4.x-cpu-ml-scala2.12"
     assert cluster.use_ml_runtime is None
@@ -343,8 +383,8 @@ def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):
     second_ws = _FakeWorkspace()
     DatabricksRunner(second_settings, workspace_client=second_ws).submit(_request(dataset, NEW_COMPUTE))
 
-    assert _submitted_task(first_ws).new_cluster.docker_image.url.endswith("forecastiq-runtime:v1")
-    assert _submitted_task(second_ws).new_cluster.docker_image.url.endswith("some-other-image:v9")
+    assert _submitted_job_cluster(first_ws).docker_image.url.endswith("forecastiq-runtime:v1")
+    assert _submitted_job_cluster(second_ws).docker_image.url.endswith("some-other-image:v9")
 
 
 def test_docker_image_without_credentials_has_no_basic_auth(settings, dataset):
@@ -355,7 +395,7 @@ def test_docker_image_without_credentials_has_no_basic_auth(settings, dataset):
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
-    cluster = _submitted_task(workspace).new_cluster
+    cluster = _submitted_job_cluster(workspace)
 
     assert cluster.docker_image.url
     assert cluster.docker_image.basic_auth is None
@@ -393,7 +433,7 @@ def test_the_acr_password_never_reaches_a_run_id_or_error_message(settings, data
     )
 
     class _FailingJobs(_FakeJobs):
-        def submit(self, run_name=None, tasks=None):
+        def submit(self, run_name=None, tasks=None, access_control_list=None):
             raise RuntimeError(f"denied for password=super-secret-value on {run_name}")
 
     workspace = _FakeWorkspace()
@@ -432,8 +472,8 @@ def test_no_node_type_or_worker_count_is_hardcoded(settings, dataset):
     )
     second, _, _ = _run(settings, dataset, second_compute)
 
-    assert _submitted_task(first).new_cluster.node_type_id != _submitted_task(second).new_cluster.node_type_id
-    assert _submitted_task(first).new_cluster.num_workers != _submitted_task(second).new_cluster.num_workers
+    assert _submitted_job_cluster(first).node_type_id != _submitted_job_cluster(second).node_type_id
+    assert _submitted_job_cluster(first).num_workers != _submitted_job_cluster(second).num_workers
 
 
 # ---- existing compute -----------------------------------------------
@@ -469,6 +509,71 @@ def test_both_modes_submit_the_same_wheel_task(settings, dataset):
     flags = lambda task: [a for a in task.python_wheel_task.parameters if a.startswith("--")]
     assert flags(new_task) == flags(existing_task)
     assert "--parallel-keys" in flags(new_task)
+    assert "--stage" in flags(new_task)
+
+
+def test_every_task_key_is_present_and_wired_in_dependency_order(settings, dataset):
+    """The real Databricks DAG: seven tasks, each depending only on the one
+    directly before it — this is what makes the Jobs UI render a workflow
+    graph instead of a single node."""
+    workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
+    tasks = _submitted_tasks(workspace)
+
+    assert [task.task_key for task in tasks] == list(TASK_KEYS)
+    assert tasks[0].depends_on is None
+    for task, previous_key in zip(tasks[1:], TASK_KEYS):
+        assert [dep.task_key for dep in task.depends_on] == [previous_key]
+    for task in tasks:
+        assert task.python_wheel_task.parameters[-2:] == ["--stage", task.task_key]
+
+
+def test_ray_stages_share_one_job_cluster_not_one_per_task(settings, dataset):
+    """Ray parallelism lives inside train/evaluate/explain/rank_select's own
+    tasks; the cluster those tasks run on must still be booted once for the
+    whole run, not once per task. jobs.submit() (a one-time run) has no
+    job_clusters/job_cluster_key support in the installed SDK, so this is
+    done by creating one real cluster up front and pointing every task at
+    it by existing_cluster_id."""
+    workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
+
+    assert len(workspace.clusters.create_calls) == 1
+    created_id = workspace.clusters.created_ids[0]
+    for task in _submitted_tasks(workspace):
+        assert task.existing_cluster_id == created_id
+        assert task.new_cluster is None
+
+
+def test_the_managed_cluster_self_terminates_and_is_torn_down_on_completion(settings, dataset):
+    """Nothing but this run's own tasks ever targets the cluster it creates
+    for itself — unlike a real job cluster, Databricks will not tear it
+    down on its own, so this runner must (autotermination is only the
+    backstop if that is ever missed)."""
+    workspace, runner, run_id = _run(settings, dataset, NEW_COMPUTE)
+
+    assert workspace.clusters.create_calls[0]["autotermination_minutes"] == (
+        DatabricksRunner._MANAGED_CLUSTER_AUTOTERMINATE_MINUTES
+    )
+
+    workspace.jobs.get_run = lambda run_id, **kwargs: SimpleNamespace(
+        state=SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message=""),
+        run_duration=1,
+    )
+    runner.get_status(run_id)
+
+    assert workspace.clusters.deleted_ids == [workspace.clusters.created_ids[0]]
+
+
+def test_existing_compute_never_creates_or_deletes_a_cluster(settings, dataset):
+    workspace, runner, run_id = _run(settings, dataset, EXISTING)
+
+    workspace.jobs.get_run = lambda run_id, **kwargs: SimpleNamespace(
+        state=SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message=""),
+        run_duration=1,
+    )
+    runner.get_status(run_id)
+
+    assert workspace.clusters.create_calls == []
+    assert workspace.clusters.deleted_ids == []
 
 
 # ---- safety ----------------------------------------------------------
@@ -515,7 +620,11 @@ def test_no_application_module_can_route_a_run_by_job_name():
 
 
 def test_the_engine_is_never_asked_to_run_a_serverless_stage_group():
-    """The wheel task must run the whole pipeline, not one DAG task."""
+    """The real DAG (TASK_KEYS, --stage) is not the old Serverless design
+    this guards against: no per-key stage-group flag, and no ad hoc
+    checkpoint-dir CLI flag — the checkpoint handoff lives entirely inside
+    forecast_engine/core/checkpoint.py, resolved from the run's own
+    persisted artifacts config, never a path passed on the command line."""
     settings_source = Path("backend/app/orchestration/databricks_runner.py").read_text()
     assert "--stage-group" not in settings_source
     assert "--checkpoint-dir" not in settings_source
@@ -526,13 +635,14 @@ def test_the_engine_is_never_asked_to_run_a_serverless_stage_group():
 
 def test_volume_paths_and_config_staging_are_unchanged(settings, dataset):
     workspace, _, run_id = _run(settings, dataset, EXISTING)
-    root = f"{settings.databricks_volumes_root}/runs/{run_id}"
+    upload_root = f"{settings.databricks_uploads_volumes_root}/runs/{run_id}"
+    artifacts_root = f"{settings.databricks_artifacts_volumes_root}/runs/{run_id}"
 
-    assert f"{root}/sales.csv" in workspace.files.uploaded
-    config = json.loads(workspace.files.uploaded[f"{root}/forecast_configuration.json"])
+    assert f"{upload_root}/sales.csv" in workspace.files.uploaded
+    config = json.loads(workspace.files.uploaded[f"{artifacts_root}/forecast_configuration.json"])
     assert config["date_column"] == "date"
     assert config["curated_storage"]["root_dir"].startswith(settings.databricks_curated_volumes_root)
 
     args = _submitted_task(workspace).python_wheel_task.parameters
-    assert f"{root}/summary.json" in args
-    assert f"{root}/live_status.json" in args
+    assert f"{artifacts_root}/summary.json" in args
+    assert f"{artifacts_root}/live_status.json" in args

@@ -1,10 +1,14 @@
 """Key-level parallel execution must change how the run executes, not what
 it answers.
 
-The comparison tests run the same series through `_execute_sequentially` and
-`_execute_with_ray` and require the merged reports to match, because every
-stage inside a key already scores that key against itself alone — so
-splitting keys across processes has nothing to change.
+The comparison tests run the same series through StagedKeyExecution with
+use_ray=False and use_ray=True and require the merged reports to match,
+because every stage inside a key already scores that key against itself
+alone — so splitting keys across processes has nothing to change.
+
+Four real stage boundaries, not one: Train, Evaluate, Explain and
+Rank & Select are each their own Ray fan-out across every key, run in that
+order, each depending only on the stage before it.
 
 Ray tests are skipped where Ray is not installed; the merge and collection
 tests are not, since those are pure and matter everywhere.
@@ -15,6 +19,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -35,11 +40,9 @@ from forecast_engine.parallel.key_workflow import (
 )
 from forecast_engine.parallel.ray_executor import (
     _MATH_THREAD_VARS,
-    _execute_sequentially,
-    _execute_with_ray,
+    StagedKeyExecution,
     _peak_overlap,
     _worker_runtime_env,
-    execute_keys,
     ray_available,
 )
 from forecast_engine.s01_preprocessing.data_preprocessor import DataPreprocessor
@@ -49,6 +52,19 @@ from forecast_engine.s01_preprocessing.series_builder import SeriesBuilder
 from forecast_engine.s08_ranking.ranking_report import RankedModel, RankingReport
 
 requires_ray = pytest.mark.skipif(not ray_available(), reason="Ray is not installed")
+
+
+# Runs all four real stages through one executor, in order, returning
+# merged reports (KeyReports shape) plus each stage's own telemetry.
+def _run_all_stages(executor: StagedKeyExecution) -> tuple[KeyReports, dict[str, dict[str, Any]]]:
+    training, t_train = executor.run_training()
+    evaluation, t_evaluate = executor.run_evaluation()
+    explainability, t_explain = executor.run_explainability()
+    ranking, selection, t_rank_select = executor.run_rank_select()
+    return (
+        KeyReports(training, evaluation, explainability, ranking, selection),
+        {"train": t_train, "evaluate": t_evaluate, "explain": t_explain, "rank_select": t_rank_select},
+    )
 
 
 # A deterministic multi-key monthly frame, built without touching disk
@@ -178,113 +194,137 @@ def test_merge_never_collapses_two_keys_rankings():
 
 
 def test_sequential_execution_returns_every_key(series_collection, workflow_config):
-    reports, telemetry = _execute_sequentially(series_collection, workflow_config)
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=False)
+    reports, telemetry = _run_all_stages(executor)
 
-    assert telemetry["keys_succeeded"] == len(series_collection)
-    assert telemetry["keys_failed"] == []
+    assert executor.failed_keys == {}
     assert len(reports.selection.results) == len(series_collection)
+    for stage in ("train", "evaluate", "explain", "rank_select"):
+        assert telemetry[stage]["completed_tasks"] == len(series_collection)
+        assert telemetry[stage]["failed_tasks"] == 0
 
 
 @requires_ray
 def test_ray_execution_matches_sequential_exactly(series_collection, workflow_config):
-    sequential, _ = _execute_sequentially(series_collection, workflow_config)
-    parallel, telemetry = _execute_with_ray(series_collection, workflow_config)
+    sequential, _ = _run_all_stages(StagedKeyExecution(series_collection, workflow_config, use_ray=False))
+    parallel, telemetry = _run_all_stages(StagedKeyExecution(series_collection, workflow_config, use_ray=True))
 
-    assert telemetry["executor"] == "ray"
-    assert telemetry["keys_succeeded"] == len(series_collection)
+    assert telemetry["train"]["executor"] == "ray"
+    assert telemetry["train"]["completed_tasks"] == len(series_collection)
 
     for name in ("training", "evaluation", "explainability", "ranking", "selection"):
         assert _equivalent(
             _without_timings(getattr(sequential, name).to_dict()),
             _without_timings(getattr(parallel, name).to_dict()),
-        ), f"{name} differs between sequential and Ray execution"
+        ), f"{name} differs between sequential and Ray staged execution"
+
+
+@requires_ray
+def test_every_stage_is_its_own_genuine_ray_fan_out(series_collection, workflow_config):
+    """The core of the refactor: four separate Ray fan-outs, not one task
+    doing a key's whole workflow while three later 'stages' just relabel
+    its already-finished output."""
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=True)
+    _, telemetry = _run_all_stages(executor)
+
+    for stage in ("train", "evaluate", "explain", "rank_select"):
+        assert telemetry[stage]["executor"] == "ray"
+        assert telemetry[stage]["total_tasks"] == len(series_collection)
+        assert telemetry[stage]["completed_tasks"] == len(series_collection)
+        # Each stage's own tasks, timed at its own boundary — not another
+        # stage's numbers copied over.
+        assert len(telemetry[stage]["tasks"]) == len(series_collection)
+        assert telemetry[stage]["wall_seconds"] > 0.0
 
 
 @requires_ray
 def test_ray_preserves_key_order_regardless_of_completion_order(series_collection, workflow_config):
     """Merged in series order, not completion order — otherwise a run's
     reports would reshuffle from one execution to the next."""
-    reports, _ = _execute_with_ray(series_collection, workflow_config)
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=True)
+    reports, _ = _run_all_stages(executor)
 
     assert [r.group_id for r in reports.selection.results] == [s.group_id for s in series_collection]
 
 
 @requires_ray
 def test_one_failing_key_does_not_lose_the_others(series_collection, workflow_config):
-    """A key whose task raises must cost only that key. The others were
-    already collected, and collection is keyed by group id."""
+    """A key whose task raises must cost only that key, at whichever stage
+    it fails, and take no further part in any stage after that."""
     broken = [*series_collection]
-    # A series whose observations cannot be modelled at all: `run_key`'s own
-    # per-model guards do not cover a series object that fails on access.
+    # A series whose observations cannot be modelled at all: the workflow's
+    # own per-model guards do not cover a series object that fails on access.
     broken[1] = _PoisonSeries(series_collection[1].group_id)
 
-    reports, telemetry = _execute_with_ray(broken, workflow_config)
+    executor = StagedKeyExecution(broken, workflow_config, use_ray=True)
+    reports, telemetry = _run_all_stages(executor)
 
-    assert telemetry["keys_failed"] == [series_collection[1].group_id]
-    assert telemetry["keys_succeeded"] == len(series_collection) - 1
+    failed_group = series_collection[1].group_id
+    assert set(executor.failed_keys) == {failed_group}
+    assert telemetry["train"]["failed_tasks"] == 1
+    # Dropped after failing Train -- no later stage even attempts it.
+    for stage in ("evaluate", "explain", "rank_select"):
+        assert telemetry[stage]["total_tasks"] == len(series_collection) - 1
+        assert failed_group not in {t["group_id"] for t in telemetry[stage]["tasks"]}
     survivors = {r.group_id for r in reports.selection.results}
-    assert survivors == {s.group_id for s in series_collection} - {series_collection[1].group_id}
+    assert survivors == {s.group_id for s in series_collection} - {failed_group}
 
 
 @requires_ray
-def test_key_spans_record_one_entry_per_succeeded_key(series_collection, workflow_config):
-    """The observability contract: a span per key, not per task-slot, so a
-    UI can draw exactly one bar per forecast key."""
-    reports, telemetry = _execute_with_ray(series_collection, workflow_config)
-
-    spans = telemetry["key_spans"]
-    assert {s["group_id"] for s in spans} == {s.group_id for s in series_collection}
-    assert len(spans) == len(series_collection)
-
-
-@requires_ray
-def test_key_spans_carry_a_resolvable_worker_and_node_id(series_collection, workflow_config):
+def test_task_records_carry_a_resolvable_worker_and_node_id(series_collection, workflow_config):
     """worker_id/node_id are what turns a timestamp into proof of
-    parallelism -- without them two overlapping spans could just as well be
+    parallelism -- without them two overlapping tasks could just as well be
     the same worker, measured wrong."""
-    _, telemetry = _execute_with_ray(series_collection, workflow_config)
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=True)
+    _, t_train = executor.run_training()
 
-    for span in telemetry["key_spans"]:
-        assert span["worker_id"]
-        assert span["node_id"]
-        assert isinstance(span["worker_id"], str)
-        assert isinstance(span["node_id"], str)
+    for task in t_train["tasks"]:
+        assert task["worker_id"]
+        assert task["node_id"]
+        assert isinstance(task["worker_id"], str)
+        assert isinstance(task["node_id"], str)
 
 
 @requires_ray
-def test_key_spans_are_offsets_from_run_start_not_raw_timestamps(series_collection, workflow_config):
+def test_task_offsets_are_from_run_start_not_raw_timestamps(series_collection, workflow_config):
     """A UI renders these as a Gantt chart from x=0, not as epoch time."""
-    _, telemetry = _execute_with_ray(series_collection, workflow_config)
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=True)
+    _, t_train = executor.run_training()
 
-    for span in telemetry["key_spans"]:
-        assert span["start"] >= 0.0
-        assert span["end"] >= span["start"]
+    for task in t_train["tasks"]:
+        assert task["start"] >= 0.0
+        assert task["end"] >= task["start"]
         # Well inside a single test run's real wall-clock budget -- catches
         # an accidental raw time.time() (a ~1.7-billion-second epoch value)
         # slipping back in.
-        assert span["end"] < 300.0
+        assert task["end"] < 300.0
 
 
 @requires_ray
-def test_a_failed_key_has_no_fabricated_span(series_collection, workflow_config):
-    """A key with no result tuple to read a timing from must be absent,
-    never reported with a made-up start/end."""
+def test_a_failed_task_has_no_fabricated_duration(series_collection, workflow_config):
+    """A key with no result tuple to read a timing from must report Failed
+    with no duration, never a made-up start/end."""
     broken = [*series_collection]
     broken[1] = _PoisonSeries(series_collection[1].group_id)
 
-    _, telemetry = _execute_with_ray(broken, workflow_config)
+    executor = StagedKeyExecution(broken, workflow_config, use_ray=True)
+    _, t_train = executor.run_training()
 
     failed_group = series_collection[1].group_id
-    assert failed_group not in {s["group_id"] for s in telemetry["key_spans"]}
-    assert len(telemetry["key_spans"]) == telemetry["keys_succeeded"]
+    failed_task = next(t for t in t_train["tasks"] if t["group_id"] == failed_group)
+    assert failed_task["status"] == "Failed"
+    assert "duration_seconds" not in failed_task
 
 
-def test_sequential_execution_reports_no_key_spans(series_collection, workflow_config):
-    """key_spans is a Ray-only concept -- the sequential fallback has no
-    worker/node distribution to report, and must not fabricate one."""
-    _, telemetry = _execute_sequentially(series_collection, workflow_config)
+def test_sequential_stage_telemetry_reports_no_worker_or_node_ids(series_collection, workflow_config):
+    """worker/node distribution is a Ray-only concept -- the sequential
+    fallback has none, and must not fabricate one."""
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=False)
+    _, t_train = executor.run_training()
 
-    assert "key_spans" not in telemetry
+    assert t_train["executor"] == "sequential"
+    for task in t_train["tasks"]:
+        assert "worker_id" not in task
 
 
 @requires_ray
@@ -305,10 +345,11 @@ def test_ray_returns_a_usable_fitted_arima(series_collection):
         selected_models=("arima",),
     )
 
-    reports, telemetry = _execute_with_ray(series_collection[:2], config)
+    executor = StagedKeyExecution(series_collection[:2], config, use_ray=True)
+    training, _ = executor.run_training()
 
-    assert telemetry["keys_failed"] == []
-    fitted = [r.fitted_model for r in reports.training.results if r.fitted_model is not None]
+    assert executor.failed_keys == {}
+    fitted = [r.fitted_model for r in training.results if r.fitted_model is not None]
     assert fitted, "no ARIMA came back fitted"
     # Persist Models reads exactly this, so it has to be a live object.
     assert all(model.model is not None for model in fitted)
@@ -316,12 +357,27 @@ def test_ray_returns_a_usable_fitted_arima(series_collection):
 
 @requires_ray
 def test_ray_schedules_against_the_cpus_it_finds(series_collection, workflow_config):
-    _, telemetry = _execute_with_ray(series_collection, workflow_config)
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=True)
+    _, t_train = executor.run_training()
 
-    assert telemetry["ray_cpus"] >= 1
+    assert t_train["ray_cpus"] >= 1
     # Never more keys at once than Ray had CPUs to give — each task asks for
     # exactly one, so this is the scheduler's own bound, not a fixed number.
-    assert 1 <= telemetry["max_concurrent_keys"] <= telemetry["ray_cpus"]
+    assert 1 <= t_train["max_concurrent_tasks"] <= t_train["ray_cpus"]
+
+
+@requires_ray
+def test_on_progress_fires_once_per_completed_task(series_collection, workflow_config):
+    """The live-progress contract: a caller sees tasks complete one by
+    one, not just the final count once the whole stage is done."""
+    calls = []
+    executor = StagedKeyExecution(series_collection, workflow_config, use_ray=True)
+
+    executor.run_training(on_progress=lambda stage, telemetry: calls.append((stage, telemetry["completed_tasks"])))
+
+    assert len(calls) == len(series_collection)
+    assert all(stage == "train" for stage, _ in calls)
+    assert [count for _, count in calls] == list(range(1, len(series_collection) + 1))
 
 
 # ---- worker thread caps ------------------------------------------------
@@ -392,13 +448,20 @@ def test_the_caps_actually_reach_a_running_ray_worker():
     these four would hold even without the runtime env. NUMEXPR_NUM_THREADS
     is the one it does not set, and numexpr reads os.cpu_count() instead of
     OMP_NUM_THREADS -- so this asserts all four rather than trusting that
-    Ray's default keeps covering the other three."""
+    Ray's default keeps covering the other three.
+
+    Restarts Ray unconditionally rather than reusing whatever is already
+    running -- runtime_env only ever applies at the FIRST ray.init() in a
+    process, so a suite where some other test started Ray first would
+    silently check that test's env, not this one's own _start_ray() call.
+    """
     import ray
 
-    if not ray.is_initialized():
-        from forecast_engine.parallel.ray_executor import _start_ray
+    from forecast_engine.parallel.ray_executor import _start_ray
 
-        _start_ray()
+    if ray.is_initialized():
+        ray.shutdown()
+    _start_ray()
 
     @ray.remote(num_cpus=1)
     def _read_env():
@@ -411,10 +474,11 @@ def test_the_caps_actually_reach_a_running_ray_worker():
     assert seen == {name: "1" for name in _MATH_THREAD_VARS}
 
 
-def test_execute_keys_handles_an_empty_run():
-    reports, telemetry = execute_keys([], _EMPTY_CONFIG)
+def test_staged_execution_handles_an_empty_run():
+    executor = StagedKeyExecution([], _EMPTY_CONFIG, use_ray=True)
+    reports, telemetry = _run_all_stages(executor)
 
-    assert telemetry["keys"] == 0
+    assert telemetry["train"]["total_tasks"] == 0
     assert reports.selection.results == []
 
 

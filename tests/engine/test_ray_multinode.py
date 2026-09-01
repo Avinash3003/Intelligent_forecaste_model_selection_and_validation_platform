@@ -8,6 +8,7 @@ and the absence of any hardcoded machine size.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import forecast_engine.parallel.ray_executor as ray_executor
@@ -18,10 +19,11 @@ def test_no_hardcoded_cluster_size_in_the_executor():
     source = Path(ray_executor.__file__).read_text()
     assert "num_cpus=4" not in source
     assert "max_worker_nodes=4" not in source
-    # One CPU per key is the intended scheduling grain, and the only
-    # num_cpus the module is allowed to state.
-    assert source.count("num_cpus=") == 1
-    assert "num_cpus=1" in source
+    # One CPU per key is the intended scheduling grain for every one of
+    # the four stage tasks (train/evaluate/explain/rank_select) -- "1" is
+    # the only value num_cpus is ever allowed to state, however many times.
+    assert source.count("num_cpus=") == 4
+    assert all(value == "1" for value in re.findall(r"num_cpus=(\d+)", source))
 
 
 def test_worker_count_is_zero_without_spark(monkeypatch):

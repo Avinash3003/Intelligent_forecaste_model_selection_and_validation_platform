@@ -100,8 +100,5 @@ jobs:
           BUNDLE_VAR_cicd_service_principal_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
         run: databricks bundle deploy -t prod
 
-  # App Service deployment is intentionally not part of this workflow yet —
-  # the App Service infrastructure doesn't exist. When it does, it becomes
-  # its own job here (or its own workflow file, deploy-app-service.yml) after
-  # `deploy-databricks`, without restructuring anything above. See
-  # docs/ci-cd.md.
+  # App Service deployment is its own workflow (deploy-app.yml), not a job
+  # here — this one only ever touches the Databricks bundle.

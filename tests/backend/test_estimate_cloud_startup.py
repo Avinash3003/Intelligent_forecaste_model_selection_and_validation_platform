@@ -1,10 +1,10 @@
-"""A cloud estimate must account for one compute cold start, not eleven.
+"""A cloud estimate must account for one compute cold start, not several.
 
-The pipeline now submits exactly one task per run (jobs.submit), on either
-an existing cluster starting on demand or a freshly provisioned job
-cluster — never the old eleven-task Serverless DAG, where each task paid
-its own startup. Charging that per-task figure here overstated a
-single-task run's wait several times over.
+The pipeline submits seven Databricks tasks per run (jobs.submit), but they
+all run on either the same existing cluster or one shared job cluster (see
+databricks_runner._SHARED_JOB_CLUSTER_KEY) — never one cluster per task,
+which is what the old eleven-task Serverless DAG did and what made a
+per-task startup figure overstate the real wait several times over.
 """
 
 from __future__ import annotations

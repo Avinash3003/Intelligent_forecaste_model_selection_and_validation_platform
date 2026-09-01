@@ -98,8 +98,8 @@ class _FakeJobs:
         self.cancelled: list[int] = []
         self._state = state or SimpleNamespace(life_cycle_state="RUNNING", result_state=None, state_message="")
 
-    def submit(self, run_name=None, tasks=None):
-        self.submit_calls.append({"run_name": run_name, "tasks": tasks})
+    def submit(self, run_name=None, tasks=None, access_control_list=None):
+        self.submit_calls.append({"run_name": run_name, "tasks": tasks, "access_control_list": access_control_list})
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):
@@ -121,7 +121,7 @@ def settings(tmp_path, mlflow_db):
         execution_mode="databricks",
         databricks_host="https://example.invalid",
         databricks_token="test-token",
-        databricks_volumes_root="/Volumes/forecastiq/forecasting/forecast_files",
+        databricks_uploads_volumes_root="/Volumes/forecastiq/forecasting/upload_files",
         upload_dir=str(tmp_path / "uploads"),
         mlflow_tracking_uri=f"sqlite:///{mlflow_db}",
     )
@@ -197,16 +197,20 @@ def test_submit_stages_dataset_and_config_then_runs_the_job(settings, dataset):
     runner = DatabricksRunner(settings, workspace_client=workspace)
 
     run_id = runner.submit(_request(dataset))
-    root = f"/Volumes/forecastiq/forecasting/forecast_files/runs/{run_id}"
+    upload_root = f"/Volumes/forecastiq/forecasting/upload_files/runs/{run_id}"
+    artifacts_root = f"/Volumes/forecastiq/forecasting/artifacts_files/runs/{run_id}"
 
-    assert f"{root}/sales.csv" in workspace.files.uploaded
-    assert f"{root}/forecast_configuration.json" in workspace.files.uploaded
+    # Only the original dataset lives in uploads.
+    assert f"{upload_root}/sales.csv" in workspace.files.uploaded
+    assert f"{upload_root}/forecast_configuration.json" not in workspace.files.uploaded
+    # Config and every other run artifact live under artifacts instead.
+    assert f"{artifacts_root}/forecast_configuration.json" in workspace.files.uploaded
 
     parameters = _submitted_parameters(workspace)
-    assert parameters["dataset"] == f"{root}/sales.csv"
-    assert parameters["config"] == f"{root}/forecast_configuration.json"
-    assert parameters["summary_out"] == f"{root}/summary.json"
-    assert parameters["live_status_out"] == f"{root}/live_status.json"
+    assert parameters["dataset"] == f"{upload_root}/sales.csv"
+    assert parameters["config"] == f"{artifacts_root}/forecast_configuration.json"
+    assert parameters["summary_out"] == f"{artifacts_root}/summary.json"
+    assert parameters["live_status_out"] == f"{artifacts_root}/live_status.json"
 
 
 def test_no_job_parameter_is_ever_empty(settings, dataset):
@@ -229,7 +233,7 @@ def test_config_file_carries_models_fallback_and_horizon(settings, dataset):
     runner = DatabricksRunner(settings, workspace_client=workspace)
     run_id = runner.submit(_request(dataset))
 
-    root = f"/Volumes/forecastiq/forecasting/forecast_files/runs/{run_id}"
+    root = f"/Volumes/forecastiq/forecasting/artifacts_files/runs/{run_id}"
     payload = json.loads(workspace.files.uploaded[f"{root}/forecast_configuration.json"])
 
     assert payload["run_id"] == run_id
@@ -265,7 +269,7 @@ def test_live_stage_trail_is_read_back_from_the_volume(settings, dataset):
     runner = DatabricksRunner(settings, workspace_client=workspace)
     run_id = runner.submit(_request(dataset))
 
-    root = f"/Volumes/forecastiq/forecasting/forecast_files/runs/{run_id}"
+    root = f"/Volumes/forecastiq/forecasting/artifacts_files/runs/{run_id}"
     workspace.files.uploaded[f"{root}/live_status.json"] = json.dumps(
         {"stages": [{"name": "Load Dataset", "status": "Completed"}]}
     ).encode()

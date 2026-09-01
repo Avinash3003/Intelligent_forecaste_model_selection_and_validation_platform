@@ -1,12 +1,18 @@
-"""One forecast key's complete workflow, and the merge of many keys' output.
+"""One forecast key's per-stage workflow, and the merge of many keys' output.
 
     train -> evaluate -> explain -> rank -> select
 
-`run_key` calls the same stage classes `run_pipeline` calls, with a
-one-element series list. No forecasting logic is reimplemented here — this
-only narrows the batch each call covers from every key to exactly one, which
-is valid because every one of those stages already scores a key against
-itself alone (see `ModelRanker`'s module docstring).
+Each stage below is its own function, taking exactly the prior stage's real
+output as input — never the whole key bundled into one call. This is what
+lets `ray_executor.StagedKeyExecution` fan every key out per STAGE (all
+keys train, then all keys evaluate, ...) instead of per KEY (one task doing
+a key's whole workflow) — a genuine stage boundary, not a UI-only label over
+one monolithic task.
+
+No forecasting logic is reimplemented here — this only narrows the batch
+each call covers from every key to exactly one, which is valid because
+every one of these stages already scores a key against itself alone (see
+`ModelRanker`'s module docstring).
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from forecast_engine.config.model_config import ModelConfig
 from forecast_engine.config.ranking_config import RankingConfig
 from forecast_engine.s01_preprocessing.series_builder import ForecastSeries
 from forecast_engine.s04_training.model_trainer import ModelTrainer, TrainingReport
+from forecast_engine.s05_models.base_model import TrainedModel
 from forecast_engine.s05_models.model_registry import ModelRegistry
 from forecast_engine.s06_evaluation.evaluation_pipeline import EvaluationPipeline
 from forecast_engine.s06_evaluation.evaluation_report import EvaluationReport
@@ -62,27 +69,58 @@ class KeyReports:
     selection: ProductionSelectionReport = field(default_factory=ProductionSelectionReport)
 
 
-# Train, evaluate, explain, rank and select for a single key
-def run_key(series: ForecastSeries, config: KeyWorkflowConfig) -> KeyReports:
+# Stage 1 for a single key — no dependency on any other stage
+def train_key(series: ForecastSeries, config: KeyWorkflowConfig) -> TrainingReport:
     selected = None if config.selected_models is None else list(config.selected_models)
-    one = [series]
+    return ModelTrainer(config.model).train_all([series], selected)
 
-    training = ModelTrainer(config.model).train_all(one, selected)
-    trained = training.trained_models()
 
-    evaluation = EvaluationPipeline(ModelRegistry(config.model), config.evaluation).evaluate_all(one, trained)
+# Stage 2 for a single key — depends only on that key's own training report
+def evaluate_key(
+    series: ForecastSeries, config: KeyWorkflowConfig, trained: list[TrainedModel]
+) -> EvaluationReport:
+    return EvaluationPipeline(ModelRegistry(config.model), config.evaluation).evaluate_all([series], trained)
 
-    explainability = ExplainabilityPipeline(
-        ModelRegistry(config.model), config.explainability
-    ).generate_all(evaluation, trained, one)
 
-    ranking, selection = ProductionSelectionPipeline(
+# Stage 3 for a single key — depends on that key's evaluation and training
+def explain_key(
+    series: ForecastSeries,
+    config: KeyWorkflowConfig,
+    evaluation: EvaluationReport,
+    trained: list[TrainedModel],
+) -> ExplainabilityReport:
+    return ExplainabilityPipeline(ModelRegistry(config.model), config.explainability).generate_all(
+        evaluation, trained, [series]
+    )
+
+
+# Stage 4 for a single key — depends on that key's evaluation and explainability
+def rank_select_key(
+    series: ForecastSeries,
+    config: KeyWorkflowConfig,
+    evaluation: EvaluationReport,
+    explainability: ExplainabilityReport,
+) -> tuple[RankingReport, ProductionSelectionReport]:
+    return ProductionSelectionPipeline(
         ModelRegistry(config.model),
         config.ranking,
         config.drift,
         config.model,
         forecast_horizon=config.evaluation.forecast_horizon,
-    ).run(evaluation, explainability, one)
+    ).run(evaluation, explainability, [series])
+
+
+# The sequential reference path: every stage for one key, one after another,
+# in this process. Ray's staged path (ray_executor.StagedKeyExecution)
+# calls the same four functions above, fanned out across keys per stage —
+# same code, different scheduling, so the two are provably identical.
+def run_key(series: ForecastSeries, config: KeyWorkflowConfig) -> KeyReports:
+    training = train_key(series, config)
+    trained = training.trained_models()
+
+    evaluation = evaluate_key(series, config, trained)
+    explainability = explain_key(series, config, evaluation, trained)
+    ranking, selection = rank_select_key(series, config, evaluation, explainability)
 
     return KeyReports(training, evaluation, explainability, ranking, selection)
 

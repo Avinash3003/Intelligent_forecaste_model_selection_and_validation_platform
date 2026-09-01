@@ -90,3 +90,19 @@ class CuratedDatasetWriter:
 
         filename = f"curated_{Path(source_name).stem}.{file_format}"
         return self._backend.write(dataframe, f"{run_id}/{filename}", file_format)
+
+
+# Read a curated dataset back from its writer-returned URI. Needed only by a
+# Databricks task resuming from a checkpoint — a single process never needs
+# this, since it still holds the DataFrame it just wrote. `date_column` is
+# only used for the csv path: parquet keeps its own dtypes, but csv.to_csv()
+# wrote the date column as plain ISO text, and pd.read_csv leaves it a str
+# unless told which column to parse back to a timestamp.
+def read_curated_dataset(uri: str, date_column: str) -> pd.DataFrame:
+    file_format = Path(uri).suffix.lstrip(".").lower()
+    if file_format not in SUPPORTED_FORMATS:
+        raise CuratedDatasetError(f"Cannot read curated dataset with unrecognised format '{file_format}' ({uri}).")
+    with storage.open_binary(uri) as handle:
+        if file_format == "parquet":
+            return pd.read_parquet(handle)
+        return pd.read_csv(handle, parse_dates=[date_column])
