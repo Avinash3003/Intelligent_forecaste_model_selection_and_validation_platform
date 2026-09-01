@@ -561,14 +561,34 @@ def test_the_cluster_carries_this_backend_s_mlflow_settings(settings, dataset):
     assert env["MLFLOW_EXPERIMENT_NAME"] == "/forecast-engine"
 
 
-def test_unset_mlflow_settings_are_omitted_not_sent_as_empty(settings, dataset):
+def test_the_cluster_tracks_where_this_backend_reads_when_nothing_is_configured(settings, dataset):
+    """The symptom this pins: a finished run that never appears in history.
+
+    A normal deployment leaves MLFLOW_TRACKING_URI unset. The backend
+    resolves that to "databricks" for this execution mode; the cluster must
+    be given the same answer, or the engine writes to MLflowConfig's local
+    sqlite default inside the container while the backend reads the
+    workspace store."""
+    unset = settings.model_copy(update={"mlflow_tracking_uri": None, "mlflow_experiment_name": None})
+    workspace = _FakeWorkspace()
+    DatabricksRunner(unset, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    env = _submitted_job_cluster(workspace).spark_env_vars
+    assert env["MLFLOW_TRACKING_URI"] == unset.mlflow_tracking_uri_resolved == "databricks"
+    assert env["MLFLOW_EXPERIMENT_NAME"] == unset.mlflow_experiment_name_resolved
+
+
+def test_a_setting_with_no_resolver_is_omitted_rather_than_sent_empty(settings, dataset):
+    """Tracking URI and experiment name both resolve to a real default, so
+    they are always sent. The registry URI has no resolver — unset means
+    unset, and an empty string would be a value the engine then honours."""
     untracked = settings.model_copy(
         update={"mlflow_tracking_uri": None, "mlflow_registry_uri": None, "mlflow_experiment_name": None}
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(untracked, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
-    assert _submitted_job_cluster(workspace).spark_env_vars == {}
+    assert "MLFLOW_REGISTRY_URI" not in _submitted_job_cluster(workspace).spark_env_vars
 
 
 def test_no_all_purpose_cluster_is_ever_created_for_a_run(settings, dataset):

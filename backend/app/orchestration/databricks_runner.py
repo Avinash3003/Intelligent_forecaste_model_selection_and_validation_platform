@@ -1021,10 +1021,16 @@ class DatabricksRunner(PipelineRunner):
     # a file inside the container that dies with the cluster, and the run
     # never appears in the history this backend reads back.
     def _engine_cluster_env(self) -> dict[str, str]:
+        # The RESOLVED values, not the raw fields. Both are unset in a
+        # normal deployment, and the resolver is what turns that into
+        # "databricks" for this execution mode — forwarding the raw blank
+        # instead left the engine on MLflowConfig's local sqlite default
+        # while this backend read the workspace store, so a finished run
+        # never appeared in history.
         forwarded = {
-            "MLFLOW_TRACKING_URI": self._settings.mlflow_tracking_uri,
+            "MLFLOW_TRACKING_URI": self._settings.mlflow_tracking_uri_resolved,
+            "MLFLOW_EXPERIMENT_NAME": self._settings.mlflow_experiment_name_resolved,
             "MLFLOW_REGISTRY_URI": self._settings.mlflow_registry_uri,
-            "MLFLOW_EXPERIMENT_NAME": self._settings.mlflow_experiment_name,
         }
         return {key: value for key, value in forwarded.items() if (value or "").strip()}
 
