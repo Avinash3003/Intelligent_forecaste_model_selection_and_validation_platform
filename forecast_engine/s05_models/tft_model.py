@@ -121,3 +121,76 @@ class TemporalFusionTransformerModel(BaseForecastingModel):
         # requested horizon; the caller still receives a complete horizon.
         padding = [values[-1]] * (horizon - len(values)) if values else [0.0] * horizon
         return ForecastOutput(values=values + padding)
+
+    # Strip what pickle cannot cross a process boundary with, right before
+    # it tries.
+    #
+    # Every forward pass through the fitted network — training, and every
+    # `predict()` call after it — leaves two things on `self._model` that
+    # standard `pickle` refuses:
+    #
+    #   `_output_class`  a class pytorch-forecasting DEFINES INSIDE A
+    #                     FUNCTION (`TupleOutputMixIn.to_network_output`)
+    #                     and caches on the module for reuse. A class with
+    #                     no importable module path cannot be pickled.
+    #   `_trainer`        Lightning's own back-reference from the module to
+    #                     the `Trainer` that fit it, which in turn chains
+    #                     back through its loops and callbacks to the same
+    #                     unpicklable class.
+    #
+    # Reproduced directly (no cluster needed): fit a TFT model, and
+    # `pickle.dumps(model)` fails with exactly
+    #   AttributeError: Can't pickle local object
+    #   'TupleOutputMixIn.to_network_output.<locals>.Output'
+    # every other model in this engine is a plain statistical or
+    # scikit-learn-shaped object with none of this, which is why the bug
+    # is specific to TFT.
+    #
+    # Deleting `_output_class` is safe — pytorch-forecasting's own
+    # `to_network_output` gates on `hasattr(self, "_output_class")` and
+    # rebuilds it (a cheap class definition, not a recomputation) the next
+    # time it is needed, whether that is later in this same process or
+    # after this object has been unpickled elsewhere. `_trainer` is set to
+    # None for the same reason: pytorch-forecasting's own `.predict()`
+    # does not require it. Verified empirically: predictions are
+    # byte-identical before this cleanup, after it, and again after a full
+    # pickle/unpickle round-trip.
+    #
+    # Mutates `self._model` in place rather than operating on a copy: both
+    # attributes are cheap to regenerate, so leaving the live object
+    # cleaned costs nothing and means a second `predict()` call followed
+    # by a second pickle is handled the same way, automatically.
+    def _strip_unpicklable_state(self) -> None:
+        model = self.__dict__.get("_model")
+        if model is not None:
+            if hasattr(model, "_output_class"):
+                del model._output_class
+            model._trainer = None
+
+    # Belt-and-suspenders: fires whenever THIS wrapper is pickled directly.
+    # Not sufficient by itself — see prepare_for_pickling below for why.
+    def __getstate__(self) -> dict[str, Any]:
+        self._strip_unpicklable_state()
+        return self.__dict__
+
+    # `TrainedModel` (forecast_engine/s04_training/model_trainer.py) hands
+    # the fitted network out through TWO separate top-level references —
+    # `.model` (the bare `self._model`, for callers that want the raw
+    # estimator) and `.fitted_model` (this wrapper, for callers that want
+    # to call `.predict()` again) — and pickles both as plain dataclass
+    # fields of the same object graph. `__getstate__` above only ever
+    # fires for the SECOND one: pickle calls it because it is pickling
+    # THIS wrapper object, but `.model` is a direct reference to the raw
+    # pytorch-forecasting network, a different Python object whose own
+    # class defines no `__getstate__` of its own — so pickling `.model`
+    # bypasses this wrapper's cleanup entirely and fails on exactly the
+    # same two attributes.
+    #
+    # The key-parallel executor (forecast_engine/parallel/ray_executor.py)
+    # calls this on every trained model's wrapper, eagerly, right before
+    # its one `pickle.dumps` call that ships a key's results back to the
+    # Ray driver — cleaning `self._model` in place here fixes BOTH
+    # references at once, since `.model` and `.fitted_model._model` are
+    # the same live object, not copies.
+    def prepare_for_pickling(self) -> None:
+        self._strip_unpicklable_state()

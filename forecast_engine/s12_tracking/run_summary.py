@@ -37,3 +37,9 @@ FAILED_STAGE_TAG = "failed_stage"
 # backend's own MLflow client, not through this module.
 STARTED_BY_USER_ID_TAG = "started_by_user_id"
 STARTED_BY_DISPLAY_NAME_TAG = "started_by_display_name"
+# The Databricks job run this MLflow run executed as, so the "Open with
+# Databricks" link survives a backend restart. A live run gets its link
+# from the in-memory job record; a restart loses that record and falls
+# back to reading history from MLflow, which had nothing to give it a
+# link with until this tag existed.
+DATABRICKS_RUN_ID_TAG = "databricks_run_id"

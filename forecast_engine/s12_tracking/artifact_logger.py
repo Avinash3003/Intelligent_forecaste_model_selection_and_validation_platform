@@ -8,13 +8,18 @@ allowed to block the rest.
 
 from __future__ import annotations
 
+import logging
+
 from pathlib import Path
 from typing import Callable
 
 from forecast_engine.config.mlflow_config import MLflowConfig
 from forecast_engine.core.pipeline_result import PipelineResult
+from forecast_engine.core import storage
 from forecast_engine.s12_tracking.mlflow_client import MLflowClient
 from forecast_engine.utils.exceptions import MLflowTrackingError
+
+logger = logging.getLogger(__name__)
 
 ArtifactProducer = Callable[[MLflowClient, PipelineResult, MLflowConfig], None]
 
@@ -53,15 +58,45 @@ def _log_pipeline_configuration(client: MLflowClient, result: PipelineResult, co
 def _log_curated_dataset(client: MLflowClient, result: PipelineResult, config: MLflowConfig) -> None:
     if not result.curated_dataset_uri:
         return
-    path = Path(result.curated_dataset_uri)
-    if not path.exists():
-        # A non-local (e.g. cloud) curated_dataset_uri is recorded by
-        # reference instead of copied — logging a pointer is still useful
-        # provenance without requiring this layer to understand every
-        # possible storage backend.
-        client.log_dict_artifact({"curated_dataset_uri": result.curated_dataset_uri}, "dataset/curated_dataset_reference.json")
+    uri = result.curated_dataset_uri
+    path = Path(uri)
+
+    # Asked through the storage adapter, not the filesystem. This URI is a
+    # UC Volume path on every cloud run, and a container has no /Volumes
+    # mount — `path.exists()` raised
+    #   PermissionError: [Errno 1] Operation not permitted: '/Volumes/...'
+    # on a real DCS run (dbx-run-ed751d39db78), which MLflow reported as
+    # `logged_with_artifact_errors`: the forecast was fine, but the curated
+    # dataset never made it onto the run. The adapter reaches the same file
+    # over the Files API, and raises rather than answering False when
+    # storage is unreachable.
+    try:
+        present = storage.exists(path)
+    except Exception as exc:  # noqa: BLE001 - provenance must not fail the run
+        logger.warning("Could not reach the curated dataset at %s: %s", uri, exc)
+        present = False
+
+    if not present:
+        # A curated dataset this process cannot read is recorded by
+        # reference instead of copied — a pointer is still useful
+        # provenance without this layer understanding every backend.
+        client.log_dict_artifact({"curated_dataset_uri": uri}, "dataset/curated_dataset_reference.json")
         return
-    client.log_artifact_file(str(path), artifact_path="dataset")
+
+    if storage.supports_atomic_replace(path):
+        # A real local file: hand MLflow the path and let it stream.
+        client.log_artifact_file(str(path), artifact_path="dataset")
+        return
+
+    # Reached over the Files API: MLflow needs a local file, so the bytes
+    # are staged in the driver's own temp space (never in the workspace)
+    # and removed immediately afterwards.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / path.name
+        local.write_bytes(storage.read_bytes(path))
+        client.log_artifact_file(str(local), artifact_path="dataset")
 
 
 # Log the forecast outputs as a JSON artifact

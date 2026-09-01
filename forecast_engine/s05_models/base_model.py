@@ -170,6 +170,28 @@ class BaseForecastingModel(ABC):
     def supports_tuning(self) -> bool:
         return bool(self.spec.search_space)
 
+    # Strip whatever this model's fitted estimator holds that plain pickle
+    # cannot cross a process boundary with, right before it has to.
+    #
+    # A no-op for every model except one that overrides it: nothing here
+    # today needs this except TFT (see TemporalFusionTransformerModel),
+    # whose fitted network caches an unpicklable dynamically-defined class
+    # after every forward pass.
+    #
+    # Called eagerly by the key-parallel executor right before it pickles a
+    # key's results — not left to `__getstate__` on this wrapper alone,
+    # because `TrainedModel` hands the *raw* fitted estimator out through
+    # two separate references (`.model`, for callers that want it
+    # directly, and `.fitted_model`, this wrapper, for callers that want to
+    # call `.predict()` again). Both are pickled as top-level fields of the
+    # same dataclass; `.model` is the bare estimator, whose own class has
+    # no `__getstate__` of its own to call. Cleaning the estimator here,
+    # in place, before either reference is pickled, fixes both at once —
+    # a `__getstate__` on this wrapper alone only ever protects the
+    # `.fitted_model` reference.
+    def prepare_for_pickling(self) -> None:
+        return
+
     # Short, serializable description of this model instance
     def describe(self) -> dict[str, Any]:
         return {"name": self.name, "params": _jsonable(self.params), "trained": self.is_trained}

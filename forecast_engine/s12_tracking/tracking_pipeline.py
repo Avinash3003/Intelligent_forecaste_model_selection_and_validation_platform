@@ -27,6 +27,7 @@ from forecast_engine.s12_tracking.mlflow_client import MLflowClient
 from forecast_engine.s12_tracking.model_registrar import register_winner_models
 from forecast_engine.s12_tracking.parameter_logger import build_hyperparameters, build_run_parameters
 from forecast_engine.s12_tracking.run_summary import (
+    DATABRICKS_RUN_ID_TAG,
     DATASET_NAME_TAG,
     ERROR_TAG,
     FAILED_STAGE_TAG,
@@ -82,14 +83,18 @@ class MLflowTrackingPipeline:
             # carry them. Run *status* is deliberately not tagged — MLflow's
             # own `RunInfo.status` already carries it, and duplicating it
             # here would create a second copy that can go stale.
+            tags = {
+                RUN_ID_TAG: run_id,
+                DATASET_NAME_TAG: dataset_name or "",
+                STARTED_BY_USER_ID_TAG: started_by_user_id or "",
+                STARTED_BY_DISPLAY_NAME_TAG: started_by_display_name or "",
+            }
+            databricks_run_id = _current_databricks_run_id()
+            if databricks_run_id is not None:
+                tags[DATABRICKS_RUN_ID_TAG] = str(databricks_run_id)
             active_run = self._client.start_run(
                 run_name=f"forecast-run-{run_id}",
-                tags={
-                    RUN_ID_TAG: run_id,
-                    DATASET_NAME_TAG: dataset_name or "",
-                    STARTED_BY_USER_ID_TAG: started_by_user_id or "",
-                    STARTED_BY_DISPLAY_NAME_TAG: started_by_display_name or "",
-                },
+                tags=tags,
             )
             result.run_id = active_run.info.run_id
             result.experiment_id = active_run.info.experiment_id
@@ -242,3 +247,24 @@ class MLflowTrackingPipeline:
 
     def _elapsed(self) -> float:
         return time.perf_counter() - self._started_at if self._started_at is not None else 0.0
+
+
+def _current_databricks_run_id() -> int | None:
+    """This job's own Databricks run id, or None outside a Databricks job.
+
+    Best-effort and never raises: the notebook context exposes it via
+    `currentRunId()` when the process is running as a job task, and is
+    simply absent everywhere else (local development, a notebook opened
+    by hand). A run that cannot discover its own id is tracked exactly as
+    it always was -- only the "Open with Databricks" link is affected.
+    """
+    try:
+        from databricks.sdk.runtime import dbutils
+
+        context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        run_id = context.currentRunId()
+        if run_id is None or not run_id.isDefined():
+            return None
+        return int(run_id.get().id().get())
+    except Exception:  # noqa: BLE001 - absent outside a Databricks job
+        return None
