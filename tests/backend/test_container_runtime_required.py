@@ -1,11 +1,14 @@
-"""ForecastIQ has one supported execution runtime: the prebuilt container.
+"""Container-only execution, when a deployment opts into it.
 
-Existing Compute cannot load the image, so once
-`databricks_require_container_runtime` is active (the default, whenever a
-container image is configured) a run submitted against Existing Compute is
+`databricks_require_container_runtime` is off by default -- only TFT
+genuinely needs the image, and `unsupported_models` refuses that one model
+on its own (see test_container_only_models.py). A deployment that wants
+every run on the container turns this on, and Existing Compute is then
 refused with a reason rather than silently executing on a runtime that
-does not carry every model's dependencies -- which is how TFT ended up
-working on one compute and not another.
+does not carry every model's dependencies.
+
+These tests therefore enable it explicitly: the default path is covered by
+test_existing_compute_stays_available_by_default below.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ def _settings(**overrides):
         "databricks_host": "https://example.invalid",
         "databricks_token": "t",
         "databricks_docker_image_url": "acr.io/forecastiq:1",
+        # Opt in: this file is about what the requirement does once on.
+        "databricks_require_container_runtime": True,
     }
     fields.update(overrides)
     return Settings(**fields)
@@ -118,3 +123,31 @@ def test_build_execution_request_accepts_new_job_compute(tmp_path, monkeypatch):
     req = build_execution_request(_request(JOB, dataset), dataset, _Principal())
 
     assert req.compute.mode == "new_job_compute"
+
+
+# --- the default ------------------------------------------------------
+#
+# This shipped defaulting to True, which disabled Existing Compute in every
+# deployment that had an image configured -- including the webapp, where the
+# picker showed only a "legacy infrastructure" refusal. Nothing about the
+# runtime gap justified that breadth: TFT alone needs the image.
+
+
+def test_existing_compute_stays_available_by_default():
+    """A configured image must not, on its own, refuse Existing Compute."""
+    default = _settings(databricks_require_container_runtime=False)
+
+    assert container_runtime_required(default) is False
+    assert compute_rejection_reason(EXISTING, default) is None
+
+
+def test_the_requirement_is_off_unless_a_deployment_asks_for_it():
+    settings = Settings(
+        execution_mode="databricks",
+        databricks_host="https://example.invalid",
+        databricks_token="t",
+        databricks_docker_image_url="acr.io/forecastiq:1",
+    )
+
+    assert settings.databricks_require_container_runtime is False
+    assert compute_rejection_reason(EXISTING, settings) is None

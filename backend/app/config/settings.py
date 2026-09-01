@@ -129,17 +129,17 @@ class Settings(BaseSettings):
     # below as every other run — see forecast_engine/core/storage.py for how
     # a container without a /Volumes mount still reaches them.
 
-    # ForecastIQ has ONE supported runtime: the prebuilt container image.
-    # It carries every dependency the engine needs — torch and
-    # pytorch-forecasting for TFT among them — so a run's behaviour does
-    # not depend on which cluster happened to pick it up, and nothing is
-    # ever pip-installed while a pipeline is running.
+    # Opt-in: refuse Existing Compute outright, container runs only.
     #
-    # Existing Compute remains reachable as legacy/fallback infrastructure
-    # (a plain runtime cannot carry the image), and flipping this to false
-    # restores it as a normal execution path. It is not deleted: that is
-    # the rollback route if a container run cannot be made to work.
-    databricks_require_container_runtime: bool = True
+    # Off by default because the blanket refusal is not what the runtime
+    # gap actually is. Only TFT needs the container image (torch and
+    # pytorch-forecasting); every other model runs fine on a plain ML
+    # runtime. `unsupported_models` already refuses that one model with
+    # that one reason, so Existing Compute stays a normal execution path
+    # and a user loses only what their compute genuinely cannot do.
+    #
+    # Turn this on to require the container image for every run.
+    databricks_require_container_runtime: bool = False
 
     databricks_docker_image_url: str | None = None
     # Basic auth Databricks presents to the private ACR repository at pull

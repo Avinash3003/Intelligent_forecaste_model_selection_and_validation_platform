@@ -20,6 +20,9 @@ def _settings(**overrides):
         "databricks_host": "https://example.invalid",
         "databricks_token": "t",
         "databricks_docker_image_url": "acr.io/forecastiq:1",
+        # Opt in: the requirement is off by default, so a file about what it
+        # reports has to ask for it. See test_container_runtime_required.py.
+        "databricks_require_container_runtime": True,
     }
     fields.update(overrides)
     return Settings(**fields)
