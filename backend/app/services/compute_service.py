@@ -149,10 +149,11 @@ def _enum_text(value: Any) -> str | None:
 # probe is created with `cluster_source` left at its default (API/UI) —
 # nothing in the source enum marks it as ours.
 #
-# A cluster this app creates for one run's new_job_compute (see
-# databricks_runner._create_shared_cluster) also reports ClusterSource.UI —
-# jobs.submit() has no job-cluster concept, so it is made via the plain
-# Clusters API — so it is excluded by its RUN_CLUSTER_TAG instead of source.
+# Run compute is a real job cluster now, so it reports ClusterSource.JOB and
+# the source check above already covers it. RUN_CLUSTER_TAG stays because an
+# earlier design created that cluster through the plain Clusters API, where
+# it reported ClusterSource.UI: any such cluster still lingering in a
+# workspace is excluded by its tag rather than reappearing in the picker.
 _NON_ALL_PURPOSE_SOURCES = {"JOB", "PIPELINE", "PIPELINE_MAINTENANCE"}
 
 

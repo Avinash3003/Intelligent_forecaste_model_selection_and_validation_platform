@@ -8,9 +8,8 @@ name: Deploy Databricks Bundle (Production)
 # application code every cloud run installs at submission time. It never
 # submits a run and creates no job resource for `prod`: a forecast is always
 # triggered by a user through the backend (EXECUTION_MODE=databricks ->
-# DatabricksRunner -> Jobs API jobs.submit, an ad-hoc single task on
-# whichever compute the user selected), never by this workflow or by
-# resolving a pre-deployed job by name.
+# DatabricksRunner -> its own named job, a seven-task DAG on whichever
+# compute the user selected), never by this workflow.
 on:
   push:
     branches: [main]

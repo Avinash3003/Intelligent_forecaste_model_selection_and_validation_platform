@@ -104,10 +104,10 @@ _FIXED_OVERHEAD_SECONDS = 20.0
 # Cloud execution waits for compute before any Python of ours runs; local
 # execution has no such wait.
 #
-# The current architecture submits exactly ONE task per run (jobs.submit —
-# see backend/app/orchestration/databricks_runner.py), on either an existing
+# A run's seven tasks all attach to ONE cluster (the shared job cluster —
+# see backend/app/orchestration/databricks_runner.py), either an existing
 # cluster (starting on demand if it was TERMINATED) or a freshly provisioned
-# job cluster. Either way the run pays one cold start, not several — this
+# job cluster. Either way the run pays one cold start, not seven — this
 # fallback is sized from two real cold starts observed on this project's own
 # workspace: 351s (a TERMINATED all-purpose cluster starting on demand) and
 # 441s (a job cluster provisioning from nothing).

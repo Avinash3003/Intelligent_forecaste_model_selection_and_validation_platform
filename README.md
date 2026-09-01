@@ -179,8 +179,8 @@ One forecast_engine, two execution modes.
 
 `EXECUTION_MODE=local` (default) runs the engine as a subprocess on the API host.
 
-`EXECUTION_MODE=databricks` submits the run through the Databricks Jobs API (`jobs.submit`) as a
-single ad-hoc task, on whichever compute the user selected in the Compute step — an existing
+`EXECUTION_MODE=databricks` runs it through the backend's own named Databricks job, a seven-task
+DAG, on whichever compute the user selected in the Compute step — an existing
 all-purpose cluster, or a new job cluster the backend creates for that run (optionally pulling a
 Databricks Container Services image; see the root `Dockerfile`). No job resource is pre-deployed or
 resolved by name for this path. The runner stages the dataset and a JSON run configuration into one
@@ -207,8 +207,8 @@ databricks bundle deploy  -t dev           # builds and uploads the wheel
 
 Deploying builds and uploads the `forecast_engine` wheel artifact — the application code every
 cloud run installs at submission time via `libraries: [whl: ...]`. It creates no job resource for
-`prod`: a real run is always submitted by the backend through `jobs.submit`, an ad-hoc single task
-built at request time, never a pre-deployed job triggered by name.
+`prod`: a real run is always started by the backend through its own named job, whose definition it
+keeps current at request time.
 
 The `dev` target additionally deploys `forecast_pipeline_compute`, a Ray key-parallel job kept for
 manual/CLI testing against an existing all-purpose cluster:

@@ -10,9 +10,9 @@ variables:
   compute_job_name:
     description: >-
       Display name of the dev-only Ray key-parallel Job below. Deployed for
-      manual/CLI use — the application itself submits every cloud run
-      through jobs.submit (backend/app/orchestration/databricks_runner.py),
-      never by resolving or triggering a job by name.
+      manual/CLI use — the application runs every cloud forecast through
+      its own named job (backend/app/orchestration/databricks_runner.py),
+      never through this one.
     default: forecastiq-forecast-pipeline-compute
 
   existing_cluster_id:
@@ -115,11 +115,10 @@ targets:
     # file is included by every target, and this job must never reach prod.
     #
     # Deployed for manual/CLI use only (`databricks bundle run
-    # forecast_pipeline_compute -t dev`) — the application never triggers a
-    # job by name or id. Every cloud run the backend submits goes through
-    # jobs.submit with an ad-hoc single task instead (see
-    # backend/app/orchestration/databricks_runner.py); this resource is not
-    # part of that path.
+    # forecast_pipeline_compute -t dev`) — the application never triggers
+    # this job. The backend keeps its own named job with a seven-task DAG
+    # and creates it itself (see backend/app/orchestration/
+    # databricks_runner.py); this resource is not part of that path.
     resources:
       jobs:
         forecast_pipeline_compute:

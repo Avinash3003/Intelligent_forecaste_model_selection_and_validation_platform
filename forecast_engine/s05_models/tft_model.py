@@ -9,6 +9,7 @@ other model trains normally.
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 from typing import Any
 
 import pandas as pd
@@ -81,6 +82,11 @@ class TemporalFusionTransformerModel(BaseForecastingModel):
             enable_checkpointing=False,
             logger=False,
             accelerator="cpu",
+            # Lightning still roots its scratch output at the working
+            # directory even with logging and checkpointing off, which
+            # littered the repo (and a Databricks task's cwd) with
+            # lightning_logs/version_N. Nothing here is read back.
+            default_root_dir=tempfile.gettempdir(),
         )
         trainer.fit(network, train_dataloaders=dataloader)
 
