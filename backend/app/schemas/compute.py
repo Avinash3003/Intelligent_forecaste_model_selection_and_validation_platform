@@ -72,10 +72,20 @@ class ExistingCompute(BaseModel):
     node_type_id: str | None = None
     runtime: str | None = None
     num_workers: int = 0
+    # Whole-cluster totals (driver + workers). Read from the workspace's own
+    # node-type catalog rather than the cluster: Databricks only reports
+    # cluster_cores/cluster_memory_mb while a cluster is RUNNING, so a
+    # stopped one would otherwise show no capacity at all.
     num_cores: int | None = None
     memory_mb: int | None = None
     autotermination_minutes: int | None = None
     single_node: bool = True
+    # Everything below is likewise read live from Databricks, never fixed here.
+    node_category: str | None = None
+    num_gpus: int | None = None
+    driver_node_type_id: str | None = None
+    creator: str | None = None
+    data_security_mode: str | None = None
 
 
 class JobComputeConfig(BaseModel):

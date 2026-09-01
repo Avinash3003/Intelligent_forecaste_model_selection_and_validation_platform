@@ -158,3 +158,49 @@ def test_exactly_one_workspace_call_regardless_of_cluster_count():
 
     assert calls == ["list"]
     assert len(result.clusters) == 5
+
+
+# --- capacity for a STOPPED cluster -----------------------------------
+#
+# Databricks reports cluster_cores/cluster_memory_mb only while a cluster
+# is RUNNING. Reading them straight off the cluster left the picker showing
+# no capacity at all for a stopped one, which is the normal case.
+
+
+def test_a_stopped_cluster_still_reports_capacity_from_the_node_catalog():
+    stopped = _FakeCluster("c1", "shared-cluster", state="TERMINATED")
+    stopped.cluster_cores = None
+    stopped.cluster_memory_mb = None
+
+    service = _service([stopped])
+    service._node_catalog = {
+        "Standard_F4ads_v7": {"num_cores": 4.0, "memory_mb": 16384, "category": "Compute optimised", "num_gpus": 0}
+    }
+
+    cluster = service.list_existing_compute().clusters[0]
+    assert cluster.num_cores == 4
+    assert cluster.memory_mb == 16384
+    assert cluster.node_category == "Compute optimised"
+
+
+def test_capacity_covers_the_driver_as_well_as_the_workers():
+    """Two workers plus the driver is three nodes' worth of capacity."""
+    cluster = _FakeCluster("c1", "shared-cluster", num_workers=2)
+    cluster.cluster_cores = None
+    cluster.cluster_memory_mb = None
+
+    service = _service([cluster])
+    service._node_catalog = {"Standard_F4ads_v7": {"num_cores": 4.0, "memory_mb": 16384}}
+
+    offered = service.list_existing_compute().clusters[0]
+    assert offered.num_cores == 12
+    assert offered.memory_mb == 49152
+
+
+def test_live_capacity_wins_over_the_catalog_while_running():
+    service = _service([_FakeCluster("c1", "shared-cluster", cluster_cores=8, cluster_memory_mb=32768)])
+    service._node_catalog = {"Standard_F4ads_v7": {"num_cores": 4.0, "memory_mb": 16384}}
+
+    offered = service.list_existing_compute().clusters[0]
+    assert offered.num_cores == 8
+    assert offered.memory_mb == 32768

@@ -76,3 +76,6 @@ docs/
 # Pytest scratch (tests/conftest.py points UPLOAD_DIR here)
 .pytest-uploads/
 .pytest_cache/
+
+# Claude Code runtime state (scheduled task locks, etc.)
+.claude/

@@ -95,9 +95,25 @@ def _cluster_id_of(created: Any) -> str | None:
     return bind.get("cluster_id") if isinstance(bind, dict) else None
 
 
-def _to_existing_compute(cluster_id: str, cluster: Any) -> ExistingCompute:
+def _to_existing_compute(cluster_id: str, cluster: Any, node: dict | None = None) -> ExistingCompute:
+    """One cluster as the picker shows it, entirely from live workspace data.
+
+    `node` is this cluster's row from the workspace's node-type catalog. It
+    supplies per-node cores/memory/GPU, which the cluster itself only
+    reports while RUNNING — without it a stopped cluster shows no capacity.
+    """
     num_workers = int(getattr(cluster, "num_workers", 0) or 0)
     state = getattr(cluster, "state", None)
+    nodes = num_workers + 1  # workers plus the driver
+    catalog = node or {}
+    per_node_cores = catalog.get("num_cores")
+    per_node_memory = catalog.get("memory_mb")
+
+    # Live totals win while the cluster is up; the catalog fills them in
+    # when it is not.
+    live_cores = int(getattr(cluster, "cluster_cores", 0) or 0)
+    live_memory = int(getattr(cluster, "cluster_memory_mb", 0) or 0)
+
     return ExistingCompute(
         cluster_id=cluster_id,
         cluster_name=getattr(cluster, "cluster_name", cluster_id),
@@ -105,11 +121,23 @@ def _to_existing_compute(cluster_id: str, cluster: Any) -> ExistingCompute:
         node_type_id=getattr(cluster, "node_type_id", None),
         runtime=getattr(cluster, "spark_version", None),
         num_workers=num_workers,
-        num_cores=int(getattr(cluster, "cluster_cores", 0) or 0) or None,
-        memory_mb=getattr(cluster, "cluster_memory_mb", None),
+        num_cores=live_cores or (int(per_node_cores * nodes) if per_node_cores else None),
+        memory_mb=live_memory or (int(per_node_memory * nodes) if per_node_memory else None),
         autotermination_minutes=getattr(cluster, "autotermination_minutes", None),
         single_node=num_workers == 0,
+        node_category=catalog.get("category"),
+        num_gpus=(int(catalog["num_gpus"] * nodes) if catalog.get("num_gpus") else None),
+        driver_node_type_id=getattr(cluster, "driver_node_type_id", None),
+        creator=getattr(cluster, "creator_user_name", None),
+        data_security_mode=_enum_text(getattr(cluster, "data_security_mode", None)),
     )
+
+
+# An SDK enum or plain string, as plain text.
+def _enum_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
 
 
 # All-purpose vs. job compute is a real Databricks distinction
@@ -283,7 +311,11 @@ class ComputeService:
             if reason:
                 logger.info("Excluding cluster %s from Existing Compute: %s", cluster_id, reason)
                 continue
-            options.append(_to_existing_compute(cluster_id, cluster))
+            # One cached catalog fetch for the whole list, not one per
+            # cluster — see _ensure_catalog.
+            options.append(
+                _to_existing_compute(cluster_id, cluster, self._node_info(getattr(cluster, "node_type_id", "")))
+            )
 
         if not options:
             return ExistingComputeListResponse(

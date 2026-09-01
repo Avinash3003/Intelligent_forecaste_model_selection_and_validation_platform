@@ -101,8 +101,28 @@ function ValidationBanner({ state, message, idleText, busyText }) {
 // glance.
 function clusterSublabel(cluster) {
   const capacity = cluster.numCores ? `${cluster.numCores} vCPU · ${formatMemory(cluster.memoryMb) ?? '—'}` : null
-  const shape = cluster.singleNode ? 'single node' : `${cluster.numWorkers} worker(s)`
-  return [capacity, shape, cluster.state].filter(Boolean).join(' · ')
+  const shape = cluster.singleNode ? 'single node' : `${cluster.numWorkers} workers`
+  return [capacity, shape, cluster.nodeTypeId, cluster.state].filter(Boolean).join(' · ')
+}
+
+// Databricks' own cluster states, coloured by what they mean for a run:
+// usable now, starting, or stopped (which still runs — it starts on demand).
+const CLUSTER_STATE_STYLES = {
+  RUNNING: 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300',
+  PENDING: 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  RESTARTING: 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  RESIZING: 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  TERMINATED: 'border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-700/60 dark:text-slate-200',
+  TERMINATING: 'border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-700/60 dark:text-slate-200',
+  ERROR: 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950/50 dark:text-rose-300',
+}
+
+function ClusterStateBadge({ state }) {
+  if (!state) return null
+  const style = CLUSTER_STATE_STYLES[state] ?? CLUSTER_STATE_STYLES.TERMINATED
+  return (
+    <span className={cn('rounded-full border px-2 py-0.5 text-[11px] font-semibold', style)}>{state}</span>
+  )
 }
 
 function ExistingComputeCard({ result, loading, selectedClusterId, validation, onValidate, onSelectCluster }) {
@@ -126,24 +146,43 @@ function ExistingComputeCard({ result, loading, selectedClusterId, validation, o
     sublabel: clusterSublabel(cluster),
   }))
 
-  const rows = [
-    ['Status', compute.state],
-    ['Machine type', compute.nodeTypeId],
-    ['Runtime', compute.runtime],
-    ['Capacity', compute.numCores ? `${compute.numCores} vCPU · ${formatMemory(compute.memoryMb)}` : '—'],
-    ['Workers', compute.singleNode ? 'Single node' : `${compute.numWorkers} worker(s)`],
-    [
-      'Auto termination',
-      compute.autoterminationMinutes ? `${compute.autoterminationMinutes} min idle` : 'Not set',
-    ],
+  // Grouped so the three questions a person actually asks — how big is it,
+  // what does it run, who owns it — each read as a block.
+  const groups = [
+    {
+      title: 'Capacity',
+      rows: [
+        ['vCPU', compute.numCores ? `${compute.numCores} cores` : null],
+        ['Memory', formatMemory(compute.memoryMb)],
+        ['GPU', compute.numGpus ? `${compute.numGpus}` : 'None'],
+        ['Shape', compute.singleNode ? 'Single node' : `${compute.numWorkers} workers + driver`],
+      ],
+    },
+    {
+      title: 'Machine',
+      rows: [
+        ['Node type', compute.nodeTypeId],
+        ['Driver node', compute.driverNodeTypeId],
+        ['Category', compute.nodeCategory],
+        ['Runtime', compute.runtime],
+      ],
+    },
+    {
+      title: 'Policy',
+      rows: [
+        ['Access mode', compute.dataSecurityMode],
+        ['Auto termination', compute.autoterminationMinutes ? `${compute.autoterminationMinutes} min idle` : 'Not set'],
+        ['Created by', compute.creator],
+      ],
+    },
   ]
 
   return (
     <Card className="p-5">
       <div className="mb-4 flex items-center gap-2">
         <Server size={16} className="text-brand-600" />
-        <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Existing compute</p>
-        <span className="ml-auto text-xs text-slate-400">
+        <p className="text-sm font-semibold text-slate-900 dark:text-slate-50">Existing compute</p>
+        <span className="ml-auto text-xs font-medium text-slate-500 dark:text-slate-400">
           {clusters.length} cluster{clusters.length === 1 ? '' : 's'} available
         </span>
       </div>
@@ -152,17 +191,40 @@ function ExistingComputeCard({ result, loading, selectedClusterId, validation, o
         <Select value={compute.clusterId} onChange={onSelectCluster} options={clusterOptions} placeholder="Select a cluster" />
       </Field>
 
-      <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-slate-100 pt-5 dark:border-slate-800 sm:grid-cols-3">
-        {rows.map(([label, value]) => (
-          <div key={label} className="min-w-0">
-            <dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt>
-            <dd className="mt-0.5 truncate text-sm font-medium text-slate-700 dark:text-slate-200">
-              {value || '—'}
-            </dd>
+      {/* Identity strip: the name, its live state, and the id you would
+          paste into Databricks to find the same cluster. */}
+      <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/60">
+        <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">{compute.clusterName}</span>
+        <ClusterStateBadge state={compute.state} />
+        <span className="ml-auto font-mono text-xs text-slate-600 dark:text-slate-300" title="Databricks cluster id">
+          {compute.clusterId}
+        </span>
+      </div>
+
+      <div className="mt-5 grid gap-x-6 gap-y-5 sm:grid-cols-3">
+        {groups.map((group) => (
+          <div key={group.title} className="min-w-0">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
+              {group.title}
+            </p>
+            <dl className="space-y-1.5">
+              {group.rows.map(([label, value]) => (
+                <div key={label} className="flex items-baseline justify-between gap-3">
+                  <dt className="shrink-0 text-xs text-slate-500 dark:text-slate-400">{label}</dt>
+                  <dd
+                    className="truncate text-right text-xs font-semibold text-slate-900 dark:text-slate-100"
+                    title={value || undefined}
+                  >
+                    {value || '—'}
+                  </dd>
+                </div>
+              ))}
+            </dl>
           </div>
         ))}
-      </dl>
-      <p className="mt-4 text-xs text-slate-400">
+      </div>
+
+      <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
         This compute is reused as-is and keeps its own auto-termination policy.
       </p>
 

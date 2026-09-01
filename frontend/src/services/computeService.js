@@ -13,6 +13,11 @@ function normalizeExistingCompute(payload) {
     memoryMb: payload.memory_mb,
     autoterminationMinutes: payload.autotermination_minutes,
     singleNode: payload.single_node,
+    nodeCategory: payload.node_category,
+    numGpus: payload.num_gpus,
+    driverNodeTypeId: payload.driver_node_type_id,
+    creator: payload.creator,
+    dataSecurityMode: payload.data_security_mode,
   }
 }
 
