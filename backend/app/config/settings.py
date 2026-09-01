@@ -3,6 +3,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -142,7 +143,17 @@ class Settings(BaseSettings):
     databricks_docker_image_password: str | None = None
 
     # UC volume for the ORIGINAL uploaded dataset only — nothing else.
-    databricks_uploads_volumes_root: str = "/Volumes/forecastiq/forecasting/upload_files"
+    #
+    # Still "forecast_files": that is the volume's real name in Databricks.
+    # Renaming it needs MANAGE, which this app's service principal does not
+    # have, so the default has to track the infrastructure rather than lead
+    # it — a default naming a volume that does not exist fails every upload.
+    # None means "not explicitly set"; resolved below.
+    databricks_uploads_volumes_root: str | None = None
+    # Deprecated name, still honored: the deployed App Service sets
+    # DATABRICKS_VOLUMES_ROOT, and dropping this field made pydantic ignore
+    # it silently and fall through to the default instead.
+    databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
 
     # UC volume for the curated dataset. Separate from uploads so raw and
     # derived data keep their own lifecycle. Cloud execution only.
@@ -175,6 +186,14 @@ class Settings(BaseSettings):
     azure_tenant_id: str | None = None
     azure_client_id: str | None = None
     azure_client_secret: str | None = None
+
+    # Falls back to the deprecated field only when the new one was not
+    # explicitly given — an explicit new value always wins.
+    @model_validator(mode="after")
+    def _resolve_uploads_volumes_root(self) -> "Settings":
+        if self.databricks_uploads_volumes_root is None:
+            self.databricks_uploads_volumes_root = self.databricks_volumes_root
+        return self
 
     @property
     def entra_group_role_map_parsed(self) -> dict[str, str]:
