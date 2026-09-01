@@ -8,6 +8,7 @@ it never existed — reported "curated storage may be disabled" instead.
 """
 
 import json
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -33,28 +34,37 @@ class _FakeFiles:
 
 
 
-# The engine arguments of the submitted wheel task, as a {flag: value} map.
+# The per-run paths this run was started with. The task definition holds
+# `{{job.parameters.x}}` placeholders; run_now supplies the real values.
 def _submitted_parameters(workspace):
-    task = workspace.jobs.submit_calls[0]["tasks"][0]
-    args = task.python_wheel_task.parameters
-    flags = {}
-    index = 0
-    while index < len(args):
-        if args[index].startswith("--"):
-            has_value = index + 1 < len(args) and not args[index + 1].startswith("--")
-            flags[args[index].lstrip("-").replace("-", "_")] = args[index + 1] if has_value else True
-            index += 2 if has_value else 1
-        else:
-            index += 1
-    return flags
+    return workspace.jobs.run_now_calls[-1]["job_parameters"]
 
 
 class _FakeJobs:
     def __init__(self) -> None:
-        self.submit_calls: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.reset_calls: list[dict] = []
+        self.run_now_calls: list[dict] = []
+        self._jobs: dict[int, str] = {}
 
-    def submit(self, run_name=None, tasks=None):
-        self.submit_calls.append({"run_name": run_name, "tasks": tasks})
+    def create(self, access_control_list=None, **settings):
+        job_id = 4242 + len(self.create_calls)
+        self.create_calls.append({**settings, "access_control_list": access_control_list})
+        self._jobs[job_id] = settings.get("name")
+        return SimpleNamespace(job_id=job_id)
+
+    def list(self, name=None, **kwargs):
+        return [
+            SimpleNamespace(job_id=jid, settings=SimpleNamespace(name=jname))
+            for jid, jname in self._jobs.items()
+            if name is None or jname == name
+        ]
+
+    def reset(self, job_id=None, new_settings=None):
+        self.reset_calls.append({"job_id": job_id, "new_settings": new_settings})
+
+    def run_now(self, job_id=None, job_parameters=None, **kwargs):
+        self.run_now_calls.append({"job_id": job_id, "job_parameters": job_parameters})
         return SimpleNamespace(run_id=7)
 
     def get_run(self, run_id, **kwargs):

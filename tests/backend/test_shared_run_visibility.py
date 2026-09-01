@@ -45,13 +45,13 @@ def dataset(tmp_path):
     return path
 
 
-def test_every_run_is_submitted_with_the_three_role_groups_shared(settings, dataset):
+def test_the_job_every_run_belongs_to_is_shared_with_the_three_role_groups(settings, dataset):
     workspace = _FakeWorkspace()
     runner = DatabricksRunner(settings, workspace_client=workspace)
 
     runner.submit(_request(dataset))
 
-    acl = workspace.jobs.submit_calls[0]["access_control_list"]
+    acl = workspace.jobs.create_calls[0]["access_control_list"]
     assert acl is not None
     groups = {entry.group_name: entry.permission_level.value for entry in acl}
     assert groups == {
@@ -68,7 +68,7 @@ def test_a_group_left_unset_is_simply_not_shared_with(settings, dataset):
 
     runner.submit(_request(dataset))
 
-    acl = workspace.jobs.submit_calls[0]["access_control_list"]
+    acl = workspace.jobs.create_calls[0]["access_control_list"]
     groups = {entry.group_name for entry in acl}
     assert groups == {"ForecastIQ-Admins", "ForecastIQ-DataScientists"}
 
@@ -86,23 +86,31 @@ def test_no_groups_configured_submits_with_no_acl_at_all(settings, dataset):
 
     run_id = runner.submit(_request(dataset))
 
-    # Falls back to the plain, pre-sharing submit signature -- proves the
+    # Falls back to the plain, pre-sharing create signature -- proves the
     # feature is fully inert (not just empty-list) when unconfigured.
-    call = workspace.jobs.submit_calls[0]
-    assert call["access_control_list"] is None
+    assert workspace.jobs.create_calls[0]["access_control_list"] is None
     record = runner._find_job(run_id)
     assert record.status.value != "Failed"
 
 
-def test_a_sharing_failure_falls_back_to_an_unshared_submit_rather_than_failing_the_run(settings, dataset):
+def test_a_sharing_failure_falls_back_to_an_unshared_job_rather_than_failing_the_run(settings, dataset):
     class _RefusingOnceJobs:
         def __init__(self):
             self.calls = []
 
-        def submit(self, run_name=None, tasks=None, access_control_list=None):
+        def create(self, access_control_list=None, **settings):
             self.calls.append(access_control_list)
             if access_control_list is not None:
                 raise RuntimeError("simulated: RESOURCE_DOES_NOT_EXIST, group ForecastIQ-Admins not found")
+            return type("R", (), {"job_id": 4242})()
+
+        def list(self, name=None, **kwargs):
+            return []
+
+        def reset(self, job_id=None, new_settings=None):
+            pass
+
+        def run_now(self, job_id=None, job_parameters=None, **kwargs):
             return type("R", (), {"run_id": 99})()
 
     class _Workspace:

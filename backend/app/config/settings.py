@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     # Empty relies on the cluster already having it.
     databricks_engine_wheel_path: str | None = None
 
+    # Display name of the Databricks Job this app owns. Every run is a run
+    # OF this one job, so its run history is the whole forecast history in
+    # one place. Renaming it makes the next run create a new job under the
+    # new name rather than reusing the old one.
+    databricks_job_display_name: str = "ForecastIQ Forecast Pipeline"
+
     # Databricks Container Services: the pre-built runtime image a NEW job
     # cluster pulls instead of resolving its dependencies from the
     # runtime's own environment. Empty disables DCS entirely — a new job

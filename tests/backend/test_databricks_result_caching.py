@@ -46,7 +46,25 @@ class _CountingJobs:
         self.get_run_calls = 0
         self._state = SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message="")
 
-    def submit(self, run_name=None, tasks=None):
+    def create(self, access_control_list=None, **settings):
+
+        self.acl = access_control_list
+
+        return SimpleNamespace(job_id=4242)
+
+
+    def list(self, name=None, **kwargs):
+
+        return []
+
+
+    def reset(self, job_id=None, new_settings=None):
+
+        pass
+
+
+    def run_now(self, job_id=None, job_parameters=None, **kwargs):
+
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):

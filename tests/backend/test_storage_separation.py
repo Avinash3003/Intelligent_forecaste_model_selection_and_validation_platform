@@ -65,12 +65,11 @@ def test_job_parameters_point_summary_and_status_at_artifacts(tmp_path, dataset)
 
     run_id = runner.submit(_request(dataset))
 
-    task = workspace.jobs.submit_calls[0]["tasks"][0]
-    args = task.python_wheel_task.parameters
+    supplied = workspace.jobs.run_now_calls[-1]["job_parameters"]
     artifacts_root = f"/Volumes/forecastiq/forecasting/artifacts_files/runs/{run_id}"
-    assert f"{artifacts_root}/summary.json" in args
-    assert f"{artifacts_root}/live_status.json" in args
-    assert f"{artifacts_root}/forecast_configuration.json" in args
+    assert supplied["summary_out"] == f"{artifacts_root}/summary.json"
+    assert supplied["live_status_out"] == f"{artifacts_root}/live_status.json"
+    assert supplied["config"] == f"{artifacts_root}/forecast_configuration.json"
 
 
 def test_cleanup_removes_the_upload_and_the_run_artifacts_folder(tmp_path, dataset):

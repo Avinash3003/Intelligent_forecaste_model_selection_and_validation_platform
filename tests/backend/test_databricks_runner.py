@@ -5,6 +5,7 @@ the Runner actually sends and how it interprets what comes back — which is
 the part that has to be right before any real workspace is available.
 """
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -76,10 +77,18 @@ def _not_found(path):
 
 
 
-# The engine arguments of the submitted wheel task, as a {flag: value} map.
-def _submitted_parameters(workspace):
-    task = workspace.jobs.submit_calls[0]["tasks"][0]
-    args = task.python_wheel_task.parameters
+# The engine arguments the first task actually receives, as a {flag: value}
+# map. The task definition carries `{{job.parameters.x}}` placeholders and
+# run_now supplies the values, so this resolves them the way Databricks does.
+def _submitted_parameters(workspace, task_index=0):
+    task = workspace.jobs.submitted_tasks[task_index]
+    supplied = workspace.jobs.submitted_parameters or {}
+    args = [
+        supplied.get(arg[len("{{job.parameters.") : -len("}}")], arg)
+        if arg.startswith("{{job.parameters.")
+        else arg
+        for arg in task.python_wheel_task.parameters
+    ]
     flags = {}
     index = 0
     while index < len(args):
@@ -93,13 +102,35 @@ def _submitted_parameters(workspace):
 
 
 class _FakeJobs:
+    """The runner owns one named Job: it creates it on first use, resets it
+    before each run (compute is per-run), then run_now()s it."""
+
     def __init__(self, state=None) -> None:
-        self.submit_calls: list[dict] = []
+        self.create_calls: list[dict] = []
+        self.reset_calls: list[dict] = []
+        self.run_now_calls: list[dict] = []
         self.cancelled: list[int] = []
+        self._jobs: dict[int, str] = {}
         self._state = state or SimpleNamespace(life_cycle_state="RUNNING", result_state=None, state_message="")
 
-    def submit(self, run_name=None, tasks=None, access_control_list=None):
-        self.submit_calls.append({"run_name": run_name, "tasks": tasks, "access_control_list": access_control_list})
+    def create(self, access_control_list=None, **settings):
+        job_id = 4242 + len(self.create_calls)
+        self.create_calls.append({**settings, "access_control_list": access_control_list})
+        self._jobs[job_id] = settings.get("name")
+        return SimpleNamespace(job_id=job_id)
+
+    def list(self, name=None, **kwargs):
+        return [
+            SimpleNamespace(job_id=job_id, settings=SimpleNamespace(name=job_name))
+            for job_id, job_name in self._jobs.items()
+            if name is None or job_name == name
+        ]
+
+    def reset(self, job_id=None, new_settings=None):
+        self.reset_calls.append({"job_id": job_id, "new_settings": new_settings})
+
+    def run_now(self, job_id=None, job_parameters=None, **kwargs):
+        self.run_now_calls.append({"job_id": job_id, "job_parameters": job_parameters})
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):
@@ -107,6 +138,25 @@ class _FakeJobs:
 
     def cancel_run(self, run_id):
         self.cancelled.append(run_id)
+
+    # --- what the tests assert against -------------------------------
+    #
+    # The job's definition as it stood for the most recent run, whether
+    # that came from create() or a later reset().
+    @property
+    def submitted_settings(self) -> dict:
+        if self.reset_calls:
+            new = self.reset_calls[-1]["new_settings"]
+            return {f.name: getattr(new, f.name) for f in dataclasses.fields(new)}
+        return self.create_calls[-1]
+
+    @property
+    def submitted_tasks(self) -> list:
+        return self.submitted_settings["tasks"]
+
+    @property
+    def submitted_parameters(self) -> dict:
+        return self.run_now_calls[-1]["job_parameters"]
 
 
 class _FakeWorkspace:
@@ -256,7 +306,7 @@ def test_missing_dataset_fails_the_run_with_a_usable_message(settings, tmp_path)
     # Recorded as FAILED rather than raising: the caller already holds this
     # run id, and a 404 on the next poll would be worse than an honest failure.
     assert runner.get_status(run_id) is JobStatus.FAILED
-    assert workspace.jobs.submit_calls == []
+    assert workspace.jobs.run_now_calls == []
 
 
 # ---------------------------------------------------------------------

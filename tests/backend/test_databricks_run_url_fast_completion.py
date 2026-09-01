@@ -54,7 +54,25 @@ class _AlreadyTerminalJobs:
     def __init__(self):
         self.calls = 0
 
-    def submit(self, run_name=None, tasks=None):
+    def create(self, access_control_list=None, **settings):
+
+        self.acl = access_control_list
+
+        return SimpleNamespace(job_id=4242)
+
+
+    def list(self, name=None, **kwargs):
+
+        return []
+
+
+    def reset(self, job_id=None, new_settings=None):
+
+        pass
+
+
+    def run_now(self, job_id=None, job_parameters=None, **kwargs):
+
         return SimpleNamespace(run_id=42)
 
     def get_run(self, run_id, **kwargs):
@@ -106,7 +124,25 @@ def test_a_url_that_already_resolved_is_never_refetched(settings, dataset):
         def __init__(self):
             self.calls = 0
 
-        def submit(self, run_name=None, tasks=None):
+        def create(self, access_control_list=None, **settings):
+
+            self.acl = access_control_list
+
+            return SimpleNamespace(job_id=4242)
+
+
+        def list(self, name=None, **kwargs):
+
+            return []
+
+
+        def reset(self, job_id=None, new_settings=None):
+
+            pass
+
+
+        def run_now(self, job_id=None, job_parameters=None, **kwargs):
+
             return SimpleNamespace(run_id=7)
 
         def get_run(self, run_id, **kwargs):
@@ -142,7 +178,25 @@ def test_a_genuinely_unavailable_url_is_not_retried_on_every_poll(settings, data
         def __init__(self):
             self.calls = 0
 
-        def submit(self, run_name=None, tasks=None):
+        def create(self, access_control_list=None, **settings):
+
+            self.acl = access_control_list
+
+            return SimpleNamespace(job_id=4242)
+
+
+        def list(self, name=None, **kwargs):
+
+            return []
+
+
+        def reset(self, job_id=None, new_settings=None):
+
+            pass
+
+
+        def run_now(self, job_id=None, job_parameters=None, **kwargs):
+
             return SimpleNamespace(run_id=9)
 
         def get_run(self, run_id, **kwargs):

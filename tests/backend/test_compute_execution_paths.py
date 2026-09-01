@@ -7,6 +7,7 @@ name, which is how it previously reached the Serverless pipeline.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config.settings import Settings
-from app.orchestration.databricks_runner import TASK_KEYS, DatabricksRunner
+from app.orchestration.databricks_runner import _SHARED_JOB_CLUSTER_KEY, TASK_KEYS, DatabricksRunner
 from app.orchestration.exceptions import ExecutionError
 from app.orchestration.schemas import PipelineExecutionRequest
 from app.schemas.compute import ComputeSelection, JobComputeConfig
@@ -32,13 +33,32 @@ class _FakeFiles:
 
 
 class _FakeJobs:
-    def __init__(self) -> None:
-        self.submit_calls: list[dict] = []
+    """One named Job the runner creates, resets per run, then run_now()s."""
 
-    def submit(self, run_name=None, tasks=None, access_control_list=None):
-        self.submit_calls.append(
-            {"run_name": run_name, "tasks": tasks, "access_control_list": access_control_list}
-        )
+    def __init__(self) -> None:
+        self.create_calls: list[dict] = []
+        self.reset_calls: list[dict] = []
+        self.run_now_calls: list[dict] = []
+        self._jobs: dict[int, str] = {}
+
+    def create(self, access_control_list=None, **settings):
+        job_id = 4242 + len(self.create_calls)
+        self.create_calls.append({**settings, "access_control_list": access_control_list})
+        self._jobs[job_id] = settings.get("name")
+        return SimpleNamespace(job_id=job_id)
+
+    def list(self, name=None, **kwargs):
+        return [
+            SimpleNamespace(job_id=jid, settings=SimpleNamespace(name=jname))
+            for jid, jname in self._jobs.items()
+            if name is None or jname == name
+        ]
+
+    def reset(self, job_id=None, new_settings=None):
+        self.reset_calls.append({"job_id": job_id, "new_settings": new_settings})
+
+    def run_now(self, job_id=None, job_parameters=None, **kwargs):
+        self.run_now_calls.append({"job_id": job_id, "job_parameters": job_parameters})
         return SimpleNamespace(run_id=99)
 
     def get_run(self, run_id, **kwargs):
@@ -47,27 +67,12 @@ class _FakeJobs:
             run_duration=1,
         )
 
-
-class _FakeClusters:
-    """Stands in for the real Clusters API — jobs.submit() (a one-time run)
-    has no job_clusters/job_cluster_key support in the installed SDK, so a
-    new_job_compute run creates one real cluster here and every task
-    attaches to it by existing_cluster_id (see _create_shared_cluster)."""
-
-    def __init__(self) -> None:
-        self.create_calls: list[dict] = []
-        self.created_ids: list[str] = []
-        self.deleted_ids: list[str] = []
-
-    def create(self, **kwargs):
-        cluster_id = f"managed-cluster-{len(self.create_calls)}"
-        self.create_calls.append(kwargs)
-        self.created_ids.append(cluster_id)
-        details = SimpleNamespace(cluster_id=cluster_id)
-        return SimpleNamespace(response=details, result=lambda timeout=None: details)
-
-    def delete(self, cluster_id=None):
-        self.deleted_ids.append(cluster_id)
+    @property
+    def submitted_settings(self) -> dict:
+        if self.reset_calls:
+            new = self.reset_calls[-1]["new_settings"]
+            return {f.name: getattr(new, f.name) for f in dataclasses.fields(new)}
+        return self.create_calls[-1]
 
 
 class _FakeWorkspaceFiles:
@@ -108,7 +113,6 @@ class _FakeWorkspace:
     def __init__(self) -> None:
         self.files = _FakeFiles()
         self.jobs = _FakeJobs()
-        self.clusters = _FakeClusters()
         self.current_user = _FakeCurrentUser()
         self.workspace = _FakeWorkspaceFiles()
 
@@ -146,21 +150,20 @@ def _request(dataset: Path, compute) -> PipelineExecutionRequest:
 
 
 def _submitted_tasks(workspace):
-    return workspace.jobs.submit_calls[0]["tasks"]
+    return workspace.jobs.submitted_settings["tasks"]
 
 
 def _submitted_task(workspace):
-    """The first DAG task (Load & Prepare). Every task in a run shares the
-    same existing_cluster_id, so this is enough for compute-attachment
-    assertions — the cluster spec itself now lives in what was passed to
-    clusters.create() (_submitted_job_cluster), not on any one task."""
+    """The first DAG task (Load & Prepare). Every task shares the same
+    compute attachment, so this is enough for those assertions — the
+    cluster spec itself lives on the job's shared job_clusters entry."""
     return _submitted_tasks(workspace)[0]
 
 
 def _submitted_job_cluster(workspace):
-    calls = workspace.clusters.create_calls
-    assert calls, "expected one shared cluster to be created for new_job_compute"
-    return SimpleNamespace(**calls[0])
+    clusters = workspace.jobs.submitted_settings.get("job_clusters") or []
+    assert clusters, "expected one shared job cluster for new_job_compute"
+    return clusters[0].new_cluster
 
 
 def _run(settings, dataset, compute):
@@ -188,8 +191,8 @@ def test_new_compute_reaches_submit_with_the_selected_values(settings, dataset):
     assert cluster.node_type_id == "Standard_E8ads_v7"
     assert cluster.spark_version == "16.4.x-cpu-ml-scala2.12"
     assert cluster.num_workers == 3
-    created_id = workspace.clusters.created_ids[0]
-    assert _submitted_task(workspace).existing_cluster_id == created_id
+    assert _submitted_task(workspace).job_cluster_key == _SHARED_JOB_CLUSTER_KEY
+    assert _submitted_task(workspace).existing_cluster_id is None
 
 
 def test_new_compute_carries_autoscale_bounds(settings, dataset):
@@ -362,10 +365,9 @@ def test_the_engine_is_pointed_at_the_same_paths_it_was_given(settings, dataset)
     runner = DatabricksRunner(dcs_settings, workspace_client=workspace)
     runner.submit(_request(dataset, NEW_COMPUTE))
 
-    params = _submitted_task(workspace).python_wheel_task.parameters
-    for flag in ("--dataset", "--config", "--summary-out", "--live-status-out"):
-        value = params[params.index(flag) + 1]
-        assert value.startswith("/Volumes/"), f"{flag} -> {value}"
+    supplied = workspace.jobs.run_now_calls[-1]["job_parameters"]
+    for name in ("dataset", "config", "summary_out", "live_status_out"):
+        assert supplied[name].startswith("/Volumes/"), f"{name} -> {supplied[name]}"
 
 
 def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):
@@ -447,18 +449,19 @@ def test_the_acr_password_never_reaches_a_run_id_or_error_message(settings, data
     assert "super-secret-value" not in caplog.text
 
 
-def test_dcs_never_routes_through_run_now_or_a_job_name(settings, dataset):
-    """No Serverless routing is introduced: DCS is the same jobs.submit path
-    every other compute selection already uses."""
+def test_dcs_runs_the_job_this_runner_defined_itself(settings, dataset):
+    """The old Serverless design ran a job someone else had deployed, whose
+    task spec this app did not control. The job run here is one this runner
+    wrote in the same call, and DCS goes through that same path as every
+    other compute selection rather than a separate one."""
     dcs_settings = settings.model_copy(
         update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
     )
     workspace = _FakeWorkspace()
-    assert not hasattr(workspace.jobs, "run_now")
-
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
-    assert len(workspace.jobs.submit_calls) == 1
+    assert len(workspace.jobs.run_now_calls) == 1
+    assert [task.task_key for task in _submitted_tasks(workspace)] == list(TASK_KEYS)
 
 
 def test_no_node_type_or_worker_count_is_hardcoded(settings, dataset):
@@ -490,13 +493,13 @@ def test_existing_compute_runs_on_the_selected_cluster(settings, dataset):
     assert task.new_cluster is None
 
 
-def test_execution_does_not_depend_on_a_named_job(settings, dataset):
-    """Where a run executes comes from the selection, never a job lookup."""
+def test_where_a_run_executes_comes_from_the_selection_not_the_job(settings, dataset):
+    """The job is reused across runs, but its compute is rewritten from the
+    selection before each one — a name lookup never decides where a run lands."""
     workspace, _, _ = _run(settings, dataset, EXISTING)
 
     assert _submitted_task(workspace).existing_cluster_id == "0826-abc-chosen"
     assert not hasattr(settings, "databricks_job_name")
-    assert not hasattr(workspace.jobs, "run_now_calls")
 
 
 def test_both_modes_submit_the_same_wheel_task(settings, dataset):
@@ -536,10 +539,9 @@ def test_ray_stages_share_one_job_cluster_not_one_per_task(settings, dataset):
     it by existing_cluster_id."""
     workspace, _, _ = _run(settings, dataset, NEW_COMPUTE)
 
-    assert len(workspace.clusters.create_calls) == 1
-    created_id = workspace.clusters.created_ids[0]
+    assert len(workspace.jobs.submitted_settings["job_clusters"]) == 1
     for task in _submitted_tasks(workspace):
-        assert task.existing_cluster_id == created_id
+        assert task.job_cluster_key == _SHARED_JOB_CLUSTER_KEY
         assert task.new_cluster is None
 
 
@@ -569,37 +571,28 @@ def test_unset_mlflow_settings_are_omitted_not_sent_as_empty(settings, dataset):
     assert _submitted_job_cluster(workspace).spark_env_vars == {}
 
 
-def test_the_managed_cluster_self_terminates_and_is_torn_down_on_completion(settings, dataset):
-    """Nothing but this run's own tasks ever targets the cluster it creates
-    for itself — unlike a real job cluster, Databricks will not tear it
-    down on its own, so this runner must (autotermination is only the
-    backstop if that is ever missed)."""
+def test_no_all_purpose_cluster_is_ever_created_for_a_run(settings, dataset):
+    """A job cluster belongs to the run and Databricks disposes of it. The
+    earlier design created an ordinary all-purpose cluster per run instead,
+    which billed at the higher rate and piled up in the Compute list."""
     workspace, runner, run_id = _run(settings, dataset, NEW_COMPUTE)
 
-    assert workspace.clusters.create_calls[0]["autotermination_minutes"] == (
-        DatabricksRunner._MANAGED_CLUSTER_AUTOTERMINATE_MINUTES
-    )
-
-    workspace.jobs.get_run = lambda run_id, **kwargs: SimpleNamespace(
-        state=SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message=""),
-        run_duration=1,
-    )
-    runner.get_status(run_id)
-
-    assert workspace.clusters.deleted_ids == [workspace.clusters.created_ids[0]]
+    assert not hasattr(workspace, "clusters") or not getattr(workspace.clusters, "create_calls", [])
+    assert workspace.jobs.submitted_settings["job_clusters"][0].job_cluster_key == _SHARED_JOB_CLUSTER_KEY
 
 
-def test_existing_compute_never_creates_or_deletes_a_cluster(settings, dataset):
-    workspace, runner, run_id = _run(settings, dataset, EXISTING)
+def test_every_run_is_a_run_of_the_same_named_job(settings, dataset):
+    """All runs belong to one job, so its run history is the whole forecast
+    history — a second run reuses the job rather than defining another."""
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    runner.submit(_request(dataset, NEW_COMPUTE))
+    runner.submit(_request(dataset, NEW_COMPUTE))
 
-    workspace.jobs.get_run = lambda run_id, **kwargs: SimpleNamespace(
-        state=SimpleNamespace(life_cycle_state="TERMINATED", result_state="SUCCESS", state_message=""),
-        run_duration=1,
-    )
-    runner.get_status(run_id)
-
-    assert workspace.clusters.create_calls == []
-    assert workspace.clusters.deleted_ids == []
+    assert len(workspace.jobs.create_calls) == 1
+    assert len(workspace.jobs.run_now_calls) == 2
+    assert {call["job_id"] for call in workspace.jobs.run_now_calls} == {4242}
+    assert workspace.jobs.create_calls[0]["name"] == settings.databricks_job_display_name
 
 
 # ---- safety ----------------------------------------------------------
@@ -622,7 +615,7 @@ def test_missing_compute_fails_clearly(settings, dataset, compute, expected):
     from app.orchestration.schemas import JobStatus
 
     assert runner.get_status(run_id) is JobStatus.FAILED
-    assert workspace.jobs.submit_calls == []
+    assert workspace.jobs.run_now_calls == []
 
 
 def test_unknown_compute_mode_is_rejected():
@@ -630,12 +623,14 @@ def test_unknown_compute_mode_is_rejected():
         ComputeSelection(mode="serverless")
 
 
-# Routing a run by job name is how execution previously reached the
-# Serverless pipeline; no application module may do it again.
-FORBIDDEN_ROUTING = ("run_now", "_resolve_job_id", "databricks_job_name", "databricks_job_id")
+# Resolving a job someone ELSE deployed, by a configured name or id, is how
+# execution previously reached the Serverless pipeline. `run_now` itself is
+# no longer forbidden — this runner calls it on the job it defines and owns
+# — but a configured foreign job name/id must never come back.
+FORBIDDEN_ROUTING = ("_resolve_job_id", "databricks_job_name", "databricks_job_id")
 
 
-def test_no_application_module_can_route_a_run_by_job_name():
+def test_no_application_module_routes_a_run_to_a_foreign_job():
     offenders = []
     for path in Path("backend/app").rglob("*.py"):
         source = path.read_text()
@@ -669,6 +664,6 @@ def test_volume_paths_and_config_staging_are_unchanged(settings, dataset):
     assert config["date_column"] == "date"
     assert config["curated_storage"]["root_dir"].startswith(settings.databricks_curated_volumes_root)
 
-    args = _submitted_task(workspace).python_wheel_task.parameters
-    assert f"{artifacts_root}/summary.json" in args
-    assert f"{artifacts_root}/live_status.json" in args
+    supplied = workspace.jobs.run_now_calls[-1]["job_parameters"]
+    assert supplied["summary_out"] == f"{artifacts_root}/summary.json"
+    assert supplied["live_status_out"] == f"{artifacts_root}/live_status.json"

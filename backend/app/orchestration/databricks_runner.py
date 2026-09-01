@@ -25,7 +25,7 @@ import logging
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -136,6 +136,17 @@ TASK_KEYS: tuple[str, ...] = (
 )
 
 
+# One job cluster every task attaches to, rather than one cluster each.
+_SHARED_JOB_CLUSTER_KEY = "forecastiq_pipeline"
+
+# The four per-run paths, as `{{job.parameters.x}}` references. They live in
+# the job definition once; `run_now` supplies the actual values per run, so
+# the definition itself never has to be rewritten for a new dataset.
+_JOB_PARAMETER_REFS = {
+    name: f"{{{{job.parameters.{name}}}}}"
+    for name in ("dataset", "config", "summary_out", "live_status_out")
+}
+
 
 # The engine CLI arguments one task passes to the wheel entry point.
 def _engine_parameters(parameters: dict[str, str], stage: str) -> list[str]:
@@ -222,12 +233,6 @@ class _DatabricksJobRecord:
     # paths follow. Held here because cancellation has to delete exactly
     # what the run wrote, long after the request that chose it is gone.
     uses_container: bool = False
-    # Set only when this run created its own cluster for new_job_compute
-    # (see _create_shared_cluster) — never for the user's own existing
-    # cluster. Terminated once the run goes terminal (_maybe_terminate_
-    # managed_cluster); this flag stops that from being attempted twice.
-    managed_cluster_id: str | None = None
-    managed_cluster_terminated: bool = False
 
 
 class DatabricksRunner(PipelineRunner):
@@ -401,7 +406,7 @@ class DatabricksRunner(PipelineRunner):
         run_id = record.run_id
         try:
             dataset_uri = self._upload_data_to_storage(run_id, request)
-            databricks_run_id, managed_cluster_id = self._trigger_databricks_job(run_id, request, dataset_uri)
+            databricks_run_id, _ = self._trigger_databricks_job(run_id, request, dataset_uri)
         except ExecutionError as exc:
             with self._lock:
                 record.status = JobStatus.FAILED
@@ -422,7 +427,6 @@ class DatabricksRunner(PipelineRunner):
             record.summary_uri = f"{run_artifacts_root}/summary.json"
             record.live_status_uri = f"{run_artifacts_root}/live_status.json"
             record.databricks_run_id = databricks_run_id
-            record.managed_cluster_id = managed_cluster_id
 
         # A breadcrumb, not the source of truth: the in-memory record above
         # is that, but it does not survive a process restart, and MLflow
@@ -650,7 +654,6 @@ class DatabricksRunner(PipelineRunner):
             record.completed_at = cancelled_at
             record.cancelled_by_user_id = cancelled_by_user_id
             record.cancelled_by_display_name = cancelled_by_display_name
-        self._maybe_terminate_managed_cluster(record)
 
         # Requesting cancellation and the job actually stopping are not the
         # same instant — Databricks gives no synchronous "wait until fully
@@ -837,16 +840,19 @@ class DatabricksRunner(PipelineRunner):
     def _trigger_databricks_job(
         self, run_id: str, request: PipelineExecutionRequest, dataset_uri: str
     ) -> tuple[int, str | None]:
-        """Submit one Databricks Job Run containing all seven pipeline
-        tasks, wired load_prepare -> build_series -> train_models ->
-        evaluate_models -> explain_models -> rank_select -> publish_results
-        via depends_on — so Databricks' own Jobs UI renders the real
-        workflow graph, not just this app's.
+        """Start one run of ForecastIQ's own Databricks Job.
+
+        The job is a real, named, persistent definition this app owns and
+        keeps current — seven tasks wired load_prepare -> build_series ->
+        train_models -> evaluate_models -> explain_models -> rank_select ->
+        publish_results by depends_on, sharing one JOB cluster. So every
+        run lands in one job's run history, and its compute is billed at
+        the Jobs rate and disappears when the run ends, instead of leaving
+        an all-purpose cluster behind per run.
 
         Ray parallelism stays entirely inside train/evaluate/explain/
         rank_select's own tasks (see forecast_engine.parallel.ray_executor):
-        the DAG below is the orchestration graph, never one Databricks task
-        per forecast key.
+        the DAG is the orchestration graph, never one task per forecast key.
         """
         compute = _require_compute(request.compute)
         uses_container = self._uses_container_image(compute)
@@ -859,29 +865,10 @@ class DatabricksRunner(PipelineRunner):
         }
 
         compute_sdk, jobs_sdk = _databricks_service_modules()
-        cluster_id, managed_cluster_id = self._resolve_shared_cluster(run_id, compute, compute_sdk)
-        libraries = self._engine_libraries(compute_sdk)
-
-        tasks = []
-        for index, task_key in enumerate(TASK_KEYS):
-            task = jobs_sdk.SubmitTask(
-                task_key=task_key,
-                depends_on=(
-                    [jobs_sdk.TaskDependency(task_key=TASK_KEYS[index - 1])] if index > 0 else None
-                ),
-                existing_cluster_id=cluster_id,
-                python_wheel_task=jobs_sdk.PythonWheelTask(
-                    package_name="forecast_engine",
-                    entry_point="forecast-engine",
-                    parameters=_engine_parameters(parameters, task_key),
-                ),
-                libraries=libraries,
-            )
-            tasks.append(task)
-
         try:
-            submitted = self._submit_shared(jobs_sdk, run_id, tasks)
-            return int(submitted.run_id), managed_cluster_id
+            job_id = self._ensure_forecast_job(run_id, compute, compute_sdk, jobs_sdk)
+            started = self._workspace.jobs.run_now(job_id=job_id, job_parameters=parameters)
+            return int(started.run_id), None
         except ExecutionError:
             raise
         except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
@@ -889,44 +876,85 @@ class DatabricksRunner(PipelineRunner):
                 safe_detail(exc, fallback="The forecast could not be started on the selected compute.")
             ) from exc
 
-    # One cluster, shared by every task — this SDK's jobs.submit() (a
-    # one-time run) has no job_clusters/job_cluster_key support at all
-    # (confirmed against the installed databricks-sdk: SubmitTask has no
-    # such field, and JobsAPI.submit() takes no such parameter — that
-    # exists only for jobs.create()'s persistent job definitions). For
-    # existing_compute the user's own cluster already is that one cluster.
-    # For new_job_compute, a real cluster is created here — once, before
-    # any task references it by existing_cluster_id — instead of letting
-    # each of the seven tasks boot (and pay for) its own.
+    # The job definition, created once and kept current afterwards.
     #
-    # Returns (cluster_id, managed_cluster_id): the second is only set when
-    # this call created the cluster, so the caller knows to terminate it
-    # once the run finishes — never set for the user's own existing cluster.
-    def _resolve_shared_cluster(self, run_id: str, compute: Any, compute_sdk: Any) -> tuple[str, str | None]:
-        if compute.mode == "existing_compute":
-            return compute.cluster_id, None
-        cluster_id = self._create_shared_cluster(run_id, compute.job_compute, compute_sdk)
-        return cluster_id, cluster_id
+    # Reset before every run because compute is chosen per run and a job's
+    # cluster spec is part of its definition — `run_now` cannot override
+    # it. `max_concurrent_runs=1` is what makes that safe: a second run
+    # queues behind the first rather than racing its reset.
+    def _ensure_forecast_job(self, run_id: str, compute: Any, compute_sdk: Any, jobs_sdk: Any) -> int:
+        settings = self._job_settings(run_id, compute, compute_sdk, jobs_sdk)
+        job_id = self._find_forecast_job()
+        if job_id is not None:
+            self._workspace.jobs.reset(job_id=job_id, new_settings=jobs_sdk.JobSettings(**settings))
+            return job_id
 
-    # A real, ordinary cluster — not a "job cluster" construct, since one-time
-    # submitted runs have no such thing — created and left to run every one
-    # of the seven tasks, then torn down once the run reaches a terminal
-    # state (see _terminate_managed_cluster). autotermination is the backstop
-    # if that teardown is ever missed.
-    _MANAGED_CLUSTER_AUTOTERMINATE_MINUTES = 15
+        # The ACL is set once, when the job is defined; every run of it is
+        # then visible to the three role groups. A group that cannot be
+        # resolved must not cost the run — create it unshared instead.
+        acl = self._shared_run_acl(jobs_sdk)
+        if acl:
+            try:
+                created = self._workspace.jobs.create(**settings, access_control_list=acl)
+                return int(created.job_id)
+            except Exception as exc:  # noqa: BLE001 - sharing must never block the run itself
+                logger.warning(
+                    "Could not share the ForecastIQ job with its role groups: %s", safe_detail(exc)
+                )
+        created = self._workspace.jobs.create(**settings)
+        return int(created.job_id)
 
-    def _create_shared_cluster(self, run_id: str, config: Any, compute_sdk: Any) -> str:
-        spec = self._new_cluster_spec(run_id, config, compute_sdk)
-        spec.cluster_name = f"forecastiq-{run_id}"
-        spec.autotermination_minutes = self._MANAGED_CLUSTER_AUTOTERMINATE_MINUTES
-        # Blocks until the cluster is actually RUNNING. Submitting tasks
-        # against a not-yet-running cluster works, but Databricks then
-        # counts the whole boot wait as load_prepare's own task duration —
-        # this waits here instead, on the already-async staging thread, so
-        # every task's reported time is its real work, not compute startup.
-        kwargs = {f.name: getattr(spec, f.name) for f in fields(spec)}
-        cluster = self._workspace.clusters.create(**kwargs).result()
-        return cluster.cluster_id
+    # This app's own job, found by the name it created it under. Not the
+    # old "resolve a pre-deployed job by name" routing: the definition
+    # below is written by this runner and reset on every run, so the name
+    # only identifies which job to keep updating.
+    def _find_forecast_job(self) -> int | None:
+        name = self._settings.databricks_job_display_name
+        try:
+            for job in self._workspace.jobs.list(name=name):
+                return int(job.job_id)
+        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
+            logger.warning("Could not look up the ForecastIQ job: %s", safe_detail(exc))
+        return None
+
+    # Seven tasks on one shared job cluster, with the per-run paths left as
+    # job parameters `run_now` fills in.
+    def _job_settings(self, run_id: str, compute: Any, compute_sdk: Any, jobs_sdk: Any) -> dict[str, Any]:
+        libraries = self._engine_libraries(compute_sdk)
+        tasks = []
+        for index, task_key in enumerate(TASK_KEYS):
+            task = jobs_sdk.Task(
+                task_key=task_key,
+                depends_on=(
+                    [jobs_sdk.TaskDependency(task_key=TASK_KEYS[index - 1])] if index > 0 else None
+                ),
+                python_wheel_task=jobs_sdk.PythonWheelTask(
+                    package_name="forecast_engine",
+                    entry_point="forecast-engine",
+                    parameters=_engine_parameters(_JOB_PARAMETER_REFS, task_key),
+                ),
+                libraries=libraries,
+            )
+            self._attach_compute(task, compute)
+            tasks.append(task)
+
+        settings: dict[str, Any] = {
+            "name": self._settings.databricks_job_display_name,
+            "tasks": tasks,
+            "max_concurrent_runs": 1,
+            "parameters": [
+                jobs_sdk.JobParameterDefinition(name=name, default="")
+                for name in _JOB_PARAMETER_REFS
+            ],
+        }
+        if compute.mode != "existing_compute":
+            settings["job_clusters"] = [
+                jobs_sdk.JobCluster(
+                    job_cluster_key=_SHARED_JOB_CLUSTER_KEY,
+                    new_cluster=self._new_cluster_spec(run_id, compute.job_compute, compute_sdk),
+                )
+            ]
+        return settings
 
     # Every run is a shared enterprise resource, not a personal one: whoever
     # submits it, the same three role groups can see it in Databricks
@@ -936,20 +964,15 @@ class DatabricksRunner(PipelineRunner):
     # express — Databricks has no per-run-now cluster override).
     # `jobs.submit()` accepts an access_control_list on the one-time-run job
     # it creates, so this is one atomic call, not a submit-then-share race.
-    def _submit_shared(self, jobs_sdk: Any, run_id: str, tasks: list[Any]) -> Any:
-        acl = self._shared_run_acl(jobs_sdk)
-        if acl:
-            try:
-                return self._workspace.jobs.submit(
-                    run_name=f"forecastiq-{run_id}", tasks=tasks, access_control_list=acl
-                )
-            except Exception as exc:  # noqa: BLE001 - sharing must never block the run itself
-                logger.warning(
-                    "Could not share run %s with the ForecastIQ groups at submit time: %s",
-                    run_id,
-                    safe_detail(exc),
-                )
-        return self._workspace.jobs.submit(run_name=f"forecastiq-{run_id}", tasks=tasks)
+    # The selected compute is the compute that runs; there is no fallback.
+    # new_job_compute attaches by job_cluster_key so all seven tasks share
+    # the one job cluster defined alongside them; existing_compute attaches
+    # the user's own cluster directly.
+    def _attach_compute(self, task: Any, compute: Any) -> None:
+        if compute.mode == "existing_compute":
+            task.existing_cluster_id = compute.cluster_id
+        else:
+            task.job_cluster_key = _SHARED_JOB_CLUSTER_KEY
 
     def _shared_run_acl(self, jobs_sdk: Any) -> list[Any]:
         groups = [
@@ -1279,27 +1302,6 @@ class DatabricksRunner(PipelineRunner):
                 record.error = error
             if status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED) and not record.completed_at:
                 record.completed_at = _now_iso()
-
-        if status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-            self._maybe_terminate_managed_cluster(record)
-
-    # The cluster this run created for itself (new_job_compute only — see
-    # _create_shared_cluster) has no job to auto-terminate it when the run's
-    # tasks finish, unlike a real job cluster. autotermination_minutes is
-    # the backstop; this is the prompt path, tried once per run.
-    def _maybe_terminate_managed_cluster(self, record: _DatabricksJobRecord) -> None:
-        if record.managed_cluster_id is None or record.managed_cluster_terminated:
-            return
-        record.managed_cluster_terminated = True
-        try:
-            self._workspace.clusters.delete(cluster_id=record.managed_cluster_id)
-        except Exception as exc:  # noqa: BLE001 - the autotermination backstop still applies
-            logger.warning(
-                "Could not terminate the cluster created for run %s (%s): %s",
-                record.run_id,
-                record.managed_cluster_id,
-                safe_detail(exc),
-            )
 
     def _to_listing(self, record: _DatabricksJobRecord) -> RunListing:
         stages = record.stages
