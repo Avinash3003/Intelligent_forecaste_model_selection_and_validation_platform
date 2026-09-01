@@ -203,24 +203,36 @@ def _dump(value: Any) -> bytes:
     return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+# (worker_id, node_id) when actually running as a Ray task, else (None,
+# None) — these four functions are also called directly, unwrapped, by the
+# sequential fallback (_run_stage_local), which must work whether or not
+# Ray is even installed.
+def _ray_context_ids() -> tuple[str | None, str | None]:
+    try:
+        import ray
+
+        if not ray.is_initialized():
+            return None, None
+        ctx = ray.get_runtime_context()
+        return ctx.get_worker_id(), ctx.get_node_id()
+    except ImportError:
+        return None, None
+
+
 def _remote_train(series: ForecastSeries, config: KeyWorkflowConfig):
     task_started = time.time()
     report = train_key(_copy_series(series), config)
     _prepare_trained_models_for_pickling(report)
-    import ray
-
-    ctx = ray.get_runtime_context()
-    return _dump(report), task_started, time.time(), ctx.get_worker_id(), ctx.get_node_id()
+    worker_id, node_id = _ray_context_ids()
+    return _dump(report), task_started, time.time(), worker_id, node_id
 
 
 def _remote_evaluate(series: ForecastSeries, config: KeyWorkflowConfig, trained_payload: bytes):
     task_started = time.time()
     trained: list[TrainedModel] = pickle.loads(trained_payload)
     report = evaluate_key(_copy_series(series), config, trained)
-    import ray
-
-    ctx = ray.get_runtime_context()
-    return _dump(report), task_started, time.time(), ctx.get_worker_id(), ctx.get_node_id()
+    worker_id, node_id = _ray_context_ids()
+    return _dump(report), task_started, time.time(), worker_id, node_id
 
 
 def _remote_explain(
@@ -233,10 +245,8 @@ def _remote_explain(
     evaluation: EvaluationReport = pickle.loads(evaluation_payload)
     trained: list[TrainedModel] = pickle.loads(trained_payload)
     report = explain_key(_copy_series(series), config, evaluation, trained)
-    import ray
-
-    ctx = ray.get_runtime_context()
-    return _dump(report), task_started, time.time(), ctx.get_worker_id(), ctx.get_node_id()
+    worker_id, node_id = _ray_context_ids()
+    return _dump(report), task_started, time.time(), worker_id, node_id
 
 
 def _remote_rank_select(
@@ -254,10 +264,8 @@ def _remote_rank_select(
     for result in selection.results:
         if result.fitted_model is not None:
             result.fitted_model.prepare_for_pickling()
-    import ray
-
-    ctx = ray.get_runtime_context()
-    return _dump((ranking, selection)), task_started, time.time(), ctx.get_worker_id(), ctx.get_node_id()
+    worker_id, node_id = _ray_context_ids()
+    return _dump((ranking, selection)), task_started, time.time(), worker_id, node_id
 
 
 # Fallback payloads for a key with nothing from the stage before it —
