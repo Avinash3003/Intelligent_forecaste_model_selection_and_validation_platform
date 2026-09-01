@@ -332,6 +332,11 @@ class ForecastEnginePipeline:
             context, snapshot = checkpoint.load(artifacts_root, run_id)
             if snapshot is not None and stage in _PHASES_RESUMING_KEY_EXECUTION:
                 context.key_stage_executor = StagedKeyExecution.resume(self._key_workflow_config(context), snapshot)
+            # A fresh process has no MLflow run open in its own fluent
+            # state — only begin()'s task opened one. Without this,
+            # every later task's track()/fail() reports "no run was open".
+            if context.tracking_result is not None:
+                self._tracking_pipeline.resume(context.tracking_result.run_id)
 
         if live_status_path is not None:
             context.on_stage_change = LiveStatusWriter(live_status_path)

@@ -47,14 +47,14 @@ def _dataset(tmp_path, keys: int = 3, months: int = 36):
     return path
 
 
-def _pipeline(tmp_path, *, parallel_keys: bool) -> ForecastEnginePipeline:
+def _pipeline(tmp_path, *, parallel_keys: bool, mlflow_config: MLflowConfig | None = None) -> ForecastEnginePipeline:
     default = ModelConfig.default()
     registry = tuple(
         replace(spec, enabled=True) if spec.name == "seasonal_naive" else spec for spec in default.registry
     )
     return ForecastEnginePipeline(
         model_config=replace(default, registry=registry),
-        mlflow_config=MLflowConfig(enabled=False),
+        mlflow_config=mlflow_config or MLflowConfig(enabled=False),
         pipeline_config=PipelineConfig(
             curated_storage=CuratedStorageConfig(root_dir=str(tmp_path / "curated")),
             model_storage=ModelStorageConfig(root_dir=str(tmp_path / "models")),
@@ -163,3 +163,43 @@ def test_full_pipeline_via_seven_checkpointed_stage_calls_matches_direct_run(tmp
     staged_winners = {r.group_id: r.model_name for r in context.production_selection_report.results}
     assert staged_winners == direct_winners
     assert set(staged_winners) == {"S1", "S2", "S3"}
+
+
+@requires_ray
+def test_mlflow_tracking_survives_all_seven_checkpointed_tasks(tmp_path):
+    """begin() opens the MLflow run in task 1's process only — every later
+    task is a fresh process with no run in its own fluent state. Without
+    resume() in run_checkpointed_stage, track() at publish_results reports
+    "no run was open" even though a real run exists on the tracking server."""
+    dataset_path = _dataset(tmp_path, keys=2)
+    config = ForecastConfiguration(date_column="date", target_column="sales", key_columns=("store",))
+    mlflow_config = MLflowConfig(tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}")
+
+    staged_root = tmp_path / "staged"
+    artifacts_root = str(staged_root / "artifacts")
+    run_id = "checkpoint-mlflow-run"
+
+    import mlflow
+
+    context = None
+    for stage in PHASE_ORDER:
+        pipeline = _pipeline(staged_root, parallel_keys=True, mlflow_config=mlflow_config)
+        context = pipeline.run_checkpointed_stage(
+            stage,
+            run_id=run_id,
+            dataset_path=str(dataset_path),
+            configuration=config,
+            artifacts_root=artifacts_root,
+            selected_models=["seasonal_naive"],
+        )
+        # A real task's process just exits, leaving nothing fluent-active
+        # in the next one. One test process has no such boundary, so this
+        # clears MLflow's own global active-run stack to match it — the
+        # thing this test actually exercises, resume() reopening a run by
+        # id, behaves identically either way.
+        mlflow.end_run()
+
+    assert context is not None
+    assert context.tracking_result.logged is True, context.tracking_result.error
+    assert context.tracking_result.status in ("logged", "logged_with_artifact_errors")
+    assert context.tracking_result.models_registered >= 1
