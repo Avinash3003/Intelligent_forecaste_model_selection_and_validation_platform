@@ -18,7 +18,8 @@ import MLflowRunCard from './components/MLflowRunCard'
 import DebugPanel from './components/DebugPanel'
 import PipelineExecutionGraph from './components/PipelineExecutionGraph'
 import { useRunStatusPolling } from '../../hooks/useRunStatusPolling'
-import { fetchDeployments, fetchResults, isTerminalStatus } from '../../services'
+import { useRunHistory } from '../../hooks/useRunHistory'
+import { fetchResults, isTerminalStatus } from '../../services'
 import { formatDateRange, formatIST } from '../../utils/formatDateTime'
 
 // Maps the backend's snake_case dashboard payload into the shape the
@@ -137,8 +138,11 @@ export default function Results() {
   // Raw normalized deployments (id, dataset, startTimeRaw, ...) — every
   // Dataset/Run option below is derived from this one list, never
   // re-fetched or guessed independently.
-  const [runs, setRuns] = useState([])
-  const [runsLoading, setRunsLoading] = useState(true)
+  // Shared with Dashboard and Deployments. An empty list in the seconds
+  // after a backend restart means history is still warming, not that no
+  // run exists — this page used to fetch once and render "No runs yet"
+  // permanently in that window. See useRunHistory.
+  const { runs, loading: runsLoading, error: runsError } = useRunHistory()
   const [dataset, setDataset] = useState('')
   const [run, setRun] = useState(runFromUrl)
   const [groupId, setGroupId] = useState('')
@@ -163,26 +167,16 @@ export default function Results() {
   // the Dataset dropdown's de-duplication and the Run dropdown's ordering
   // rely on below — neither re-sorts.
   useEffect(() => {
-    let cancelled = false
-    fetchDeployments()
-      .then((data) => {
-        if (cancelled) return
-        setRuns(data)
-        // Default to the run named in the URL (a deep link, or a refresh
-        // of one) when present, otherwise the newest run overall — and
-        // the Dataset dropdown follows whichever run that resolves to, so
-        // a refresh never shows a stale dataset with no matching run.
-        const preselected = data.find((item) => item.id === runFromUrl)
-        const seed = preselected || data[0]
-        setRun((current) => current || seed?.id || '')
-        setDataset((current) => current || seed?.dataset || '')
-      })
-      .catch((err) => !cancelled && setError(err.message))
-      .finally(() => !cancelled && setRunsLoading(false))
-    return () => {
-      cancelled = true
-    }
-  }, [runFromUrl])
+    if (!runs.length) return
+    // Default to the run named in the URL (a deep link, or a refresh of
+    // one) when present, otherwise the newest run overall — and the
+    // Dataset dropdown follows whichever run that resolves to, so a
+    // refresh never shows a stale dataset with no matching run.
+    const preselected = runs.find((item) => item.id === runFromUrl)
+    const seed = preselected || runs[0]
+    setRun((current) => current || seed?.id || '')
+    setDataset((current) => current || seed?.dataset || '')
+  }, [runs, runFromUrl])
 
   // Dataset dropdown: every distinct dataset, each exactly once, in the
   // order its most recent run appears (i.e. most-recently-used dataset
@@ -414,14 +408,16 @@ export default function Results() {
       )
     }
 
-    if (error) {
+    // A run-list failure reads the same as a results failure: either way
+    // this page cannot show anything, and the reason belongs on screen.
+    if (error || runsError) {
       return (
         <SectionContainer>
           <div className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50/70 px-4 py-3 text-sm text-rose-600 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">
             <AlertCircle size={16} className="mt-0.5 shrink-0" />
             <div>
               <p className="font-medium">Could not load results</p>
-              <p className="mt-0.5">{error}</p>
+              <p className="mt-0.5">{error || runsError}</p>
             </div>
           </div>
         </SectionContainer>

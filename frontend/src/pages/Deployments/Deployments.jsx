@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AlertCircle, RefreshCw, Rocket } from 'lucide-react'
 import PageContainer from '../../components/common/PageContainer'
 import SectionContainer from '../../components/layout/SectionContainer'
@@ -8,68 +8,19 @@ import Loader from '../../components/ui/Loader'
 import Button from '../../components/ui/Button'
 import DeploymentsFilterBar from './components/DeploymentsFilterBar'
 import DeploymentsTable from './components/DeploymentsTable'
-import { fetchDeployments, isTerminalStatus } from '../../services'
+import { useRunHistory } from '../../hooks/useRunHistory'
 
 const PAGE_SIZE = 5
-const REFRESH_INTERVAL_MS = 5000
 
 export default function Deployments() {
-  const [runs, setRuns] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  // The fetch/retry policy this page pioneered now lives in the hook, so
+  // Dashboard and Results get it too — they each fetched once and showed
+  // "no runs" through the window where history is still warming.
+  const { runs, loading, error, reload } = useRunHistory()
 
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('All')
   const [page, setPage] = useState(1)
-
-  const cancelledRef = useRef(false)
-  const timeoutRef = useRef(null)
-
-  const load = useCallback(async ({ showSpinner } = {}) => {
-    if (showSpinner) setLoading(true)
-    try {
-      const data = await fetchDeployments()
-      if (cancelledRef.current) return data
-      setRuns(data)
-      setError(null)
-      return data
-    } catch (err) {
-      if (!cancelledRef.current) setError(err.message)
-      return null
-    } finally {
-      if (!cancelledRef.current && showSpinner) setLoading(false)
-    }
-  }, [])
-
-  // Refreshes on an interval only while at least one run is still active,
-  // so a finished history page stops issuing requests entirely.
-  useEffect(() => {
-    cancelledRef.current = false
-
-    async function cycle(showSpinner) {
-      const data = await load({ showSpinner })
-      if (cancelledRef.current) return
-
-      const hasActiveRun = (data ?? []).some((run) => !isTerminalStatus(run.status))
-      // An empty list is also worth one more look. Run history is read
-      // from MLflow, which the backend warms at startup but cannot have
-      // ready in the seconds immediately after a restart — and an empty
-      // table that has stopped refreshing is indistinguishable from "you
-      // have never run anything", which is the one thing it must not be
-      // mistaken for. Costs nothing once history is warm: the backend
-      // answers a repeat list from cache in single-digit milliseconds.
-      if (hasActiveRun || (data ?? []).length === 0) {
-        timeoutRef.current = setTimeout(() => cycle(false), REFRESH_INTERVAL_MS)
-      }
-    }
-
-    cycle(true)
-
-    return () => {
-      cancelledRef.current = true
-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    }
-  }, [load])
 
   const filteredRuns = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -109,7 +60,7 @@ export default function Deployments() {
             Monitor run status across every pipeline execution submitted to the Pipeline Executor.
           </p>
         </div>
-        <Button variant="secondary" icon={RefreshCw} onClick={() => load({ showSpinner: true })}>
+        <Button variant="secondary" icon={RefreshCw} onClick={() => reload({ showSpinner: true })}>
           Refresh
         </Button>
       </div>

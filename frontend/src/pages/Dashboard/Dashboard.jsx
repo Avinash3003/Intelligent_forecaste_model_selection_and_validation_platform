@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AlertCircle, Eye, Plus, Rocket } from 'lucide-react'
 import PageContainer from '../../components/common/PageContainer'
@@ -9,7 +9,8 @@ import Button from '../../components/ui/Button'
 import Loader from '../../components/ui/Loader'
 import EmptyState from '../../components/ui/EmptyState'
 import SectionContainer from '../../components/layout/SectionContainer'
-import { fetchDeployments, isTerminalStatus } from '../../services'
+import { isTerminalStatus } from '../../services'
+import { useRunHistory } from '../../hooks/useRunHistory'
 
 const RECENT_RUN_LIMIT = 5
 
@@ -60,20 +61,9 @@ function buildStats(runs) {
 export default function Dashboard() {
   const navigate = useNavigate()
 
-  const [runs, setRuns] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    let cancelled = false
-    fetchDeployments()
-      .then((data) => !cancelled && setRuns(data))
-      .catch((err) => !cancelled && setError(err.message))
-      .finally(() => !cancelled && setLoading(false))
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // Shared with Deployments and Results: an empty list right after a
+  // backend restart means "history is still warming", not "no runs".
+  const { runs, loading, error } = useRunHistory()
 
   const stats = useMemo(() => buildStats(runs), [runs])
   const recentRuns = useMemo(() => runs.slice(0, RECENT_RUN_LIMIT), [runs])
