@@ -75,8 +75,8 @@ def mint(signing_key, **overrides) -> str:
         "tid": TENANT,
         "oid": "ba40c78a-9e2e-4bd3-85e2-3a0cc9bd3f09",
         "sub": "subject-abc",
-        "name": "Avinash A",
-        "preferred_username": "ambatiniharika.apply_gmail.com#EXT#@ambatiniharikaapplygmail.onmicrosoft.com",
+        "name": "Example User",
+        "preferred_username": "guest.user_example.com#EXT#@contoso.onmicrosoft.com",
         "roles": ["Admin"],
     }
     claims.update(overrides)
@@ -93,7 +93,7 @@ def test_valid_admin_token_yields_an_admin_principal(validator, signing_key):
     principal = validator.validate(mint(signing_key))
 
     assert principal.roles == [Role.ADMIN]
-    assert principal.display_name == "Avinash A"
+    assert principal.display_name == "Example User"
     # `oid` is preferred over `sub` — stable per tenant, unlike `sub`.
     assert principal.subject == "ba40c78a-9e2e-4bd3-85e2-3a0cc9bd3f09"
     assert principal.tenant_id == TENANT

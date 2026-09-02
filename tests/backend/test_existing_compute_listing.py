@@ -251,7 +251,7 @@ def test_a_cluster_dedicated_to_another_principal_is_excluded():
     mine = _FakeCluster("c1", "sp-cluster")
     mine.single_user_name = SP
     theirs = _FakeCluster("c2", "someone-elses-cluster")
-    theirs.single_user_name = "ambatiniharika.apply@gmail.com"
+    theirs.single_user_name = "another.user@example.com"
 
     result = _service_as([mine, theirs], SP).list_existing_compute()
 
@@ -260,7 +260,7 @@ def test_a_cluster_dedicated_to_another_principal_is_excluded():
 
 def test_only_another_principal_s_cluster_reads_as_nothing_available():
     theirs = _FakeCluster("c2", "someone-elses-cluster")
-    theirs.single_user_name = "ambatiniharika.apply@gmail.com"
+    theirs.single_user_name = "another.user@example.com"
 
     result = _service_as([theirs], SP).list_existing_compute()
 
