@@ -55,15 +55,14 @@ class MLflowConfig:
     # "abfss://...", "dbfs:/...") in a deployment that needs one.
     artifact_location: str = _DEFAULT_LOCAL_ARTIFACT_LOCATION
 
-    # Prefix for registered model names — one registered model per
-    # dataset is named "{prefix}-{sanitized_dataset_name}" (see
-    # s12_tracking/model_registrar.py's `_dataset_slug`), which reads
-    # naturally as a Unity Catalog three-level name's final segment once
-    # a catalog/schema prefix is added ahead of it later.
+    # Registered model name is "{prefix}-{dataset}-{key}", stable per key.
     registered_model_name_prefix: str = "forecast_engine"
 
     log_artifacts: bool = True
     register_winner_model: bool = True
+
+    # Bounded parallelism for per-key registration, which is I/O-bound.
+    registration_max_workers: int = 8
 
     # A run spanning thousands of forecasting groups would otherwise log an
     # unbounded number of MLflow parameters; the complete, unbounded set of

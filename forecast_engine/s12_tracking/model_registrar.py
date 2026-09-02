@@ -3,12 +3,14 @@
 Only the model final selection actually chose — ranked winner or fallback.
 A rejected candidate is never registered.
 
-Every key of a dataset shares one registered model, versioned rather than
-multiplied: a per-key name would mean a 500-key dataset creates 500
-permanent entries on its first run, and two unrelated datasets sharing a key
-name would silently share one version history. Each version is tagged with
-its forecast_group and run_id, so "which version is key X" stays a direct
-lookup via tags.
+Each business key has its own registered model, named
+"{prefix}-{dataset}-{key}", stable across pipeline runs. A run publishes one
+new version under that name, so a key's version history is its own selection
+history rather than a stream shared with every other key of the dataset.
+
+Registration is I/O-bound (~27s per key: artifact upload then a registry
+round trip), so keys are registered with bounded parallelism, and a version
+this run already created for a key is reused rather than duplicated.
 
 The registered model wraps that group's already-computed forecast rather
 than the raw estimator. The families trained here have incompatible native
@@ -16,9 +18,9 @@ prediction signatures, and a fallback's estimator is not retained past the
 moment it forecast — so one wrapper flavour for every family avoids a
 five-way branch and keeps this layer working from the result object alone.
 """
-
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -31,61 +33,26 @@ from forecast_engine.core.pipeline_result import PipelineResult
 from forecast_engine.s12_tracking.mlflow_client import MLflowClient, sanitize_model_name
 from forecast_engine.utils.exceptions import MLflowTrackingError
 
-try:
-    import mlflow.pyfunc
+import cloudpickle
 
-    _PYFUNC_AVAILABLE = True
-except ImportError:
-    _PYFUNC_AVAILABLE = False
+from forecast_engine.s12_tracking.frozen_forecast_model import (
+    PYFUNC_AVAILABLE as _PYFUNC_AVAILABLE,
+    FrozenForecastModel,
+)
 
-
+# By value: the artifact must not depend on this wheel to load.
 if _PYFUNC_AVAILABLE:
+    from forecast_engine.s12_tracking import frozen_forecast_model as _wrapper_module
 
-    class _FrozenForecastModel(mlflow.pyfunc.PythonModel):
-        """Serves one forecasting group's already-computed forward forecast.
+    cloudpickle.register_pickle_by_value(_wrapper_module)
 
-        A record of "this is what the platform forecast for this group in
-        this run", not a retrainable/re-servable live estimator — see the
-        module docstring for why that scope is deliberate here.
-        """
 
-        # Store the frozen forecast for this group
-        def __init__(self, group_id: str, model_name: str, forecast: dict[str, Any]) -> None:
-            self.group_id = group_id
-            self.model_name = model_name
-            self.forecast = forecast
+def _signature_for(wrapper: "FrozenForecastModel") -> Any:
+    """Unity Catalog refuses a model with no signature metadata."""
+    from mlflow.models import infer_signature
 
-        # Deliberately untyped: MLflow's schema-inference machinery treats a
-        # type-hinted `predict` as an opt-in to its own signature-validation
-        # convention (`list[...]`-wrapped hints), which does not fit this
-        # wrapper's single-instance-per-forecast-group shape. Omitting the
-        # hint keeps behaviour identical to explicitly passing no schema.
-        # Serve the frozen forecast values as a DataFrame
-        def predict(self, context, model_input=None, params=None):
-            values = self.forecast.get("values", [])
-            return pd.DataFrame(
-                {
-                    "date": self.forecast.get("dates", []),
-                    "value": values,
-                    "lower": self.forecast.get("lower") or [None] * len(values),
-                    "upper": self.forecast.get("upper") or [None] * len(values),
-                }
-            )
-
-    def _signature_for(wrapper: "_FrozenForecastModel") -> Any:
-        """A model signature inferred from the wrapper's own output.
-
-        Unity Catalog refuses to register any model without one ("did not
-        contain any signature metadata"). `predict` ignores `model_input`
-        entirely (see its docstring), so the input side is a placeholder
-        shaped like what a caller would pass — not data the model reads —
-        and the output side is the same DataFrame `predict` already
-        returns, computed once here and reused, not called twice.
-        """
-        from mlflow.models import infer_signature
-
-        input_example = pd.DataFrame({"horizon": [float(len(wrapper.forecast.get("values", [])))]})
-        return infer_signature(input_example, wrapper.predict(None))
+    input_example = pd.DataFrame({"horizon": [float(len(wrapper.forecast.get("values", [])))]})
+    return infer_signature(input_example, wrapper.predict(None))
 
 
 @dataclass
@@ -133,8 +100,7 @@ class ModelRegistrationResult:
 def register_winner_models(
     client: MLflowClient, pipeline_result: PipelineResult, config: MLflowConfig, run_id: str
 ) -> list[ModelRegistrationResult]:
-    # Isolated per group: one group's registration failure is recorded on
-    # its own result and never blocks another group's registration.
+    # One group's failure never blocks another's.
     if not config.register_winner_model:
         return []
 
@@ -151,31 +117,48 @@ def register_winner_models(
         ]
 
     dataset_slug = _dataset_slug(pipeline_result, run_id)
-    return [
-        _register_one(client, winner, run_id, config, dataset_slug) for winner in pipeline_result.final_winner_models
-    ]
+    winners = pipeline_result.final_winner_models
+    if not winners:
+        return []
+
+    # Bounded, and never more threads than keys.
+    # One read for the whole run, not one lookup per key.
+    published = client.published_versions()
+
+    workers = max(1, min(config.registration_max_workers, len(winners)))
+    if workers == 1:
+        return [_register_one(client, w, run_id, config, dataset_slug, published) for w in winners]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # map preserves input order, so results stay deterministic.
+        return list(pool.map(lambda w: _register_one(client, w, run_id, config, dataset_slug, published), winners))
 
 
-# A stable identity for the dataset this run trained on, used as the
-# registered model's name. One registered model per dataset (versioned by
-# every run/key it produces) rather than one per forecast key — a
-# per-key name means a 500-key run creates 500 permanent registered
-# models that only ever accumulate, and two unrelated datasets that
-# happen to share a key name (e.g. both have "1 | 1") would silently
-# share one model's version history. Falls back to this registration
-# call's own run id (the parameter every other field here is keyed by,
-# not necessarily `pipeline_result.run_id`) when no dataset path was
-# recorded — should not happen in practice, but a registration must
-# never crash for lack of a name.
+# Stable dataset identity, the middle segment of the registered name.
 def _dataset_slug(pipeline_result: PipelineResult, run_id: str) -> str:
     dataset_path = pipeline_result.dataset_metadata.get("dataset_path")
     name = PurePosixPath(dataset_path).stem if dataset_path else run_id
     return sanitize_model_name(name)
 
 
+# Lineage the registry alone can answer selection questions from.
+def _lineage_tags(group_id: str, model_name: str, run_id: str, winner: dict[str, Any]) -> dict[str, str]:
+    return {
+        "forecast_group": group_id,
+        "model_name": model_name,
+        "fallback_used": str(bool(winner.get("fallback_flag", False))),
+        "selection_status": str(winner.get("final_selection_status") or "unknown"),
+        "run_id": run_id,
+    }
+
+
 # Register a single group's winning model, returning its outcome
 def _register_one(
-    client: MLflowClient, winner: dict[str, Any], run_id: str, config: MLflowConfig, dataset_slug: str
+    client: MLflowClient,
+    winner: dict[str, Any],
+    run_id: str,
+    config: MLflowConfig,
+    dataset_slug: str,
+    published: dict[str, str],
 ) -> ModelRegistrationResult:
     group_id = winner["forecast_group"]
     model_name = winner.get("final_production_model")
@@ -194,20 +177,36 @@ def _register_one(
         )
 
     group_slug = sanitize_model_name(group_id)
-    registered_model_name = f"{config.registered_model_name_prefix}-{dataset_slug}"
-    wrapper = _FrozenForecastModel(group_id=group_id, model_name=model_name, forecast=forecast)
+    registered_model_name = f"{config.registered_model_name_prefix}-{dataset_slug}-{group_slug}"
+
+    tags = _lineage_tags(group_id, model_name, run_id, winner)
+    artifact_path = f"model-{group_slug}"
+
+    # Idempotent: this run already published this key, so do not republish.
+    if group_slug in published:
+        return ModelRegistrationResult(
+            group_id=group_id,
+            model_name=model_name,
+            run_id=run_id,
+            registered=True,
+            registered_model_name=registered_model_name,
+            model_version=published[group_slug] or None,
+            registered_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            metadata_tags=tags,
+        )
+
+    wrapper = FrozenForecastModel(group_id=group_id, model_name=model_name, forecast=forecast)
 
     try:
-        # `artifact_path` doubles as part of the model's identity when
-        # `registered_model_name` is supplied, so it is held to the same
-        # restricted charset as a registered model name (no "/", ".", etc.)
-        # — a single path segment, not a nested artifact directory.
-        model_info = client.register_pyfunc_model(
-            python_model=wrapper,
-            artifact_path=f"model-{group_slug}",
-            registered_model_name=registered_model_name,
-            signature=_signature_for(wrapper),
-        )
+        # Attached: worker threads have no active run of their own.
+        with client.attached_run(run_id):
+            # One path segment: artifact_path is part of model identity.
+            model_info = client.register_pyfunc_model(
+                python_model=wrapper,
+                artifact_path=artifact_path,
+                registered_model_name=registered_model_name,
+                signature=_signature_for(wrapper),
+            )
     except MLflowTrackingError as exc:
         return ModelRegistrationResult(
             group_id=group_id, model_name=model_name, run_id=run_id, registered=False, error=str(exc)
@@ -215,20 +214,6 @@ def _register_one(
 
     version = getattr(model_info, "registered_model_version", None)
 
-    # Applied to the version just created rather than passed to the logging
-    # call, which only accepts tags on MLflow 3.x — see
-    # MLflowClient.set_model_version_tags. These identify *which* selection
-    # this version records, so the registry alone answers "what did the
-    # platform put into production for this group, and was it a fallback".
-    tags = {
-        "forecast_group": group_id,
-        "model_name": model_name,
-        "fallback_used": str(bool(winner.get("fallback_flag", False))),
-        # Now that one registered model spans every key in a dataset (and
-        # every run of it), the run id is what tells versions from the
-        # same key but different runs apart.
-        "run_id": run_id,
-    }
     tag_error: str | None = None
     if version is None:
         tag_error = "No registered version was returned, so metadata could not be attached."
@@ -236,10 +221,11 @@ def _register_one(
         try:
             client.set_model_version_tags(registered_model_name, str(version), tags)
         except MLflowTrackingError as exc:
-            # The model is registered; only its annotation failed. Recorded
-            # rather than raised so one group's tagging problem neither
-            # downgrades its own registration nor stops the next group's.
+            # Registered but not annotated is still registered.
             tag_error = str(exc)
+
+    with client.attached_run(run_id):
+        client.mark_published(group_slug, str(version) if version is not None else "")
 
     return ModelRegistrationResult(
         group_id=group_id,

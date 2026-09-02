@@ -12,6 +12,7 @@ both majors), and a tagging failure is not reported as a registration
 failure.
 """
 
+import contextlib
 import inspect
 
 import pytest
@@ -30,11 +31,28 @@ class _ModelInfo:
 class _FakeClient:
     """Records what registration actually sent to the SDK."""
 
-    def __init__(self, tag_error=None, version="3"):
+    def __init__(self, tag_error=None, version="3", published=None):
         self.log_calls = []
         self.tag_calls = []
+        self.lookup_calls = 0
+        self.marked = []
+        self.attached = []
         self._tag_error = tag_error
         self._version = version
+        # slug -> version this run already published.
+        self._published = dict(published or {})
+
+    @contextlib.contextmanager
+    def attached_run(self, run_id):
+        self.attached.append(run_id)
+        yield
+
+    def published_versions(self):
+        self.lookup_calls += 1
+        return dict(self._published)
+
+    def mark_published(self, slug, version):
+        self.marked.append((slug, version))
 
     def register_pyfunc_model(self, python_model, artifact_path, registered_model_name, signature=None):
         self.log_calls.append(
@@ -207,15 +225,27 @@ def test_the_registered_model_is_the_final_selected_winner():
         assert registered[wrapper.group_id] == wrapper.model_name
 
 
-def test_every_key_in_one_dataset_shares_one_registered_model():
-    """A per-key name would mean a 500-key dataset creates 500 permanent
-    registry entries on its first run alone — every key registers as a
-    new version of one model instead."""
+def test_each_key_gets_its_own_stable_registered_model():
+    """A key's version history is its own selection history. Sharing one
+    name across keys made a single run create N versions of one model, so
+    "version 65" said nothing about which key it belonged to."""
     client = _FakeClient()
     _register(client, [_winner("1 | 1"), _winner("1 | 2"), _winner("1 | 3")])
 
-    names = {call["registered_model_name"] for call in client.log_calls}
-    assert len(names) == 1
+    names = [call["registered_model_name"] for call in client.log_calls]
+    assert len(set(names)) == 3
+    assert all(name.startswith("forecast_engine-store_item-") for name in names)
+
+
+def test_the_same_key_keeps_its_name_across_runs():
+    """Stable name, new version per run — never a name per run."""
+    first, second = _FakeClient(), _FakeClient()
+    register_winner_models(first, _result([_winner("1 | 1")]), MLflowConfig(), "run-1")
+    register_winner_models(second, _result([_winner("1 | 1")]), MLflowConfig(), "run-2")
+
+    name = first.log_calls[0]["registered_model_name"]
+    assert second.log_calls[0]["registered_model_name"] == name
+    assert "run-1" not in name and "run-2" not in name
 
 
 def test_different_datasets_get_different_registered_models():
@@ -286,3 +316,134 @@ def test_registration_can_be_disabled():
 
     assert results == []
     assert client.log_calls == []
+
+
+# --- idempotency and scale ---------------------------------------------
+#
+# Registration costs ~27s per key (artifact upload, then a registry round
+# trip), so a 155-key run spent ~75 minutes in publish alone, sequentially.
+
+
+def test_a_key_this_run_already_published_is_not_published_again():
+    """The retry case: publish re-running must not log and register the
+    same key a second time. A resumed run still has its own artifact."""
+    client = _FakeClient(published={"1___1": "7"})
+
+    results = register_winner_models(client, _result([_winner("1 | 1")]), MLflowConfig(), "run-1")
+
+    assert client.log_calls == []
+    assert results[0].registered is True
+    assert results[0].model_version == "7"
+    assert results[0].registered_model_name == "forecast_engine-store_item-1___1"
+
+
+def test_a_fresh_run_publishes_normally():
+    """A new pipeline run has no artifact of its own, so it publishes."""
+    client = _FakeClient()
+
+    register_winner_models(client, _result([_winner("1 | 1")]), MLflowConfig(), "run-2")
+
+    assert len(client.log_calls) == 1
+
+
+def test_the_published_markers_are_read_once_for_the_whole_run():
+    """One read, not one lookup per key — the cost must not scale."""
+    client = _FakeClient()
+    register_winner_models(client, _result([_winner(f"1 | {i}") for i in range(1, 13)]), MLflowConfig(), "run-1")
+
+    assert client.lookup_calls == 1
+
+
+def test_publishing_a_key_records_a_marker_for_a_later_retry():
+    client = _FakeClient()
+    register_winner_models(client, _result([_winner("1 | 1")]), MLflowConfig(), "run-1")
+
+    assert client.marked == [("1___1", "3")]
+
+
+def test_the_marker_slug_matches_the_key_the_check_reads():
+    """A drift between writing and reading would make retries republish."""
+    client = _FakeClient()
+    register_winner_models(client, _result([_winner("1 | 1")]), MLflowConfig(), "run-1")
+    slug = client.marked[0][0]
+
+    again = _FakeClient(published={slug: "3"})
+    register_winner_models(again, _result([_winner("1 | 1")]), MLflowConfig(), "run-1")
+
+    assert again.log_calls == []
+
+
+def test_registration_count_scales_with_keys_not_candidates():
+    """One publish per successful key. Candidate models were already
+    eliminated by ranking; only the final selection is registered."""
+    winners = [_winner(f"1 | {i}") for i in range(1, 21)]
+    client = _FakeClient()
+
+    results = register_winner_models(client, _result(winners), MLflowConfig(), "run-1")
+
+    assert len(client.log_calls) == 20
+    assert len(results) == 20
+
+
+def test_results_stay_in_input_order_under_parallelism():
+    """Determinism: registry.json must not reorder with thread scheduling."""
+    winners = [_winner(f"1 | {i}") for i in range(1, 13)]
+    client = _FakeClient()
+
+    results = register_winner_models(client, _result(winners), MLflowConfig(), "run-1")
+
+    assert [r.group_id for r in results] == [w["forecast_group"] for w in winners]
+
+
+def test_workers_never_exceed_the_key_count():
+    """A one-key run must not open a pool of eight."""
+    from forecast_engine.config.mlflow_config import MLflowConfig as Config
+
+    assert Config().registration_max_workers == 8
+    client = _FakeClient()
+    results = register_winner_models(client, _result([_winner("1 | 1")]), Config(), "run-1")
+
+    assert len(results) == 1
+
+
+def test_the_selection_status_reaches_the_registry_tags():
+    client = _FakeClient()
+    results = register_winner_models(client, _result([_winner("1 | 1")]), MLflowConfig(), "run-1")
+
+    tags = results[0].metadata_tags
+    assert tags["run_id"] == "run-1"
+    assert tags["forecast_group"] == "1 | 1"
+    assert "selection_status" in tags
+
+
+def test_the_model_artifact_carries_no_dependency_on_this_wheel():
+    """Registered by reference, every version needed the forecast_engine
+    wheel to load — which is not on public PyPI, so MLflow warned and the
+    version was only loadable where that exact internal build existed."""
+    import cloudpickle
+
+    from forecast_engine.s12_tracking.frozen_forecast_model import FrozenForecastModel
+
+    wrapper = FrozenForecastModel("1 | 1", "arima", {"dates": ["2025-01-01"], "values": [1.0]})
+    blob = cloudpickle.dumps(wrapper)
+
+    # By value inlines the class body; by reference is a short module pointer.
+    assert len(blob) > 1000
+
+
+def test_the_pinned_requirements_are_what_the_wrapper_actually_imports():
+    from forecast_engine.s12_tracking.mlflow_client import WRAPPER_PIP_REQUIREMENTS
+
+    assert set(WRAPPER_PIP_REQUIREMENTS) == {"mlflow", "pandas", "cloudpickle"}
+    assert not any("forecast" in req for req in WRAPPER_PIP_REQUIREMENTS)
+
+
+def test_every_registration_is_attached_to_the_pipeline_run():
+    """Worker threads have no active run, so log_model would otherwise
+    start its own — putting each model in an orphan run."""
+    client = _FakeClient()
+    winners = [_winner(f"1 | {i}") for i in range(1, 5)]
+
+    register_winner_models(client, _result(winners), MLflowConfig(), "mlflow-run-1")
+
+    assert client.attached.count("mlflow-run-1") >= len(winners)

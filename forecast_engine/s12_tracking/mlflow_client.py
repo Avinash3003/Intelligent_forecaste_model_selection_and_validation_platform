@@ -11,6 +11,8 @@ deployment with tracking disabled need not install it.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +36,13 @@ _UNSAFE_MODEL_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_\-]")
 
 
 # Sanitize a string for use as an MLflow key
+# The frozen-forecast wrapper imports only these at serve time.
+WRAPPER_PIP_REQUIREMENTS = ("mlflow", "pandas", "cloudpickle")
+
+# Marks a key as already published by this run; survives a retry.
+PUBLISHED_TAG_PREFIX = "forecastiq.published."
+
+
 def sanitize_key(raw: str) -> str:
     return _UNSAFE_KEY_CHARS.sub("_", raw)
 
@@ -281,11 +290,53 @@ class MLflowClient:
                 python_model=python_model,
                 registered_model_name=registered_model_name,
                 signature=signature,
+                # Pinned: skips inference, which probes PyPI for this wheel.
+                pip_requirements=list(WRAPPER_PIP_REQUIREMENTS),
             )
         except Exception as exc:  # noqa: BLE001
             raise MLflowTrackingError(
                 f"Failed to register model '{registered_model_name}': {exc}"
             ) from exc
+
+    @contextmanager
+    def attached_run(self, run_id: str):
+        """Make `run_id` the active run for the calling thread.
+
+        MLflow's fluent active-run stack is thread-local, so a worker
+        thread sees no active run and `log_model` silently starts its own —
+        which put every model in an orphan run instead of the pipeline's.
+        """
+        mlflow = self._sdk()
+        with mlflow.start_run(run_id=run_id, nested=False):
+            yield
+
+    def published_versions(self) -> dict[str, str]:
+        """Keys this MLflow run has already published, as slug -> version.
+
+        Read from the run's own tags, which are readable on every registry
+        backend. Unity Catalog keeps model files in its own managed store
+        rather than the run's artifact tree, and its registry needs the
+        three-level name it assigns at log time — so neither the artifacts
+        nor the registry can answer this without guessing that name.
+        """
+        try:
+            client = self._sdk().tracking.MlflowClient()
+            run_id = self._sdk().active_run().info.run_id
+            tags = client.get_run(run_id).data.tags or {}
+        except Exception:  # noqa: BLE001 - unknown means "publish it"
+            return {}
+        return {
+            key[len(PUBLISHED_TAG_PREFIX) :]: value
+            for key, value in tags.items()
+            if key.startswith(PUBLISHED_TAG_PREFIX)
+        }
+
+    def mark_published(self, slug: str, version: str) -> None:
+        """Record that this run published this key, for a later retry."""
+        try:
+            self._sdk().set_tag(f"{PUBLISHED_TAG_PREFIX}{slug}", version)
+        except Exception:  # noqa: BLE001 - a lost marker only costs a re-publish
+            pass
 
     def set_model_version_tags(self, name: str, version: str, tags: dict[str, str]) -> None:
         """Attach registry metadata to one registered model version.
