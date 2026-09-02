@@ -549,7 +549,10 @@ def test_every_task_key_is_present_and_wired_in_dependency_order(settings, datas
     for task, previous_key in zip(tasks[1:], TASK_KEYS):
         assert [dep.task_key for dep in task.depends_on] == [previous_key]
     for task in tasks:
-        assert task.python_wheel_task.parameters[-2:] == ["--stage", task.task_key]
+        # By flag, not by position: the parameter list also carries the
+        # credential references, which are appended after this pair.
+        params = task.python_wheel_task.parameters
+        assert params[params.index("--stage") + 1] == task.task_key
 
 
 def test_ray_stages_share_one_job_cluster_not_one_per_task(settings, dataset):
@@ -725,41 +728,216 @@ def test_volume_paths_and_config_staging_are_unchanged(settings, dataset):
 # so a plaintext API key there is a published key.
 
 
-def test_the_cluster_is_given_azure_openai_credentials(settings, dataset):
+def _task_args(workspace, task_index=0):
+    return _submitted_tasks(workspace)[task_index].python_wheel_task.parameters
+
+
+def _flag_value(args, flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+@pytest.mark.parametrize("compute", [NEW_COMPUTE, EXISTING], ids=["new_job", "existing"])
+def test_both_compute_modes_are_told_the_same_secret_scope(settings, dataset, compute):
+    # One path, no drift: an existing cluster's environment was fixed by
+    # whoever created it, so cluster env vars reach only one of these two.
+    workspace = _FakeWorkspace()
+    DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, compute))
+
+    args = _task_args(workspace)
+
+    assert _flag_value(args, "--databricks-secret-scope") == "forecastiq"
+
+
+def test_every_task_is_told_the_scope_not_just_the_first(settings, dataset):
+    # Each phase is its own process, and business_insights runs in the last task.
     workspace = _FakeWorkspace()
     DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
-    env = _submitted_job_cluster(workspace).spark_env_vars
-
-    assert env["AZURE_OPENAI_ENDPOINT"] == "{{secrets/forecastiq/azure-openai-endpoint}}"
-    assert env["AZURE_OPENAI_API_KEY"] == "{{secrets/forecastiq/azure-openai-api-key}}"
-    assert env["AZURE_OPENAI_DEPLOYMENT_NAME"] == "{{secrets/forecastiq/azure-openai-deployment}}"
+    for index in range(len(TASK_KEYS)):
+        assert _flag_value(_task_args(workspace, index), "--databricks-secret-scope") == "forecastiq"
 
 
-def test_no_credential_value_is_ever_sent_in_the_clear(settings, dataset):
-    """The property that matters: whatever the key's real value is, it is
-    not what gets written into the job definition."""
-    configured = settings.model_copy(update={"azure_openai_api_key": "sk-real-secret-value"})
+def test_no_credential_and_no_reference_is_sent_at_all(settings, dataset):
+    # The backend sends a scope name. Not a value, and not a {{secrets/...}}
+    # reference either — the engine names the keys it needs.
+    configured = settings.model_copy(
+        update={
+            "azure_openai_api_key": "fake-key-value-aaaa",
+            "azure_openai_endpoint": "https://fake.openai.azure.com/",
+        }
+    )
     workspace = _FakeWorkspace()
     DatabricksRunner(configured, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
-    env = _submitted_job_cluster(workspace).spark_env_vars
+    definition = repr(workspace.jobs.submitted_settings)
 
-    assert "sk-real-secret-value" not in " ".join(env.values())
-    assert env["AZURE_OPENAI_API_KEY"].startswith("{{secrets/")
+    assert "fake-key-value-aaaa" not in definition
+    assert "https://fake.openai.azure.com/" not in definition
+    assert "{{secrets/" not in definition
 
 
-def test_a_key_the_scope_does_not_hold_is_left_unset(settings, dataset):
-    """A reference to a missing key fails the cluster *start*. Degrading to
-    templates costs insight quality; a failed start costs the whole run."""
-    workspace = _FakeWorkspace(secrets=_FakeSecrets(keys=["azure-openai-endpoint"]))
+def test_the_backend_never_calls_the_secrets_api(settings, dataset):
+    # Nothing here reads key names or values; that is the simplification.
+    workspace = _FakeWorkspace()
+    DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    assert workspace.secrets.scopes_listed == []
+
+
+def test_no_credential_is_placed_in_the_cluster_environment(settings, dataset):
+    workspace = _FakeWorkspace()
     DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
     env = _submitted_job_cluster(workspace).spark_env_vars
 
-    assert env["AZURE_OPENAI_ENDPOINT"] == "{{secrets/forecastiq/azure-openai-endpoint}}"
     assert "AZURE_OPENAI_API_KEY" not in env
+    assert "AZURE_OPENAI_ENDPOINT" not in env
     assert "AZURE_OPENAI_DEPLOYMENT_NAME" not in env
+    # Non-secret settings still travel this way for a cluster we create.
+    assert env["MLFLOW_TRACKING_URI"] == settings.mlflow_tracking_uri_resolved
+
+
+def test_no_scope_configured_sends_no_flag(settings, dataset):
+    workspace = _FakeWorkspace()
+    unscoped = settings.model_copy(update={"databricks_secret_scope": ""})
+    DatabricksRunner(unscoped, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    assert _flag_value(_task_args(workspace), "--databricks-secret-scope") is None
+
+
+def test_no_all_purpose_cluster_is_ever_created_for_a_run(settings, dataset):
+    """A job cluster belongs to the run and Databricks disposes of it. The
+    earlier design created an ordinary all-purpose cluster per run instead,
+    which billed at the higher rate and piled up in the Compute list."""
+    workspace, runner, run_id = _run(settings, dataset, NEW_COMPUTE)
+
+    assert not hasattr(workspace, "clusters") or not getattr(workspace.clusters, "create_calls", [])
+    assert workspace.jobs.submitted_settings["job_clusters"][0].job_cluster_key == _SHARED_JOB_CLUSTER_KEY
+
+
+def test_every_run_is_a_run_of_the_same_named_job(settings, dataset):
+    """All runs belong to one job, so its run history is the whole forecast
+    history — a second run reuses the job rather than defining another."""
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    runner.submit(_request(dataset, NEW_COMPUTE))
+    runner.submit(_request(dataset, NEW_COMPUTE))
+
+    assert len(workspace.jobs.create_calls) == 1
+    assert len(workspace.jobs.run_now_calls) == 2
+    assert {call["job_id"] for call in workspace.jobs.run_now_calls} == {4242}
+    assert workspace.jobs.create_calls[0]["name"] == settings.databricks_job_display_name
+
+
+# ---- safety ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "compute, expected",
+    [
+        (None, "Select the compute"),
+        (ComputeSelection(mode="existing_compute", cluster_id=None), "missing its cluster id"),
+        (ComputeSelection(mode="existing_compute", cluster_id="   "), "missing its cluster id"),
+    ],
+)
+def test_missing_compute_fails_clearly(settings, dataset, compute, expected):
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    run_id = runner.submit(_request(dataset, compute))
+
+    # Recorded as a failed run rather than raised; the caller holds the id.
+    from app.orchestration.schemas import JobStatus
+
+    assert runner.get_status(run_id) is JobStatus.FAILED
+    assert workspace.jobs.run_now_calls == []
+
+
+def test_unknown_compute_mode_is_rejected():
+    with pytest.raises(ValueError):
+        ComputeSelection(mode="serverless")
+
+
+# Resolving a job someone ELSE deployed, by a configured name or id, is how
+# execution previously reached the Serverless pipeline. `run_now` itself is
+# no longer forbidden — this runner calls it on the job it defines and owns
+# — but a configured foreign job name/id must never come back.
+FORBIDDEN_ROUTING = ("_resolve_job_id", "databricks_job_name", "databricks_job_id")
+
+
+def test_no_application_module_routes_a_run_to_a_foreign_job():
+    offenders = []
+    for path in (_REPO_ROOT / "backend" / "app").rglob("*.py"):
+        source = path.read_text()
+        for token in FORBIDDEN_ROUTING:
+            if token in source:
+                offenders.append(f"{path}: {token}")
+    assert not offenders, f"Serverless routing reachable from: {offenders}"
+
+
+def test_the_engine_is_never_asked_to_run_a_serverless_stage_group():
+    """The real DAG (TASK_KEYS, --stage) is not the old Serverless design
+    this guards against: no per-key stage-group flag, and no ad hoc
+    checkpoint-dir CLI flag — the checkpoint handoff lives entirely inside
+    forecast_engine/core/checkpoint.py, resolved from the run's own
+    persisted artifacts config, never a path passed on the command line."""
+    settings_source = (
+        _REPO_ROOT / "backend" / "app" / "orchestration" / "databricks_runner.py"
+    ).read_text()
+    assert "--stage-group" not in settings_source
+    assert "--checkpoint-dir" not in settings_source
+
+
+# ---- regression ------------------------------------------------------
+
+
+def test_volume_paths_and_config_staging_are_unchanged(settings, dataset):
+    workspace, _, run_id = _run(settings, dataset, EXISTING)
+    upload_root = f"{settings.databricks_uploads_volumes_root}/runs/{run_id}"
+    artifacts_root = f"{settings.databricks_artifacts_volumes_root}/runs/{run_id}"
+
+    assert f"{upload_root}/sales.csv" in workspace.files.uploaded
+    config = json.loads(workspace.files.uploaded[f"{artifacts_root}/forecast_configuration.json"])
+    assert config["date_column"] == "date"
+    assert config["curated_storage"]["root_dir"].startswith(settings.databricks_curated_volumes_root)
+
+    supplied = workspace.jobs.run_now_calls[-1]["job_parameters"]
+    assert supplied["summary_out"] == f"{artifacts_root}/summary.json"
+    assert supplied["live_status_out"] == f"{artifacts_root}/live_status.json"
+
+
+# --- Azure OpenAI credentials reach the cluster ------------------------
+#
+# Insights came back with provider "template" and error "AZURE_OPENAI_
+# ENDPOINT is not set" on every Databricks run, while the same credentials
+# worked locally: Settings.subprocess_env forwards them to the local engine
+# subprocess, and this path forwarded only the MLFLOW_* ones.
+#
+# They travel as `{{secrets/<scope>/<key>}}`, never as values. A job
+# definition's spark_env_vars are readable by anyone who can view the job,
+# so a plaintext API key there is a published key.
+
+
+def _task_args(workspace, task_index=0):
+    return _submitted_tasks(workspace)[task_index].python_wheel_task.parameters
+
+
+def _flag_value(args, flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+
+def test_no_credential_is_placed_in_the_cluster_environment(settings, dataset):
+    """Cluster env vars are the path that cannot serve Existing Compute, so
+    no secret may travel that way at all."""
+    workspace = _FakeWorkspace()
+    DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
+
+    env = _submitted_job_cluster(workspace).spark_env_vars
+
+    assert "AZURE_OPENAI_API_KEY" not in env
+    assert "AZURE_OPENAI_ENDPOINT" not in env
+    assert "AZURE_OPENAI_DEPLOYMENT_NAME" not in env
+    # Non-secret settings still travel this way for a cluster we create.
+    assert env["MLFLOW_TRACKING_URI"] == settings.mlflow_tracking_uri_resolved
 
 
 def test_an_unreadable_scope_does_not_stop_the_run(settings, dataset):
@@ -770,11 +948,10 @@ def test_an_unreadable_scope_does_not_stop_the_run(settings, dataset):
     workspace = _FakeWorkspace(secrets=_Exploding())
     DatabricksRunner(settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
-    env = _submitted_job_cluster(workspace).spark_env_vars
+    args = _task_args(workspace)
 
-    assert not [key for key in env if key.startswith("AZURE_OPENAI_") and key != "AZURE_OPENAI_API_VERSION"]
-    # Everything unrelated to the scope still reaches the cluster.
-    assert env["MLFLOW_TRACKING_URI"] == settings.mlflow_tracking_uri_resolved
+    assert _flag_value(args, "--azure-openai-api-key") is None
+    assert "--dataset" in args  # the run itself is unaffected
 
 
 def test_no_scope_configured_sends_no_credentials(settings, dataset):
@@ -782,22 +959,8 @@ def test_no_scope_configured_sends_no_credentials(settings, dataset):
     unscoped = settings.model_copy(update={"databricks_secret_scope": ""})
     DatabricksRunner(unscoped, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
 
-    env = _submitted_job_cluster(workspace).spark_env_vars
-
-    assert "AZURE_OPENAI_API_KEY" not in env
+    assert _flag_value(_task_args(workspace), "--azure-openai-api-key") is None
     assert workspace.secrets.scopes_listed == []
-
-
-def test_the_scope_is_read_once_not_per_cluster(settings, dataset):
-    """One listing per runner — this is called while building every cluster
-    spec, and it is a workspace round trip."""
-    workspace = _FakeWorkspace()
-    runner = DatabricksRunner(settings, workspace_client=workspace)
-    runner.submit(_request(dataset, NEW_COMPUTE))
-    runner._engine_cluster_env()
-    runner._engine_cluster_env()
-
-    assert workspace.secrets.scopes_listed == ["forecastiq"]
 
 
 # --- the suite must not depend on where it was started ----------------
@@ -871,3 +1034,8 @@ def test_the_url_survives_a_workspace_that_offers_none(settings, dataset):
     run_id = runner.submit(_request(dataset, NEW_COMPUTE))
 
     assert runner.get_run(run_id).databricks_run_url is None
+
+
+# --- credentials must not be reachable from anything a person can read ---
+
+

@@ -1,23 +1,25 @@
-"""Resolves {{secrets/scope/key}} in the --azure-openai-* flags.
+"""Reads Azure OpenAI credentials from a Databricks secret scope.
 
-Databricks expands that template in cluster env vars but not in job
-parameters, and a wheel task has no cluster env vars to use — so the value
-arrives at the CLI still in template form. dbutils.secrets.get() is the only
-supported way to read the real value from running code.
+`load_azure_openai_from_scope` is the path a backend-submitted run uses: the
+backend passes only the scope NAME as a task parameter, and the credentials
+are read here with dbutils on the cluster running the task. That is what
+makes New Job Compute and Existing Compute behave alike — a task parameter
+reaches both, while a cluster environment variable exists only for a cluster
+the backend creates.
 
-Only a Databricks Jobs API python_wheel_task whose job parameters reference
-a secret template hits this (currently: databricks.yml's dev-only
-forecast_pipeline_compute job). Local runs set real environment variables
-directly, and a run from the backend (backend/app/orchestration/
-databricks_runner.py) never passes these flags either: it puts the same
-references in the job cluster's spark_env_vars, which Databricks does
-expand, so the engine reads already-resolved values straight from the
-environment.
+`apply_azure_openai_cli_overrides` resolves {{secrets/scope/key}} passed on
+the --azure-openai-* flags, which databricks.yml's dev-only
+forecast_pipeline_compute job still uses. Local runs set real environment
+variables directly and neither path touches them.
+
+No value is ever logged, returned to the backend, or placed in a job
+definition.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 
@@ -29,23 +31,71 @@ from forecast_engine.config.llm_config import (
 
 # Matches an UNRESOLVED `{{secrets/scope/key}}` reference — the literal
 # template text, not a value.
+logger = logging.getLogger(__name__)
+
 _SECRET_TEMPLATE_RE = re.compile(r"^\{\{secrets/([^/}]+)/([^}]+)\}\}$")
 
 
+class SecretResolutionError(RuntimeError):
+    """A secret could not be read. Carries scope and key, never a value."""
+
+
+def _read_secret(scope: str, key: str) -> str:
+    """Read one secret with dbutils. The single place this process touches a value."""
+    # Imported here: databricks.sdk.runtime builds a live dbutils off Databricks too.
+    try:
+        from databricks.sdk.runtime import dbutils
+    except Exception:  # noqa: BLE001 - reported safely, never re-raised raw
+        raise SecretResolutionError(
+            f"Cannot read secret {key!r} from scope {scope!r}: this process is not "
+            "running on Databricks compute, where dbutils is available."
+        ) from None
+
+    try:
+        resolved = dbutils.secrets.get(scope=scope, key=key)
+    except Exception:  # noqa: BLE001 - the cause may echo its own arguments
+        # from None: the cause is discarded, so nothing it carries reaches a traceback.
+        raise SecretResolutionError(
+            f"Secret {key!r} could not be read from scope {scope!r}. Check the scope "
+            "exists, holds that key, and that the job's identity has READ on it."
+        ) from None
+
+    if not resolved:
+        raise SecretResolutionError(f"Secret {key!r} in scope {scope!r} is empty.")
+    return resolved
+
+
 def _resolve_databricks_secret_template(value: str) -> str:
-    """Resolve one {{secrets/scope/key}} literal. Anything not in that exact
-    shape is returned untouched."""
+    """Resolve one {{secrets/scope/key}} literal; anything else is returned as-is."""
     match = _SECRET_TEMPLATE_RE.match(value)
     if not match:
         return value
-    scope, key = match.group(1), match.group(2)
-    # Deliberately local: `databricks.sdk.runtime` constructs a live
-    # `dbutils` at import time, which fails outside real Databricks
-    # compute — a module-level import here would break every local run,
-    # every local run, and every test that imports this module.
-    from databricks.sdk.runtime import dbutils
+    return _read_secret(match.group(1), match.group(2))
 
-    return dbutils.secrets.get(scope=scope, key=key)
+
+# Key names inside the scope. The scope is configuration; these are its contents.
+_AZURE_OPENAI_SCOPE_KEYS = {
+    AZURE_OPENAI_ENDPOINT_ENV_VAR: "azure-openai-endpoint",
+    AZURE_OPENAI_API_KEY_ENV_VAR: "azure-openai-api-key",
+    AZURE_OPENAI_DEPLOYMENT_NAME_ENV_VAR: "azure-openai-deployment",
+}
+
+
+def load_azure_openai_from_scope(scope: str | None) -> None:
+    """Read the Azure OpenAI credentials straight from `scope` into this process."""
+    scope = (scope or "").strip()
+    if not scope:
+        return
+    for env_var, key in _AZURE_OPENAI_SCOPE_KEYS.items():
+        # A real environment variable already set wins, so local runs are untouched.
+        if os.environ.get(env_var):
+            continue
+        try:
+            os.environ[env_var] = _read_secret(scope, key)
+        except SecretResolutionError as exc:
+            # Insights degrade to templates with a reason; a forecast is not failed for them.
+            logger.warning("LLM credentials unavailable: %s", exc)
+            return
 
 
 def apply_azure_openai_cli_overrides(args: argparse.Namespace) -> None:

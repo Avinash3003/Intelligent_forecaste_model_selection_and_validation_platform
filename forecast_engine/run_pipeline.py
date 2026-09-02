@@ -34,7 +34,10 @@ from forecast_engine.config.derived_features_config import apply_to_model_config
 from forecast_engine.config.model_config import ModelConfig
 from forecast_engine.config.pipeline_config import PipelineConfig
 from forecast_engine.config.ranking_config import RankingConfig
-from forecast_engine.core.databricks_secrets import apply_azure_openai_cli_overrides
+from forecast_engine.core.databricks_secrets import (
+    apply_azure_openai_cli_overrides,
+    load_azure_openai_from_scope,
+)
 from forecast_engine.core.forecast_configuration import AggregationMethod, ForecastConfiguration
 from forecast_engine.core import checkpoint, storage
 from forecast_engine.core.live_status import LiveStatusWriter
@@ -1016,6 +1019,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--databricks-secret-scope",
+        default=None,
+        help=(
+            "Databricks secret scope holding the Azure OpenAI credentials, read on the "
+            "cluster with dbutils. Values never travel as arguments. Never logged."
+        ),
+    )
+    parser.add_argument(
         "--stage",
         choices=PHASE_ORDER,
         default=None,
@@ -1040,8 +1051,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # CLI entry point; returns a process exit code (0 success, 1 stage failure)
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    # A no-op unless a --azure-openai-* flag is set — see
-    # forecast_engine/core/databricks_secrets.py for who sets one.
+    # Credentials come from the secret scope, read here on the cluster.
+    load_azure_openai_from_scope(args.databricks_secret_scope)
+    # Still honoured for the bundle job, which passes {{secrets/...}} templates.
     apply_azure_openai_cli_overrides(args)
 
     # Bound before the try so the post-run volume sync below can read it

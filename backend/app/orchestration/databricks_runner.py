@@ -147,25 +147,17 @@ _JOB_PARAMETER_REFS = {
     for name in ("dataset", "config", "summary_out", "live_status_out")
 }
 
-# Engine env var -> key inside `Settings.databricks_secret_scope`. The engine
-# reads these names (forecast_engine/config/llm_config.py); the key names are
-# the scope's own. Only the scope is configurable — a deployment points at its
-# own scope, it does not get to rename what lives inside one.
-_LLM_SECRET_KEYS = {
-    "AZURE_OPENAI_ENDPOINT": "azure-openai-endpoint",
-    "AZURE_OPENAI_API_KEY": "azure-openai-api-key",
-    "AZURE_OPENAI_DEPLOYMENT_NAME": "azure-openai-deployment",
-}
-
-
 # spark_env_vars takes strings; a None stays None here so the caller drops it.
 def _as_env_text(value: float | int | None) -> str | None:
     return None if value is None else str(value)
 
 
 # The engine CLI arguments one task passes to the wheel entry point.
-def _engine_parameters(parameters: dict[str, str], stage: str) -> list[str]:
-    return [
+# `secret_scope` is a scope NAME; the engine reads the secrets on the cluster.
+def _engine_parameters(
+    parameters: dict[str, str], stage: str, secret_scope: str = ""
+) -> list[str]:
+    args = [
         "--dataset", parameters["dataset"],
         "--config", parameters["config"],
         "--summary-out", parameters["summary_out"],
@@ -173,6 +165,9 @@ def _engine_parameters(parameters: dict[str, str], stage: str) -> list[str]:
         "--parallel-keys",
         "--stage", stage,
     ]
+    if secret_scope:
+        args += ["--databricks-secret-scope", secret_scope]
+    return args
 
 
 # Matches the "-cpu-ml" or "-ml" infix an ML-runtime preset's version
@@ -269,7 +264,6 @@ class DatabricksRunner(PipelineRunner):
         # history behave the same in both execution modes.
         self._history = history or MLflowHistoryStore(settings)
         self._client = workspace_client
-        self._secret_key_cache: frozenset[str] | None = None
         # Which reported backend and which deployed Job — everything else
         # (staging, submit/poll/retrieve, error translation) is identical
         # three-line subclass instead of a second implementation.
@@ -947,7 +941,9 @@ class DatabricksRunner(PipelineRunner):
                 python_wheel_task=jobs_sdk.PythonWheelTask(
                     package_name="forecast_engine",
                     entry_point="forecast-engine",
-                    parameters=_engine_parameters(_JOB_PARAMETER_REFS, task_key),
+                    parameters=_engine_parameters(
+                        _JOB_PARAMETER_REFS, task_key, self._llm_secret_scope()
+                    ),
                 ),
                 libraries=libraries,
             )
@@ -1054,49 +1050,12 @@ class DatabricksRunner(PipelineRunner):
             "AZURE_OPENAI_PRICE_INPUT_PER_1K": _as_env_text(self._settings.azure_openai_price_input_per_1k),
             "AZURE_OPENAI_PRICE_OUTPUT_PER_1K": _as_env_text(self._settings.azure_openai_price_output_per_1k),
         }
-        forwarded.update(self._llm_secret_refs())
+        # No credential here: a cluster env var exists only for a cluster we create.
         return {key: value for key, value in forwarded.items() if (value or "").strip()}
 
-    # Azure OpenAI credentials, as Databricks secret references.
-    #
-    # Without these the engine finds no endpoint on the cluster and every
-    # insight silently falls back to a template — the local path forwards
-    # them (Settings.subprocess_env) and the Databricks path did not, so the
-    # LLM only ever ran locally.
-    #
-    # Emitted only for keys the scope actually holds: a reference to a key
-    # that does not exist fails the *cluster start*, which would take down
-    # every run to fix insight text. A missing key just leaves that variable
-    # unset, and the engine degrades to templates the way it does today.
-    def _llm_secret_refs(self) -> dict[str, str]:
-        scope = (self._settings.databricks_secret_scope or "").strip()
-        if not scope:
-            return {}
-
-        present = self._secret_keys(scope)
-        if not present:
-            return {}
-        return {
-            env_var: f"{{{{secrets/{scope}/{key}}}}}"
-            for env_var, key in _LLM_SECRET_KEYS.items()
-            if key in present
-        }
-
-    def _secret_keys(self, scope: str) -> frozenset[str]:
-        """Key names in `scope`, cached for the life of this runner.
-
-        Never the secret *values* — Databricks does not serve those to an
-        API caller at all, which is the property that makes a reference the
-        only safe way to hand one to a cluster.
-        """
-        if self._secret_key_cache is None:
-            try:
-                listed = self._workspace.secrets.list_secrets(scope)
-                self._secret_key_cache = frozenset(s.key for s in listed if s.key)
-            except Exception as exc:  # noqa: BLE001 - insights degrade, the run continues
-                logger.warning("Could not read secret scope %r; LLM insights will use templates: %s", scope, exc)
-                self._secret_key_cache = frozenset()
-        return self._secret_key_cache
+    # The scope NAME only; this process never reads or holds a credential value.
+    def _llm_secret_scope(self) -> str:
+        return (self._settings.databricks_secret_scope or "").strip()
 
     # Databricks Container Services: a new job cluster pulls the configured
     # image instead of resolving its dependencies from the runtime, when one
