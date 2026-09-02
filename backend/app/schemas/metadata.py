@@ -176,3 +176,9 @@ class ModelAvailabilityResponse(BaseModel):
     # pre-select the same model it will actually run with, not a second,
     # disconnected guess of what that model is.
     default_fallback_model: str
+    # Models that run ONLY on the ForecastIQ container runtime, and so are
+    # unavailable on Existing Compute whatever cluster is chosen. Served
+    # from app.config.model_availability.CONTAINER_ONLY_MODELS so the
+    # Compute step can say which models a cluster costs the user *before*
+    # they submit, instead of the deploy call refusing the whole run.
+    container_only_models: list[str]

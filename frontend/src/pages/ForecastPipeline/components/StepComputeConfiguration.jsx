@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Loader2, Server, ShieldCheck } from 'lucide-react'
+import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Server, ShieldCheck } from 'lucide-react'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import Button from '../../../components/ui/Button'
 import Card from '../../../components/ui/Card'
@@ -6,6 +6,7 @@ import Input from '../../../components/ui/Input'
 import Loader from '../../../components/ui/Loader'
 import Select from '../../../components/ui/Select'
 import { cn } from '../../../utils/cn'
+import useModelAvailability from '../../../hooks/useModelAvailability'
 
 const MODES = [
   {
@@ -261,8 +262,19 @@ export default function StepComputeConfiguration({
   onValidate,
   onValidateExisting,
   onSelectExistingCluster,
+  selectedModels = [],
+  onDropModels,
 }) {
   const isNew = compute.mode === 'new_job_compute'
+  // Which chosen models this compute cannot run. Existing Compute runs on
+  // whatever runtime its cluster has, and the container-only models need
+  // the ForecastIQ image — so the conflict is answered here, at the moment
+  // the compute is chosen, rather than by /deploy refusing the whole run
+  // after the user has finished the wizard.
+  const { containerOnlyModels } = useModelAvailability()
+  const blockedByCompute = isNew
+    ? []
+    : selectedModels.filter((id) => containerOnlyModels.includes(id))
   const nodeOptions = (options?.nodeTypes ?? []).map((node) => ({
     value: node.id,
     label: node.label ?? node.id,
@@ -292,6 +304,38 @@ export default function StepComputeConfiguration({
             />
           ))}
         </div>
+
+        {/* Named, not silently dropped: a model the user picked is theirs to
+            keep or remove. One click resolves it either way — remove them
+            here, or go back and switch to New Job Compute. */}
+        {blockedByCompute.length > 0 && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 dark:border-amber-800/60 dark:bg-amber-900/20">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">
+                  {blockedByCompute.map((id) => id.toUpperCase()).join(', ')} cannot run on Existing Compute
+                </p>
+                <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-300">
+                  {blockedByCompute.length === 1 ? 'It needs' : 'They need'} the ForecastIQ container
+                  runtime, which supplies torch and pytorch-forecasting. An existing cluster runs
+                  whatever runtime it was built with. Remove{' '}
+                  {blockedByCompute.length === 1 ? 'it' : 'them'} to continue here, or choose New Job
+                  Compute to keep {blockedByCompute.length === 1 ? 'it' : 'them'}.
+                </p>
+                {onDropModels && (
+                  <button
+                    type="button"
+                    onClick={() => onDropModels(blockedByCompute)}
+                    className="mt-2.5 inline-flex items-center rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-amber-800 transition hover:border-amber-400 hover:bg-amber-50 dark:border-amber-700 dark:bg-transparent dark:text-amber-200"
+                  >
+                    Remove {blockedByCompute.map((id) => id.toUpperCase()).join(', ')} and continue
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {isNew ? (
           <div className="space-y-5">

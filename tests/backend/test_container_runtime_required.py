@@ -211,3 +211,21 @@ def test_every_offered_runtime_is_accepted(tmp_path, monkeypatch):
             job_compute=JobComputeConfig(node_type_id="Standard_DC4as_v5", runtime_key=runtime.key),
         )
         assert build_execution_request(_request(offered, dataset), dataset, _Principal())
+
+
+# --- the picker knows what a compute cannot run ------------------------
+#
+# Existing Compute runs on whatever runtime its cluster has, so the
+# container-only models are unavailable there. The Compute step needs that
+# list to say so before the user submits, instead of /deploy refusing the
+# whole run at the end of the wizard.
+
+
+def test_the_model_availability_response_names_the_container_only_models():
+    from app.config.model_availability import CONTAINER_ONLY_MODELS
+    from app.schemas.metadata import ModelAvailabilityResponse
+
+    assert "container_only_models" in ModelAvailabilityResponse.model_fields
+    # The list the UI reads is the same one the deploy path refuses on —
+    # not a second copy that can drift out of step with it.
+    assert "tft" in CONTAINER_ONLY_MODELS

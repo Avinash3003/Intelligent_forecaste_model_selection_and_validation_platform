@@ -10,12 +10,14 @@ import StepForecastConfiguration from './components/StepForecastConfiguration'
 import StepComputeConfiguration from './components/StepComputeConfiguration'
 import StepReviewDeploy from './components/StepReviewDeploy'
 import WizardFooter from './components/WizardFooter'
+import useModelAvailability from '../../hooks/useModelAvailability'
 import {
   uploadDataset,
   profileDataset,
   fetchDatasetDateRange,
   validateMetadata,
   deployRun,
+  fetchDeployment,
   estimateRun,
   fetchComputeOptions,
   fetchExistingCompute,
@@ -152,8 +154,12 @@ export default function ForecastPipeline() {
   const [deployError, setDeployError] = useState(null)
   const [deployed, setDeployed] = useState(false)
   const [runId, setRunId] = useState(null)
-  // Supplied with the submission so the confirmation can offer the live
-  // Databricks run immediately — see StepReviewDeploy.
+  // Polled for after submission rather than returned with it: `submit()`
+  // triggers the Databricks job on a background thread so /deploy can
+  // answer in milliseconds (a large dataset's upload alone runs to nearly a
+  // minute), so at the moment /deploy returns there is no Databricks run id
+  // yet, and no link. It appears a poll or two later — which is still while
+  // the run is starting, which is when it is worth offering.
   const [databricksRunUrl, setDatabricksRunUrl] = useState(null)
   // A second click that lands before React commits the re-render this
   // triggers (setDeploying(true) does not disable the button
@@ -172,6 +178,46 @@ export default function ForecastPipeline() {
   const estimateRequestRef = useRef(0)
 
   const isBusy = uploading || profiling || validating || deploying
+
+  // The same list the Compute step shows a notice for — read once here
+  // so Next and the notice can never disagree about what is blocked.
+  const { containerOnlyModels } = useModelAvailability()
+
+  // Ask for the Databricks link until it exists, then stop.
+  //
+  // It is not available at submission: the run is triggered on a background
+  // thread, so /deploy returns before Databricks has issued a run id. A few
+  // seconds later it has, and the run is still starting — which is exactly
+  // when someone wants to open it. Gives up quietly rather than polling a
+  // run that will never have one (a local run, or a failed submission).
+  useEffect(() => {
+    if (!deployed || !runId || databricksRunUrl) return
+    let cancelled = false
+    let attempts = 0
+    let timer = null
+
+    async function look() {
+      attempts += 1
+      try {
+        const run = await fetchDeployment(runId)
+        if (cancelled) return
+        if (run?.databricksRunUrl) {
+          setDatabricksRunUrl(run.databricksRunUrl)
+          return
+        }
+      } catch {
+        // A link is a convenience; a failure to find one is not worth
+        // reporting over a submission that succeeded.
+      }
+      if (!cancelled && attempts < 10) timer = setTimeout(look, 3000)
+    }
+
+    look()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [deployed, runId, databricksRunUrl])
 
   // Whether the target must be rolled up to monthly. The backend owns this
   // rule (Monthly data needs no roll-up); the frontend never re-derives it.
@@ -425,6 +471,18 @@ export default function ForecastPipeline() {
   }, [currentStep])
 
   // Changing the configuration invalidates any earlier validation result.
+  // Removing a model the chosen compute cannot run. Explicit and
+  // user-driven: the platform refuses such a run rather than quietly
+  // dropping the model (see deployment_service._reject_unsupported_models),
+  // so the picker must not do quietly what the backend refuses to do at all.
+  const handleDropModels = (modelIds) => {
+    setConfig((prev) => ({
+      ...prev,
+      selectedModels: prev.selectedModels.filter((id) => !modelIds.includes(id)),
+      fallbackModel: modelIds.includes(prev.fallbackModel) ? '' : prev.fallbackModel,
+    }))
+  }
+
   const handleComputeChange = (next) => {
     setCompute(next)
     if (next.mode === compute.mode) {
@@ -478,10 +536,20 @@ export default function ForecastPipeline() {
 
   // New compute must be validated; existing compute must actually exist.
   // Either mode must be validated against Databricks before continuing.
-  const canLeaveComputeStep =
+  // A model this compute cannot run makes the run un-submittable, so Next
+  // stays closed until it is resolved — otherwise the wizard walks the user
+  // to the last step to be refused there.
+  const modelsBlockedByCompute =
     compute.mode === 'existing_compute'
-      ? existingValidation.state === 'valid'
-      : computeValidation.state === 'valid'
+      ? config.selectedModels.filter((id) => containerOnlyModels.includes(id))
+      : []
+
+  const canLeaveComputeStep =
+    modelsBlockedByCompute.length > 0
+      ? false
+      : compute.mode === 'existing_compute'
+        ? existingValidation.state === 'valid'
+        : computeValidation.state === 'valid'
 
   const handleNext = async () => {
     if (isBusy) return
@@ -559,7 +627,6 @@ export default function ForecastPipeline() {
           compute: toComputePayload(compute),
         })
         setRunId(response.run_id)
-        setDatabricksRunUrl(response.databricks_run_url ?? null)
         setDeployed(true)
       } catch (err) {
         setDeployError(err.message)
@@ -660,6 +727,8 @@ export default function ForecastPipeline() {
               onValidate={handleValidateCompute}
               onValidateExisting={handleValidateExistingCompute}
               onSelectExistingCluster={handleSelectExistingCluster}
+              selectedModels={config.selectedModels}
+              onDropModels={handleDropModels}
             />
           )}
 

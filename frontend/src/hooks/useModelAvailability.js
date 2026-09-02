@@ -35,6 +35,11 @@ export default function useModelAvailability() {
     default: defaultForecastHorizon,
   })
   const [fallbackModel, setFallbackModel] = useState(defaultFallbackModel)
+  // Models that need the ForecastIQ container image, so Existing
+  // Compute cannot run them whatever cluster is picked. Served by the
+  // backend rather than named here — the constraint belongs to the
+  // image, not to this picker.
+  const [containerOnlyModels, setContainerOnlyModels] = useState([])
 
   useEffect(() => {
     let cancelled = false
@@ -60,6 +65,10 @@ export default function useModelAvailability() {
         if (response?.default_fallback_model) {
           setFallbackModel(response.default_fallback_model)
         }
+
+        if (Array.isArray(response?.container_only_models)) {
+          setContainerOnlyModels(response.container_only_models)
+        }
       })
       .catch(() => {
         // Availability is an enhancement, never a gate. Staying at the
@@ -72,5 +81,5 @@ export default function useModelAvailability() {
     }
   }, [])
 
-  return { unavailable, horizonRange, fallbackModel }
+  return { unavailable, horizonRange, fallbackModel, containerOnlyModels }
 }
