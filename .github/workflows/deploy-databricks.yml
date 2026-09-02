@@ -40,6 +40,16 @@ jobs:
     name: Build, validate and deploy (prod)
     needs: tests
     runs-on: ubuntu-latest
+    env:
+      # A distinct PEP 440 local version per deploy, so pip installs this
+      # build over whatever a long-lived all-purpose cluster already has.
+      # With a permanently static 0.1.0, pip saw the version as already
+      # satisfied and kept a months-old wheel — every job cluster is new so
+      # cloud runs looked fine, while Existing Compute ran stale code and
+      # failed on a CLI that had since changed. See forecast_engine/
+      # _version.py. Read by both the explicit build below and the rebuild
+      # `databricks bundle deploy` does itself.
+      FORECAST_ENGINE_VERSION: 0.1.0+ci.${{ github.run_number }}
     # A GitHub Environment named "production" — lets this deployment be
     # gated with required reviewers / a wait timer in repo settings without
     # any workflow change, and scopes where the production secrets below

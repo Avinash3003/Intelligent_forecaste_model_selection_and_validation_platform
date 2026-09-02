@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forecast-engine"
-version = "0.1.0"
+# Stamped at build time so a long-lived cluster cannot keep a stale wheel —
+# see forecast_engine/_version.py for the failure this prevents.
+dynamic = ["version"]
 description = "Demand forecasting pipeline: preprocessing, model training, backtesting, drift-gated selection, and MLflow tracking."
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
@@ -71,6 +73,9 @@ all = [
 
 [project.scripts]
 forecast-engine = "forecast_engine.run_pipeline:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "forecast_engine._version.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["forecast_engine*"]

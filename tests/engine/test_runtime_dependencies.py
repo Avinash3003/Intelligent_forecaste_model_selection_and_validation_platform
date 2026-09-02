@@ -108,3 +108,41 @@ def test_tft_is_pytorch_and_no_tensorflow_is_pulled_in():
     assert any(line.startswith("torch") for line in lines)
     assert "tensorflow" not in joined
     assert "keras" not in joined
+
+
+# --- the wheel version must be stampable -------------------------------
+#
+# pip skips a package whose version is already installed. A permanently
+# static version let a long-lived all-purpose cluster keep the first wheel
+# it ever installed, so Existing Compute ran months-old code and failed on
+# a CLI that had since changed, while every (always-new) job cluster
+# looked fine.
+
+
+def test_the_engine_version_can_be_stamped_per_build():
+    import importlib
+    import os
+
+    from forecast_engine import _version
+
+    assert _version.BASE_VERSION
+    previous = os.environ.get("FORECAST_ENGINE_VERSION")
+    try:
+        os.environ["FORECAST_ENGINE_VERSION"] = "0.1.0+ci.999"
+        assert importlib.reload(_version).__version__ == "0.1.0+ci.999"
+        os.environ.pop("FORECAST_ENGINE_VERSION")
+        assert importlib.reload(_version).__version__ == _version.BASE_VERSION
+    finally:
+        if previous is None:
+            os.environ.pop("FORECAST_ENGINE_VERSION", None)
+        else:
+            os.environ["FORECAST_ENGINE_VERSION"] = previous
+        importlib.reload(_version)
+
+
+def test_the_wheel_version_is_not_hardcoded_in_packaging():
+    """A static `version = "0.1.0"` here is what CI cannot stamp over."""
+    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+
+    assert 'dynamic = ["version"]' in pyproject
+    assert 'attr = "forecast_engine._version.__version__"' in pyproject
