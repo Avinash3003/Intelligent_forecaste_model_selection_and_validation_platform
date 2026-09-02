@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react'
 import SectionContainer from '../../../components/layout/SectionContainer'
+import OpenInDatabricksButton from '../../../components/ui/OpenInDatabricksButton'
 import Loader from '../../../components/ui/Loader'
 import RayParallelTimeline from './RayParallelTimeline'
 import { fetchDeployment, isTerminalStatus } from '../../../services'
@@ -149,12 +150,17 @@ export default function PipelineExecutionGraph({ runId }) {
   if (error) return null
   if (!run?.stages?.length) return null
 
+  // The Databricks link belongs beside the phases it summarises, not in a
+  // collapsed card at the foot of the page: this section is a *view* of the
+  // DAG, and the real one — per-task timing, logs, a run still executing —
+  // is one click away.
   return (
     <SectionContainer
       title="Execution flow"
       subtitle={`${run.stages.filter((s) => s.status === 'Completed').length} of ${run.stages.length} phases complete${
         run.duration ? ` · ${run.duration} total` : ''
       }`}
+      action={<OpenInDatabricksButton url={run.databricksRunUrl} size="sm" />}
     >
       <div className="overflow-x-auto">
         {/* No gap between steps — see PhaseStep's comment on why the

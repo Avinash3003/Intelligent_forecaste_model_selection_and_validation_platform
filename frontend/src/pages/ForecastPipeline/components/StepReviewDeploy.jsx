@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import SectionContainer from '../../../components/layout/SectionContainer'
 import Badge from '../../../components/ui/Badge'
 import Button from '../../../components/ui/Button'
+import OpenInDatabricksButton from '../../../components/ui/OpenInDatabricksButton'
 import EstimateCard from './EstimateCard'
 import { formatMonths } from '../../../utils/formatMonths'
 import { forecastModels } from '../../../data/appConfig'
@@ -51,6 +52,7 @@ export default function StepReviewDeploy({
   deployed,
   deployError,
   runId,
+  databricksRunUrl,
   estimate,
   estimateLoading,
   estimateError,
@@ -78,7 +80,8 @@ export default function StepReviewDeploy({
             Forecast running
           </h3>
           <p className="max-w-sm text-sm text-slate-400">
-            Run {runId} is executing. Results appear on their own — no need to open Databricks.
+            Run {runId} is executing. Results appear here on their own, or watch the
+            stages run live in Databricks.
           </p>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2.5">
             <Button icon={LineChart} onClick={() => navigate(`/results?run=${runId}`)}>
@@ -87,6 +90,9 @@ export default function StepReviewDeploy({
             <Button variant="secondary" icon={Rocket} onClick={() => navigate(`/deployments/${runId}`)}>
               Track Progress
             </Button>
+            {/* Offered at submission, not at completion: watching a run
+                execute is only possible while it is still executing. */}
+            <OpenInDatabricksButton url={databricksRunUrl} />
           </div>
         </motion.div>
       </SectionContainer>

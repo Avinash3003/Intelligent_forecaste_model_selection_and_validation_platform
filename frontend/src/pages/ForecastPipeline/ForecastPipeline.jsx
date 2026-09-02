@@ -152,6 +152,9 @@ export default function ForecastPipeline() {
   const [deployError, setDeployError] = useState(null)
   const [deployed, setDeployed] = useState(false)
   const [runId, setRunId] = useState(null)
+  // Supplied with the submission so the confirmation can offer the live
+  // Databricks run immediately — see StepReviewDeploy.
+  const [databricksRunUrl, setDatabricksRunUrl] = useState(null)
   // A second click that lands before React commits the re-render this
   // triggers (setDeploying(true) does not disable the button
   // synchronously) used to slip past the disabled prop entirely and
@@ -556,6 +559,7 @@ export default function ForecastPipeline() {
           compute: toComputePayload(compute),
         })
         setRunId(response.run_id)
+        setDatabricksRunUrl(response.databricks_run_url ?? null)
         setDeployed(true)
       } catch (err) {
         setDeployError(err.message)
@@ -671,6 +675,7 @@ export default function ForecastPipeline() {
               deployed={deployed}
               deployError={deployError}
               runId={runId}
+              databricksRunUrl={databricksRunUrl}
               estimate={estimate}
               estimateLoading={estimateLoading}
               estimateError={estimateError}

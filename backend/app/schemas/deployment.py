@@ -33,6 +33,11 @@ class DeploymentResponse(BaseModel):
     run_id: str
     status: str
     message: str
+    # Returned with the submission, not discovered later: watching the run
+    # live in Databricks is only useful while it is still running, and the
+    # id the link is built from is known the moment the job is triggered.
+    # None for local execution, and whenever Databricks gave no URL.
+    databricks_run_url: str | None = None
 
 
 class ParallelTask(BaseModel):

@@ -164,7 +164,22 @@ class DeploymentService:
             run_id=run_id,
             status=status.value,
             message=f"Run submitted to the Pipeline Executor and is now {status.value}.",
+            databricks_run_url=self._submitted_run_url(run_id),
         )
+
+    def _submitted_run_url(self, run_id: str) -> str | None:
+        """The Databricks run page for a just-submitted run, if there is one.
+
+        Read here so the caller can offer the link with the confirmation
+        rather than only once the run ends — the point of the link is
+        watching execution happen. Never fatal: a run that submitted fine
+        is not failed by a missing convenience link.
+        """
+        try:
+            listing = self._executor.get_run(run_id)
+        except Exception:  # noqa: BLE001 - the submission already succeeded
+            return None
+        return getattr(listing, "databricks_run_url", None) if listing else None
 
     def list_deployments(self) -> list[DeploymentStatus]:
         return [self._to_deployment_status(listing) for listing in self._executor.list_runs()]

@@ -71,6 +71,8 @@ class _FakeJobs:
         return SimpleNamespace(
             state=SimpleNamespace(life_cycle_state="RUNNING", result_state=None, state_message=""),
             run_duration=1,
+            # Databricks builds this itself; the runner never assembles one.
+            run_page_url=f"https://example.invalid/#job/4242/run/{run_id}",
         )
 
     @property
@@ -832,3 +834,40 @@ def test_no_test_reads_a_source_file_by_a_working_directory_relative_path():
 def test_settings_in_the_suite_never_read_a_developer_env_file():
     """tests/conftest.py pins this; without it the answer depends on cwd."""
     assert Settings.model_config["env_file"] is None
+
+
+# --- the live run is reachable while it is still live -----------------
+#
+# The link to the Databricks run existed only after the run appeared in
+# history, and the submission confirmation told the user there was "no need
+# to open Databricks". That inverts the feature: watching stages execute is
+# only possible *during* execution. The run id the link is built from is
+# known the moment the job is triggered, so the URL ships with the
+# submission response.
+
+
+def test_the_run_page_url_is_known_as_soon_as_the_job_is_triggered(settings, dataset):
+    workspace = _FakeWorkspace()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    run_id = runner.submit(_request(dataset, NEW_COMPUTE))
+
+    listing = runner.get_run(run_id)
+
+    assert listing.databricks_run_url == "https://example.invalid/#job/4242/run/99"
+
+
+def test_the_url_survives_a_workspace_that_offers_none(settings, dataset):
+    """A run that submitted fine is never failed by a missing link."""
+
+    class _NoUrlJobs(_FakeJobs):
+        def get_run(self, run_id, **kwargs):
+            got = super().get_run(run_id, **kwargs)
+            got.run_page_url = None
+            return got
+
+    workspace = _FakeWorkspace()
+    workspace.jobs = _NoUrlJobs()
+    runner = DatabricksRunner(settings, workspace_client=workspace)
+    run_id = runner.submit(_request(dataset, NEW_COMPUTE))
+
+    assert runner.get_run(run_id).databricks_run_url is None
