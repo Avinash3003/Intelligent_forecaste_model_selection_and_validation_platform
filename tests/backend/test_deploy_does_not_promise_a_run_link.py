@@ -1,13 +1,17 @@
-"""The Databricks run link ships with the submission, not with the result.
+"""The Databricks run link is not knowable at submission, and must not be
+claimed to be.
 
-Watching a run execute is only possible while it is executing, so a link
-that appears once the run reaches history arrives exactly too late. The
-submission confirmation used to say "no need to open Databricks" and offer
-nothing; the run id the link is built from is known the moment the job is
-triggered, so the URL travels back with the run id.
+`DatabricksRunner.submit` stages the dataset and triggers the job on a
+background thread, so `/deploy` can answer in milliseconds — a real 17.3 MB
+dataset takes nearly a minute to upload on its own. That means when /deploy
+returns there is no Databricks run id yet, and therefore no run page URL.
 
-A missing link is never an error: a run that submitted fine is not failed
-by the absence of a convenience.
+An earlier attempt returned the URL in the submission response. It was
+always null in practice, which is worse than absent: a field that exists
+but is never populated reads as "this run has no link" rather than "ask
+again in a moment". The UI polls `/deployments/{run_id}` instead, where the
+link appears a poll or two later — while the run is still starting, which
+is when someone wants to open it.
 """
 
 from __future__ import annotations
@@ -19,17 +23,12 @@ import pytest
 
 from app.auth.models import Principal, Role
 from app.orchestration.schemas import JobStatus
-from app.schemas.deployment import DeploymentRequest, MetadataMapping
+from app.schemas.deployment import DeploymentRequest, DeploymentResponse, MetadataMapping
 from app.services.deployment_service import DeploymentService
-
-RUN_URL = "https://adb-1.4.azuredatabricks.net/?o=1#job/7/run/42"
 
 
 class _Executor:
-    """Stands in for the Pipeline Executor: submits, then reports."""
-
-    def __init__(self, listing=SimpleNamespace(databricks_run_url=RUN_URL)):
-        self._listing = listing
+    def __init__(self):
         self.get_run_calls: list[str] = []
 
     def execute(self, request):
@@ -40,7 +39,7 @@ class _Executor:
 
     def get_run(self, run_id):
         self.get_run_calls.append(run_id)
-        return self._listing
+        return SimpleNamespace(databricks_run_url=None)
 
 
 class _Uploads:
@@ -72,32 +71,17 @@ def _no_compute_refusal(monkeypatch):
     monkeypatch.setattr(module, "_reject_unsupported_models", lambda request, settings: None)
 
 
-def test_the_submission_response_carries_the_live_run_link():
+def test_the_submission_response_does_not_carry_a_run_link():
+    """No field promising something that is never there at this point."""
+    assert "databricks_run_url" not in DeploymentResponse.model_fields
+
+
+def test_submitting_does_not_wait_on_a_link_lookup():
+    """The link costs a workspace round trip and cannot succeed yet, so the
+    submission path must not spend one asking."""
     executor = _Executor()
 
     response = DeploymentService(executor=executor, upload_service=_Uploads()).deploy(_request(), _principal())
 
     assert response.run_id == "dbx-run-abc123"
-    assert response.databricks_run_url == RUN_URL
-    assert executor.get_run_calls == ["dbx-run-abc123"]
-
-
-def test_a_run_with_no_link_still_submits():
-    """Local execution, and any run Databricks gave no URL for."""
-    executor = _Executor(listing=SimpleNamespace(databricks_run_url=None))
-
-    response = DeploymentService(executor=executor, upload_service=_Uploads()).deploy(_request(), _principal())
-
-    assert response.run_id == "dbx-run-abc123"
-    assert response.databricks_run_url is None
-
-
-def test_a_failure_looking_up_the_link_never_fails_the_submission():
-    class _Exploding(_Executor):
-        def get_run(self, run_id):
-            raise RuntimeError("workspace unreachable")
-
-    response = DeploymentService(executor=_Exploding(), upload_service=_Uploads()).deploy(_request(), _principal())
-
-    assert response.run_id == "dbx-run-abc123"
-    assert response.databricks_run_url is None
+    assert executor.get_run_calls == []
