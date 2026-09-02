@@ -1,0 +1,114 @@
+# GitLab CI. GitLab does not read .github/workflows, so this file is what
+# runs there; the two are kept deliberately equivalent.
+#
+# Mirrors .github/workflows/ci.yml: the same five checks, the same Python
+# 3.12 and Node 20, the same commands. Deployment is NOT mirrored here —
+# .github/workflows/deploy-app.yml and deploy-databricks.yml stay the only
+# thing that deploys, so the two platforms can never both deploy at once.
+# See docs/ci-cd.md before adding a deploy stage here.
+
+stages:
+  - test
+
+default:
+  interruptible: true
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+# One pipeline per branch, newest wins — matches the GitHub concurrency group.
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
+
+.python:
+  image: python:3.12-slim
+  cache:
+    key: "pip-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cache/pip
+
+backend-tests:
+  extends: .python
+  stage: test
+  script:
+    - pip install -r backend/requirements.txt pytest
+    - pytest tests/backend -q
+
+# Installs via pyproject.toml's `all` extra. TFT/torch is deliberately
+# excluded from `all`; no test in tests/engine needs it.
+engine-tests:
+  extends: .python
+  stage: test
+  script:
+    - pip install -e ".[all]" pytest
+    - pytest tests/engine -q
+
+frontend-build:
+  image: node:20-slim
+  stage: test
+  cache:
+    key: "npm-$CI_COMMIT_REF_SLUG"
+    paths:
+      - frontend/node_modules
+  script:
+    - cd frontend
+    - npm ci
+    - npm run build
+
+# Builds the wheel and imports it from a clean environment, so a packaging
+# mistake fails here rather than on a cluster.
+package-validate:
+  extends: .python
+  stage: test
+  script:
+    - python -m pip wheel . --no-deps --wheel-dir dist
+    - python -m venv /tmp/wheel-check
+    - /tmp/wheel-check/bin/pip install dist/*.whl
+    - /tmp/wheel-check/bin/python -c "import forecast_engine; print(forecast_engine.__name__, 'imports cleanly')"
+
+# Validates the bundle only when Databricks credentials are configured, and
+# fails loudly when they are present but malformed. Skips cleanly on a fork
+# or a project that has not set them, exactly like the GitHub job.
+databricks-bundle-validate:
+  extends: .python
+  stage: test
+  script:
+    - |
+      host=$(printf '%s' "$DATABRICKS_HOST" | tr -d '[:space:]')
+      cid=$(printf '%s' "$DATABRICKS_CLIENT_ID" | tr -d '[:space:]')
+      csec=$(printf '%s' "$DATABRICKS_CLIENT_SECRET" | tr -d '[:space:]')
+      if [ -z "$host" ] || [ -z "$cid" ] || [ -z "$csec" ]; then
+        echo "Databricks credentials are not configured; skipping bundle validation."
+        exit 0
+      fi
+      problems=""
+      case "$host" in
+        https://*.azuredatabricks.net) ;;
+        *) problems="$problems\n  - DATABRICKS_HOST must look like https://adb-<id>.<n>.azuredatabricks.net (no trailing slash or path)";;
+      esac
+      [ ${#cid} -ne 36 ] && problems="$problems\n  - DATABRICKS_CLIENT_ID should be a 36-character application id (got ${#cid} characters)"
+      [ ${#csec} -lt 20 ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET looks truncated (only ${#csec} characters)"
+      [ "$DATABRICKS_HOST" != "$host" ] && problems="$problems\n  - DATABRICKS_HOST has leading/trailing whitespace"
+      [ "$DATABRICKS_CLIENT_ID" != "$cid" ] && problems="$problems\n  - DATABRICKS_CLIENT_ID has leading/trailing whitespace"
+      [ "$DATABRICKS_CLIENT_SECRET" != "$csec" ] && problems="$problems\n  - DATABRICKS_CLIENT_SECRET has leading/trailing whitespace"
+      if [ -n "$problems" ]; then
+        printf 'Databricks configuration is present but malformed:%b\n' "$problems"
+        exit 1
+      fi
+      # Length and a truncated SHA-256, so a configured value can be compared
+      # with a known-good one without either being revealed.
+      fp() { printf '%s' "$1" | sha256sum | cut -c1-8; }
+      echo "HOST len=${#host} fp=$(fp "$host") | CLIENT_ID len=${#cid} fp=$(fp "$cid") | CLIENT_SECRET len=${#csec} fp=$(fp "$csec")"
+      apt-get update -qq && apt-get install -y -qq curl unzip >/dev/null
+      curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v1.11.0/install.sh | sh
+      python -m pip wheel . --no-deps --wheel-dir dist
+      cd databricks && databricks bundle validate -t dev
+  variables:
+    DATABRICKS_AUTH_TYPE: oauth-m2m
+    BUNDLE_VAR_cicd_service_principal_id: "$DATABRICKS_CLIENT_ID"

@@ -231,7 +231,9 @@ through GitHub Actions rather than a manual `bundle deploy`.
 
 Three workflows cover it: `ci.yml` (tests and build validation, also reused as the pre-deploy gate),
 `deploy-databricks.yml` (the wheel artifact), and `deploy-app.yml` (backend
-and frontend). Every environment-specific value comes from an encrypted Actions secret, so no
+and frontend). `.gitlab-ci.yml` mirrors `ci.yml`'s checks for GitLab, which does not read
+`.github/`; deployment stays on GitHub Actions alone so the two platforms cannot both deploy.
+Every environment-specific value comes from an encrypted Actions secret, so no
 resource name, hostname or identifier is committed.
 
 ---
