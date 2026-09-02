@@ -5,7 +5,7 @@ import { cn } from '../../../utils/cn'
 // One lane per Ray worker, one bar per forecast key, positioned by the real
 // start/end offsets the stage's own executor recorded (stage.parallelTasks).
 //
-// Deliberately plain CSS/SVG: a handful of lanes of positioned divs is not a
+// Deliberately plain CSS: a handful of lanes of positioned divs is not a
 // charting problem, and a chart dependency would be several hundred
 // kilobytes for something percentage widths already express exactly.
 //
@@ -14,24 +14,15 @@ import { cn } from '../../../utils/cn'
 // parallel execution looks like, and a single lane with sequential bars is
 // what its absence looks like. Neither can be faked by the layout.
 //
-// v4 rebuild. What the previous version got wrong, and what replaced it:
+// v5. Lanes are identified by the Ray worker's own id rather than an
+// invented ordinal, each lane carries its own numbers (keys run, busy time,
+// share of the window), the time grid is drawn once behind every lane
+// instead of repeated inside each, and the table paginates.
 //
-//   * The x-axis ran from the stage's start, but a stage can spend almost
-//     all of its wall time before the first task is scheduled — Rank &
-//     Select spent 8.7s of 8.89s that way. Every bar collapsed into a
-//     sliver against ~97% empty width. The axis now spans the execution
-//     window (first start -> last end) with both ends labelled in real
-//     seconds, and the time before it is reported as its own figure rather
-//     than drawn as dead pixels. No broken axis, nothing hidden.
-//   * Hues were cycled by lane index. They are now a fixed order, and a
-//     seventh worker folds into one shared slot rather than reusing a hue
-//     another lane already owns.
-//   * Bar labels were clipped by `overflow-hidden` inside 6%-wide bars.
-//     A label is rendered only when the bar can hold it whole.
-//   * Every timing was reachable only by hovering. There is now a table
-//     view carrying the same numbers.
-//   * A concurrency band across the top: how many keys were in flight at
-//     each moment, which is the claim this component exists to support.
+// The axis spans the execution window rather than the stage: a stage can
+// idle most of its wall time before Ray schedules the first task, and
+// drawing from zero spent the whole width on that emptiness. The wait is
+// reported as its own figure instead.
 
 // Fixed categorical order — never cycled, never assigned by rank. Validated
 // with the dataviz palette checker against both surfaces: worst adjacent
@@ -53,7 +44,13 @@ const OVERFLOW_LANE = { bar: 'bg-slate-500', dot: 'bg-slate-500' }
 
 const laneColor = (index) => LANE_COLORS[index] ?? OVERFLOW_LANE
 
-const LABEL_COL = 92 // px — the fixed left column lanes, band and axis align to
+const LABEL_COL = 132 // px — the fixed left column lanes, grid and axis align to
+const TABLE_PAGE_SIZE = 50
+
+// A Ray worker id is 56 hex characters. The leading digits identify it as
+// well as a short commit hash identifies a commit; the full value is on the
+// element's title and in the table.
+const shortHash = (id) => (id ? String(id).slice(0, 10) : '—')
 
 function formatSeconds(value) {
   if (value == null) return '—'
@@ -67,9 +64,7 @@ function Figure({ value, label, tone = 'default' }) {
       <p
         className={cn(
           'truncate text-[15px] font-semibold leading-none',
-          tone === 'muted'
-            ? 'text-slate-400 dark:text-slate-500'
-            : 'text-slate-800 dark:text-slate-100'
+          tone === 'muted' ? 'text-slate-400 dark:text-slate-500' : 'text-slate-800 dark:text-slate-100'
         )}
       >
         {value}
@@ -79,100 +74,76 @@ function Figure({ value, label, tone = 'default' }) {
   )
 }
 
-// Active-task count over the execution window, as a step area. This is the
-// parallelism claim in one shape: a flat band at 1 is sequential work, a
-// band that climbs to N is N keys genuinely in flight.
-function ConcurrencyBand({ tasks, domainStart, domainSpan, peak }) {
-  const points = useMemo(() => {
-    const edges = []
-    for (const task of tasks) {
-      edges.push({ at: task.start, delta: 1 })
-      edges.push({ at: task.end, delta: -1 })
-    }
-    edges.sort((a, b) => a.at - b.at || b.delta - a.delta)
-
-    const steps = []
-    let active = 0
-    for (const edge of edges) {
-      active += edge.delta
-      const x = ((edge.at - domainStart) / domainSpan) * 100
-      steps.push({ x: Math.min(Math.max(x, 0), 100), active })
-    }
-    return steps
-  }, [tasks, domainStart, domainSpan])
-
-  if (!points.length || peak < 1) return null
-
-  // A step path: hold each level until the next edge, then jump.
-  const height = 28
-  const y = (active) => height - (active / peak) * (height - 3)
-  let d = `M 0 ${height} L 0 ${y(0)}`
-  let previous = 0
-  for (const point of points) {
-    d += ` L ${point.x} ${y(previous)} L ${point.x} ${y(point.active)}`
-    previous = point.active
-  }
-  d += ` L 100 ${y(previous)} L 100 ${height} Z`
-
-  return (
-    <div className="grid items-center gap-3" style={{ gridTemplateColumns: `${LABEL_COL}px 1fr` }}>
-      <span className="truncate text-[11px] text-slate-400 dark:text-slate-500">In flight</span>
-      <div className="relative">
-        <svg
-          viewBox={`0 0 100 ${height}`}
-          preserveAspectRatio="none"
-          className="h-7 w-full overflow-visible"
-          role="img"
-          aria-label={`Peak ${peak} keys running at once`}
-        >
-          <path d={d} className="fill-brand-500/15" />
-          <path
-            d={d}
-            className="stroke-brand-500/70"
-            fill="none"
-            strokeWidth="1.5"
-            vectorEffect="non-scaling-stroke"
-          />
-        </svg>
-        <span className="pointer-events-none absolute right-0 top-0 text-[10px] font-medium text-brand-600 dark:text-brand-400">
-          peak {peak}
-        </span>
-      </div>
-    </div>
-  )
-}
-
 function TaskTable({ rows }) {
+  const [page, setPage] = useState(0)
+  const pages = Math.max(1, Math.ceil(rows.length / TABLE_PAGE_SIZE))
+  const start = page * TABLE_PAGE_SIZE
+  const visible = rows.slice(start, start + TABLE_PAGE_SIZE)
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[420px] text-left text-xs">
-        <thead>
-          <tr className="border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-700 dark:text-slate-500">
-            <th className="py-1.5 pr-3 font-medium">Key</th>
-            <th className="py-1.5 pr-3 font-medium">Worker</th>
-            <th className="py-1.5 pr-3 text-right font-medium">Start</th>
-            <th className="py-1.5 pr-3 text-right font-medium">End</th>
-            <th className="py-1.5 text-right font-medium">Duration</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-          {rows.map((row) => (
-            <tr key={row.groupId} className="text-slate-600 dark:text-slate-300">
-              <td className="py-1.5 pr-3">
-                <span className="inline-flex items-center gap-1.5">
-                  <span className={cn('h-2 w-2 shrink-0 rounded-full', laneColor(row.laneIndex).dot)} />
-                  <span className="truncate font-medium text-slate-700 dark:text-slate-200">{row.groupId}</span>
-                </span>
-              </td>
-              <td className="py-1.5 pr-3">Worker {row.laneIndex + 1}</td>
-              {/* tabular-nums here and nowhere else: these align down a column. */}
-              <td className="py-1.5 pr-3 text-right tabular-nums">{formatSeconds(row.start)}</td>
-              <td className="py-1.5 pr-3 text-right tabular-nums">{formatSeconds(row.end)}</td>
-              <td className="py-1.5 text-right tabular-nums">{formatSeconds(row.end - row.start)}</td>
+    <div>
+      {/* Capped and scrollable: a run with hundreds of keys must not push
+          everything below it off the page. */}
+      <div className="max-h-[420px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-700">
+        <table className="w-full min-w-[520px] text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-white dark:bg-slate-900">
+            <tr className="border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-700 dark:text-slate-500">
+              <th className="px-3 py-2 font-medium">Key</th>
+              <th className="px-3 py-2 font-medium">Worker</th>
+              <th className="px-3 py-2 text-right font-medium">Start</th>
+              <th className="px-3 py-2 text-right font-medium">End</th>
+              <th className="px-3 py-2 text-right font-medium">Duration</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {visible.map((row) => (
+              <tr key={row.groupId} className="text-slate-600 dark:text-slate-300">
+                <td className="px-3 py-1.5">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className={cn('h-2 w-2 shrink-0 rounded-full', laneColor(row.laneIndex).dot)} />
+                    <span className="truncate font-medium text-slate-700 dark:text-slate-200">{row.groupId}</span>
+                  </span>
+                </td>
+                <td className="px-3 py-1.5">
+                  <span className="font-mono text-[11px]" title={row.workerId}>
+                    {shortHash(row.workerId)}
+                  </span>
+                </td>
+                {/* tabular-nums here and nowhere else: these align down a column. */}
+                <td className="px-3 py-1.5 text-right tabular-nums">{formatSeconds(row.start)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{formatSeconds(row.end)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{formatSeconds(row.end - row.start)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {pages > 1 && (
+        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+          <span className="tabular-nums">
+            {start + 1}–{Math.min(start + TABLE_PAGE_SIZE, rows.length)} of {rows.length}
+          </span>
+          <span className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="rounded-md border border-slate-200 px-2 py-1 font-medium transition enabled:hover:border-brand-300 enabled:hover:text-brand-600 disabled:opacity-40 dark:border-slate-700"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(pages - 1, p + 1))}
+              disabled={page >= pages - 1}
+              className="rounded-md border border-slate-200 px-2 py-1 font-medium transition enabled:hover:border-brand-300 enabled:hover:text-brand-600 disabled:opacity-40 dark:border-slate-700"
+            >
+              Next
+            </button>
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -193,8 +164,7 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
   const failedTasks = useMemo(() => (tasks ?? []).filter((t) => t.status !== 'Completed'), [tasks])
   const hasTasks = parallelTasks?.executor === 'ray' && Array.isArray(tasks) && tasks.length > 0
 
-  // Stable ordinal numbering: sorted by the raw id rather than order of
-  // appearance, so "Worker 1" refers to the same lane on every render.
+  // Sorted by the raw id, so a given worker keeps its lane across renders.
   const workers = useMemo(() => {
     if (!hasTasks) return []
     return [...new Set(completedTasks.map((t) => t.workerId).filter(Boolean))].sort()
@@ -202,10 +172,7 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
 
   const laneOf = useMemo(() => new Map(workers.map((id, index) => [id, index])), [workers])
 
-  // The window work actually happened in. A stage can idle for most of its
-  // wall time before Ray schedules the first task; drawing from zero spends
-  // the whole width on that emptiness. Both ends are labelled with real
-  // seconds, so this reads as a window, never as "the stage started here".
+  // The window work actually happened in.
   const { domainStart, domainEnd, leadIn } = useMemo(() => {
     if (!completedTasks.length) return { domainStart: 0, domainEnd: 0.001, leadIn: 0 }
     const first = Math.min(...completedTasks.map((t) => t.start))
@@ -230,6 +197,25 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
     }
     return highest
   }, [completedTasks])
+
+  // Per lane: its tasks, how long it was busy, and its share of the window.
+  const lanes = useMemo(
+    () =>
+      workers.map((workerId, laneIndex) => {
+        const laneTasks = completedTasks
+          .filter((t) => t.workerId === workerId)
+          .sort((a, b) => a.start - b.start)
+        const busy = laneTasks.reduce((total, t) => total + (t.end - t.start), 0)
+        return {
+          workerId,
+          laneIndex,
+          tasks: laneTasks,
+          busy,
+          utilisation: Math.min(busy / domainSpan, 1),
+        }
+      }),
+    [workers, completedTasks, domainSpan]
+  )
 
   const tableRows = useMemo(
     () =>
@@ -265,7 +251,7 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
 
       {open && (
         <div className="border-t border-slate-100 px-3.5 py-4 dark:border-slate-800">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
+          <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
             <div className="flex flex-wrap items-end gap-x-8 gap-y-3">
               <Figure value={`${parallelTasks.completed} / ${parallelTasks.total}`} label="Keys completed" />
               <Figure value={peak || '—'} label="Peak in flight" />
@@ -302,48 +288,46 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
           {view === 'table' ? (
             <TaskTable rows={tableRows} />
           ) : (
-            <>
-              <div className="space-y-2">
-                <ConcurrencyBand
-                  tasks={completedTasks}
-                  domainStart={domainStart}
-                  domainSpan={domainSpan}
-                  peak={peak}
-                />
+            <div className="relative">
+              {/* One time grid behind every lane, not a copy inside each. */}
+              <div
+                className="pointer-events-none absolute inset-y-0 right-0"
+                style={{ left: `${LABEL_COL}px` }}
+                aria-hidden="true"
+              >
+                {ticks.map((tick) => (
+                  <span
+                    key={tick}
+                    className="absolute inset-y-0 w-px bg-slate-200/70 dark:bg-slate-700/50"
+                    style={{ left: `${tick * 100}%` }}
+                  />
+                ))}
+              </div>
 
-                {workers.map((workerId, laneIndex) => {
-                  const laneTasks = completedTasks
-                    .filter((t) => t.workerId === workerId)
-                    .sort((a, b) => a.start - b.start)
-                  const color = laneColor(laneIndex)
-
+              <div className="relative space-y-1">
+                {lanes.map((lane) => {
+                  const color = laneColor(lane.laneIndex)
                   return (
                     <div
-                      key={workerId}
-                      className="grid items-center gap-3"
+                      key={lane.workerId}
+                      className="grid items-center gap-3 rounded-lg py-1.5 transition-colors hover:bg-slate-50/70 dark:hover:bg-slate-800/40"
                       style={{ gridTemplateColumns: `${LABEL_COL}px 1fr` }}
                     >
-                      <span className="flex min-w-0 items-center gap-1.5" title={`Ray worker id ${workerId}`}>
-                        {/* Identity is never colour alone: the swatch names
-                            the lane the bars below belong to. */}
-                        <span className={cn('h-2 w-2 shrink-0 rounded-full', color.dot)} />
-                        <span className="truncate text-xs font-medium text-slate-600 dark:text-slate-300">
-                          Worker {laneIndex + 1}
+                      <div className="min-w-0 pl-1">
+                        <span className="flex items-center gap-1.5" title={`Ray worker ${lane.workerId}`}>
+                          <span className={cn('h-2 w-2 shrink-0 rounded-full', color.dot)} />
+                          <span className="truncate font-mono text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                            {shortHash(lane.workerId)}
+                          </span>
                         </span>
-                      </span>
+                        <span className="mt-0.5 block truncate pl-3.5 text-[10px] tabular-nums text-slate-400 dark:text-slate-500">
+                          {lane.tasks.length} {lane.tasks.length === 1 ? 'key' : 'keys'} ·{' '}
+                          {formatSeconds(lane.busy)} · {Math.round(lane.utilisation * 100)}%
+                        </span>
+                      </div>
 
-                      <div className="relative h-7 rounded-md bg-slate-100/70 dark:bg-slate-800/60">
-                        {/* Recessive solid hairlines, one shade off the
-                            surface — never dashed. */}
-                        {ticks.map((tick) => (
-                          <span
-                            key={tick}
-                            className="pointer-events-none absolute inset-y-0 w-px bg-slate-200/70 dark:bg-slate-700/50"
-                            style={{ left: `${tick * 100}%` }}
-                          />
-                        ))}
-
-                        {laneTasks.map((task) => {
+                      <div className="relative h-8">
+                        {lane.tasks.map((task) => {
                           const left = ((task.start - domainStart) / domainSpan) * 100
                           // A key faster than the scale's resolution still
                           // has to be visible, so bars have a floor width.
@@ -351,44 +335,45 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
                           // Only label a bar wide enough to hold the text
                           // whole — a clipped label is worse than none, and
                           // the table view carries every value regardless.
-                          const fits = width >= 14 && String(task.groupId).length <= 8
+                          const fits = width >= 16 && String(task.groupId).length <= 9
 
                           return (
                             <div
                               key={task.groupId}
                               // The hit area is the full lane height, so a
-                              // sliver-width bar is still reachable; `group`
-                              // scopes the tooltip by CSS alone.
+                              // sliver-width bar is still reachable.
                               className="group absolute inset-y-0 flex items-center"
                               style={{ left: `${left}%`, width: `${width}%` }}
                             >
                               {/* 2px surface gap between adjacent fills,
-                                  drawn as inset margin rather than a border
-                                  around the mark. */}
+                                  drawn as a ring rather than a border. */}
                               <div
                                 className={cn(
-                                  'h-3.5 w-full rounded-[4px] px-1.5',
+                                  'flex h-5 w-full items-center overflow-hidden rounded-[4px] px-1.5',
                                   'ring-2 ring-white transition-[filter] group-hover:brightness-110 dark:ring-slate-900',
                                   color.bar
                                 )}
                               >
                                 {fits && (
-                                  <span className="block truncate text-[9px] font-medium leading-[14px] text-white">
+                                  <span className="truncate text-[10px] font-medium leading-none text-white">
                                     {task.groupId}
                                   </span>
                                 )}
                               </div>
 
                               <div
-                                className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 hidden w-max max-w-[260px] -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-left shadow-lg group-hover:block dark:border-slate-700 dark:bg-slate-800"
+                                className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 hidden w-max max-w-[280px] -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-left shadow-lg group-hover:block dark:border-slate-700 dark:bg-slate-800"
                                 role="tooltip"
                               >
                                 <p className="truncate text-[11px] font-semibold text-slate-800 dark:text-slate-100">
                                   {task.groupId}
                                 </p>
-                                <p className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
-                                  Worker {laneIndex + 1} · {formatSeconds(task.start)}–{formatSeconds(task.end)} ·{' '}
+                                <p className="mt-0.5 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                                  {formatSeconds(task.start)}–{formatSeconds(task.end)} ·{' '}
                                   {formatSeconds(task.end - task.start)}
+                                </p>
+                                <p className="mt-0.5 break-all font-mono text-[9px] text-slate-400 dark:text-slate-500">
+                                  {lane.workerId}
                                 </p>
                               </div>
                             </div>
@@ -419,7 +404,7 @@ export default function RayParallelTimeline({ stageLabel, parallelTasks }) {
                   </div>
                 </div>
               </div>
-            </>
+            </div>
           )}
 
           {failedTasks.length > 0 && (
