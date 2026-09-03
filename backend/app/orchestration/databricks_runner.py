@@ -147,6 +147,17 @@ _JOB_PARAMETER_REFS = {
     for name in ("dataset", "config", "summary_out", "live_status_out")
 }
 
+# Orders wheels by real version: "0.1.0+ci.9" sorts under "0.1.0" by name.
+def _wheel_version(path: str) -> Any:
+    from packaging.version import InvalidVersion, Version
+
+    raw = path.rsplit("/", 1)[-1].split("-")[1] if "-" in path else ""
+    try:
+        return Version(raw)
+    except InvalidVersion:
+        return Version("0")
+
+
 # spark_env_vars takes strings; a None stays None here so the caller drops it.
 def _as_env_text(value: float | int | None) -> str | None:
     return None if value is None else str(value)
@@ -1110,8 +1121,36 @@ class DatabricksRunner(PipelineRunner):
             return None
 
     def _engine_libraries(self, compute_sdk: Any) -> list[Any]:
-        wheel = (self._settings.databricks_engine_wheel_path or "").strip()
+        wheel = self._resolve_engine_wheel()
         return [compute_sdk.Library(whl=wheel)] if wheel else []
+
+    def _resolve_engine_wheel(self) -> str:
+        """The wheel the current bundle deployment actually published.
+
+        CI stamps every build with its own version, so the filename changes
+        each deploy while the setting naming it does not. Pointing the
+        setting at a directory — or at a wheel that a later deploy replaced
+        — resolves to whatever is deployed there now, which is what the job
+        must install. A configured file that still exists is used as given.
+        """
+        configured = (self._settings.databricks_engine_wheel_path or "").strip()
+        if not configured:
+            return ""
+
+        directory = configured.rsplit("/", 1)[0] if configured.endswith(".whl") else configured
+        try:
+            entries = list(self._workspace.workspace.list(directory))
+        except Exception as exc:  # noqa: BLE001 - fall back to what was configured
+            logger.warning("Could not list engine wheel directory %r: %s", directory, exc)
+            return configured
+
+        wheels = sorted(e.path for e in entries if (e.path or "").endswith(".whl"))
+        if not wheels:
+            logger.warning("No engine wheel found in %r; using the configured path.", directory)
+            return configured
+        if configured in wheels:
+            return configured
+        return max(wheels, key=_wheel_version)
 
     def _run_page_url(self, databricks_run_id: int) -> str | None:
         """Databricks' own link to the run page, or None.
