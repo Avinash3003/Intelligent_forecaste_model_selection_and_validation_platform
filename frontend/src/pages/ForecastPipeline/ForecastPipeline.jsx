@@ -111,6 +111,7 @@ export default function ForecastPipeline() {
   const [file, setFile] = useState(null)
   const [fileId, setFileId] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadError, setUploadError] = useState(null)
 
   // Step 2 — Basic Dataset Inspection (auto-triggered after upload)
@@ -244,10 +245,11 @@ export default function ForecastPipeline() {
     setInspection(null)
     setProfileError(null)
     setDateRange(null)
+    setUploadProgress(0)
     setUploading(true)
 
     try {
-      const response = await uploadDataset(selectedFile)
+      const response = await uploadDataset(selectedFile, { onProgress: setUploadProgress })
       setFileId(response.file_id)
       setErrors((prev) => ({ ...prev, file: undefined }))
       setUploading(false)
@@ -683,6 +685,7 @@ export default function ForecastPipeline() {
             <StepDatasetUpload
               file={file}
               uploading={uploading}
+              uploadProgress={uploadProgress}
               error={uploadError}
               onFileSelect={handleFileSelect}
               onRemove={handleRemoveFile}

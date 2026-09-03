@@ -1,4 +1,4 @@
-import { API_BASE_URL, REQUEST_TIMEOUT_MS } from './apiConfig'
+import { API_BASE_URL, REQUEST_TIMEOUT_MS, UPLOAD_STALL_TIMEOUT_MS } from './apiConfig'
 
 // Thrown for every failure mode (HTTP error, network failure, timeout) so
 // calling code only ever has to handle one error type and can always show
@@ -97,8 +97,82 @@ async function request(path, { method = 'GET', body, isFormData = false, timeout
   return payload
 }
 
+// Uploads are sent with XMLHttpRequest, not fetch, for two reasons.
+//
+// A total-duration timeout is the wrong model for an upload: how long it
+// takes is the file size divided by the user's upstream bandwidth, and
+// neither is knowable here. A fixed 30s aborted a 16 MB dataset whenever the
+// connection was slower than about 5 Mbit/s, which is why the same file
+// uploaded on one attempt and failed on the next. The timer below measures
+// *inactivity* instead — it resets every time bytes actually move, so a
+// large file on a slow link succeeds while a genuinely stalled connection
+// still fails promptly.
+//
+// fetch also cannot report upload progress at all; XHR can, which is what
+// lets the caller show how far along a large dataset is.
+async function upload(path, formData, { onProgress, stallTimeoutMs = UPLOAD_STALL_TIMEOUT_MS } = {}) {
+  const headers = await authHeaders()
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    let stallTimer
+
+    const armStallTimer = () => {
+      clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        xhr.abort()
+        reject(
+          new ApiError(
+            'The upload stopped making progress. Please check your connection and try again.',
+            { isTimeout: true }
+          )
+        )
+      }, stallTimeoutMs)
+    }
+
+    const settle = (finish) => {
+      clearTimeout(stallTimer)
+      finish()
+    }
+
+    xhr.open('POST', `${API_BASE_URL}${path}`)
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
+
+    xhr.upload.onprogress = (event) => {
+      armStallTimer()
+      if (onProgress && event.lengthComputable) onProgress(event.loaded / event.total)
+    }
+    // Body sent; the server is now reading it, which reports no progress.
+    xhr.upload.onload = () => armStallTimer()
+
+    xhr.onload = () =>
+      settle(() => {
+        let payload = null
+        try {
+          payload = JSON.parse(xhr.responseText)
+        } catch {
+          payload = null
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(payload)
+          return
+        }
+        reject(new ApiError(extractErrorMessage(payload), { status: xhr.status }))
+      })
+
+    xhr.onerror = () =>
+      settle(() =>
+        reject(new ApiError('Unable to reach the server. Please check your connection and try again.'))
+      )
+    xhr.onabort = () => clearTimeout(stallTimer)
+
+    armStallTimer()
+    xhr.send(formData)
+  })
+}
+
 export const apiClient = {
   get: (path, { timeoutMs } = {}) => request(path, { method: 'GET', timeoutMs }),
   post: (path, body, { timeoutMs } = {}) => request(path, { method: 'POST', body, timeoutMs }),
-  postForm: (path, formData) => request(path, { method: 'POST', body: formData, isFormData: true }),
+  postForm: (path, formData, options) => upload(path, formData, options),
 }

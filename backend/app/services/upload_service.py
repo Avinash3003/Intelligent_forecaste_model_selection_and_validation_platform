@@ -4,8 +4,10 @@ from fastapi import UploadFile
 
 from app.config.settings import get_settings
 from app.schemas.upload import UploadResponse
-from app.utils.exceptions import FileResolutionError
+from app.utils.exceptions import FileResolutionError, UploadTooLargeError
 from app.utils.ids import generate_file_id
+
+_CHUNK_BYTES = 1024 * 1024
 
 
 class UploadService:
@@ -18,18 +20,40 @@ class UploadService:
         self._settings = get_settings()
 
     def save(self, file: UploadFile) -> UploadResponse:
-        """Save an upload and return the file_id later requests refer to it by."""
+        """Save an upload and return the file_id later requests refer to it by.
+
+        Streamed in chunks rather than read whole: a dataset is bounded by
+        MAX_UPLOAD_SIZE_MB, not by the memory of the process receiving it, and
+        reading it into a bytes object first held the entire file — twice,
+        counting the write. Memory here is one chunk regardless of file size.
+
+        Raises UploadTooLargeError once the limit is passed, before the rest
+        of the body is read, leaving nothing partial behind.
+        """
         file_id = generate_file_id()
         destination = self._settings.upload_path / f"{file_id}_{file.filename}"
+        limit = self._settings.max_upload_size_mb * 1024 * 1024
 
-        contents = file.file.read()
-        destination.write_bytes(contents)
+        written = 0
+        try:
+            with destination.open("wb") as sink:
+                while chunk := file.file.read(_CHUNK_BYTES):
+                    written += len(chunk)
+                    if written > limit:
+                        raise UploadTooLargeError(
+                            f"This file is larger than the {self._settings.max_upload_size_mb} MB "
+                            "upload limit. Split it, or ask an administrator to raise the limit."
+                        )
+                    sink.write(chunk)
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
 
         return UploadResponse(
             success=True,
             file_id=file_id,
             filename=file.filename or "unknown",
-            size_bytes=len(contents),
+            size_bytes=written,
             message="File uploaded and staged successfully.",
         )
 

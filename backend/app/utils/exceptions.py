@@ -20,3 +20,12 @@ class FileResolutionError(Exception):
     previously staged by UploadService — e.g. it was never uploaded, or
     local storage was cleared since the upload happened.
     """
+
+
+class UploadTooLargeError(Exception):
+    """Raised when an upload exceeds MAX_UPLOAD_SIZE_MB.
+
+    Detected while streaming, so the request is refused without ever holding
+    the whole file. The message states the limit and is shown to the user
+    as-is.
+    """

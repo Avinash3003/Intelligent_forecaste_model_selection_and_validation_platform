@@ -1,10 +1,10 @@
 import { apiClient } from './apiClient'
 
 // Uploads a dataset file and returns { success, file_id, filename, size_bytes, message }.
-export function uploadDataset(file) {
+export function uploadDataset(file, { onProgress } = {}) {
   const formData = new FormData()
   formData.append('file', file)
-  return apiClient.postForm('/upload', formData)
+  return apiClient.postForm('/upload', formData, { onProgress })
 }
 
 // Profiles a previously uploaded dataset (basic, metadata-free inspection).

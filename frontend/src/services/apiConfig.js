@@ -21,3 +21,9 @@ export const REQUEST_TIMEOUT_MS = 30000
 // preview, uploads) has a response size that does not grow with run size,
 // so the default timeout above still applies to those.
 export const LARGE_RESULT_TIMEOUT_MS = 120000
+
+// How long an upload may make NO progress before it is abandoned. Not a
+// limit on how long an upload may take: that is the file size over the
+// user's upstream bandwidth, which this code cannot know. See apiClient's
+// `upload`.
+export const UPLOAD_STALL_TIMEOUT_MS = 60000

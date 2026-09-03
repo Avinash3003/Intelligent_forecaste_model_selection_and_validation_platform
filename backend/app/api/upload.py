@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 
 from app.auth.dependencies import require
 from app.auth.models import Permission, Principal
 from app.schemas.upload import UploadResponse
 from app.services.upload_service import UploadService
+from app.utils.exceptions import UploadTooLargeError
 
 router = APIRouter(prefix="/upload", tags=["Upload"])
 upload_service = UploadService()
@@ -17,4 +18,7 @@ def upload_dataset(
     # Datasets are staged server-side and handed to the pipeline from there;
     # the browser never uploads to Databricks or to storage directly, so no
     # storage credential is ever exposed to it.
-    return upload_service.save(file)
+    try:
+        return upload_service.save(file)
+    except UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
