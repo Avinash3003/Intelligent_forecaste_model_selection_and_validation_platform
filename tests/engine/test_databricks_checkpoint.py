@@ -209,3 +209,51 @@ def test_mlflow_tracking_survives_every_checkpointed_task(tmp_path):
     assert context.tracking_result.logged is True, context.tracking_result.error
     assert context.tracking_result.status in ("logged", "logged_with_artifact_errors")
     assert context.tracking_result.models_registered >= 1
+
+
+@requires_ray
+def test_explain_models_checkpoint_drops_live_fitted_estimators(tmp_path):
+    """The estimator every trained candidate carries is real state
+    (potentially large — a neural model's actual weights) that only
+    evaluate_models and explain_models ever read. Once explain_models has
+    used it, nothing downstream reads it again, so its own checkpoint must
+    not still be hauling every one of them along."""
+    dataset_path = _dataset(tmp_path, keys=3)
+    config = ForecastConfiguration(date_column="date", target_column="sales", key_columns=("store",))
+    artifacts_root = str(tmp_path / "artifacts")
+    run_id = "checkpoint-trim-run"
+
+    for stage in ("load_prepare", "build_series", "train_models", "evaluate_models", "explain_models"):
+        pipeline = _pipeline(tmp_path, parallel_keys=True)
+        pipeline.run_checkpointed_stage(
+            stage, run_id=run_id, dataset_path=str(dataset_path), configuration=config,
+            artifacts_root=artifacts_root, selected_models=["seasonal_naive"],
+        )
+
+    context, _ = checkpoint.load(artifacts_root, run_id)
+    trained = context.training_report.trained_models()
+    assert trained, "the dataset must actually have trained candidates for this test to mean anything"
+    assert all(result.fitted_model is None for result in trained)
+
+
+@requires_ray
+def test_evaluate_models_checkpoint_still_carries_live_fitted_estimators(tmp_path):
+    """The trim must not fire early: explain_models's own SHAP computation
+    depends on reading a live estimator out of the checkpoint evaluate_models
+    wrote, so that one checkpoint must still have it."""
+    dataset_path = _dataset(tmp_path, keys=3)
+    config = ForecastConfiguration(date_column="date", target_column="sales", key_columns=("store",))
+    artifacts_root = str(tmp_path / "artifacts")
+    run_id = "checkpoint-no-trim-yet-run"
+
+    for stage in ("load_prepare", "build_series", "train_models", "evaluate_models"):
+        pipeline = _pipeline(tmp_path, parallel_keys=True)
+        pipeline.run_checkpointed_stage(
+            stage, run_id=run_id, dataset_path=str(dataset_path), configuration=config,
+            artifacts_root=artifacts_root, selected_models=["seasonal_naive"],
+        )
+
+    context, _ = checkpoint.load(artifacts_root, run_id)
+    trained = context.training_report.trained_models()
+    assert trained
+    assert any(result.fitted_model is not None for result in trained)

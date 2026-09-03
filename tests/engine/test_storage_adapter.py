@@ -32,6 +32,9 @@ def _clean_routing(monkeypatch):
     storage.reset_route_cache()
     storage.reset_client_cache()
     monkeypatch.delenv(storage.POSIX_VOLUMES_ENV_VAR, raising=False)
+    # No test should pay the real backoff delay; retry *counting* is what
+    # every test here cares about, never wall-clock time.
+    monkeypatch.setattr(storage, "_TRANSIENT_RETRY_BACKOFF_SECONDS", 0)
     yield
     storage.reset_route_cache()
     storage.reset_client_cache()
@@ -327,3 +330,89 @@ def test_a_genuinely_absent_file_still_answers_false(monkeypatch):
     storage.set_files_client(_FakeClient())
 
     assert storage.exists(VOL) is False
+
+
+# --- transient failure retry --------------------------------------------
+
+
+class _FlakyFiles(_FakeFiles):
+    """Fails a download or upload a fixed number of times before behaving
+    like the real thing — standing in for a connection that drops mid
+    transfer and succeeds on a fresh attempt."""
+
+    def __init__(self, fail_times: int, error: Exception):
+        super().__init__()
+        self._fail_times = fail_times
+        self._error = error
+        self.download_attempts = 0
+        self.upload_attempts = 0
+
+    def download(self, path):
+        self.download_attempts += 1
+        if self.download_attempts <= self._fail_times:
+            raise self._error
+        return super().download(path)
+
+    def upload(self, path, contents, overwrite=False):
+        self.upload_attempts += 1
+        if self.upload_attempts <= self._fail_times:
+            raise self._error
+        return super().upload(path, contents, overwrite=overwrite)
+
+
+class _FlakyClient:
+    def __init__(self, files):
+        self.files = files
+
+
+class _ConnectionBroken(Exception):
+    """Stands in for urllib3's ChunkedEncodingError/IncompleteRead — a
+    plain Exception the SDK does not classify as NotFound."""
+
+
+def test_a_download_that_drops_mid_transfer_is_retried_and_succeeds(monkeypatch):
+    monkeypatch.setenv(storage.POSIX_VOLUMES_ENV_VAR, "0")
+    files = _FlakyFiles(fail_times=2, error=_ConnectionBroken("connection broken"))
+    files.store[VOL] = b"payload"
+    storage.set_files_client(_FlakyClient(files))
+
+    assert storage.read_bytes(VOL) == b"payload"
+    assert files.download_attempts == 3
+
+
+def test_an_upload_that_drops_mid_transfer_is_retried_and_succeeds(monkeypatch):
+    monkeypatch.setenv(storage.POSIX_VOLUMES_ENV_VAR, "0")
+    files = _FlakyFiles(fail_times=1, error=_ConnectionBroken("connection broken"))
+    storage.set_files_client(_FlakyClient(files))
+
+    storage.write_bytes(VOL, b"payload")
+
+    assert files.upload_attempts == 2
+    assert files.store[VOL] == b"payload"
+
+
+def test_retries_are_bounded_then_the_real_error_surfaces(monkeypatch):
+    """A connection that never recovers must still fail the run — retrying
+    is for a blip, not a cover for storage that is genuinely unreachable."""
+    monkeypatch.setenv(storage.POSIX_VOLUMES_ENV_VAR, "0")
+    files = _FlakyFiles(fail_times=99, error=_ConnectionBroken("connection broken"))
+    files.store[VOL] = b"payload"
+    storage.set_files_client(_FlakyClient(files))
+
+    with pytest.raises(storage.StorageError):
+        storage.read_bytes(VOL)
+
+    assert files.download_attempts == storage._TRANSIENT_RETRY_ATTEMPTS
+
+
+def test_a_missing_file_is_never_retried(monkeypatch):
+    """NotFound means the file genuinely is not there — retrying it only
+    delays reporting a real failure as if it might resolve itself."""
+    monkeypatch.setenv(storage.POSIX_VOLUMES_ENV_VAR, "0")
+    files = _FakeFiles()
+    storage.set_files_client(_FlakyClient(files))
+
+    with pytest.raises(FileNotFoundError):
+        storage.read_bytes(VOL)
+
+    assert files.downloads == [VOL]

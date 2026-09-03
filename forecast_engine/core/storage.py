@@ -30,12 +30,23 @@ import io
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # Every Unity Catalog Volume path begins here, on every cloud.
 VOLUME_PREFIX = "/Volumes/"
+
+# A Files API transfer of a large checkpoint (hundreds of MB) is a single
+# long-lived HTTP stream with nothing upstream retrying it; a mid-transfer
+# network blip (seen in production as a bare ChunkedEncodingError /
+# IncompleteRead from urllib3) otherwise fails the whole task outright.
+# Retried, not raised immediately — a fresh request starts a fresh stream,
+# and `overwrite=True` on the upload side makes a retried write safe to
+# repeat.
+_TRANSIENT_RETRY_ATTEMPTS = 3
+_TRANSIENT_RETRY_BACKOFF_SECONDS = 2.0
 
 # Set to "1"/"0" to force the routing decision instead of probing for it.
 # Exists for tests and for a deployment that knows better than the probe;
@@ -189,24 +200,41 @@ def supports_atomic_replace(path: object) -> bool:
 def read_bytes(path: object) -> bytes:
     """The file's contents. Raises FileNotFoundError if it is not there."""
     if _use_files_api(path):
-        try:
-            return _files_client().files.download(str(path)).contents.read()
-        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
-            raise _translate(exc, path) from exc
+        return _retry_transient(lambda: _files_client().files.download(str(path)).contents.read(), path)
     return Path(path).read_bytes()
 
 
 def write_bytes(path: object, payload: bytes) -> None:
     """Write `payload`, creating parent directories as needed."""
     if _use_files_api(path):
-        try:
-            _files_client().files.upload(str(path), io.BytesIO(payload), overwrite=True)
-            return
-        except Exception as exc:  # noqa: BLE001
-            raise _translate(exc, path) from exc
+        _retry_transient(lambda: _files_client().files.upload(str(path), io.BytesIO(payload), overwrite=True), path)
+        return
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(payload)
+
+
+def _retry_transient(call, path: object):
+    """Run a Files API call, retrying anything that is not "the file is
+    genuinely absent" — a missing file fails immediately, everything else
+    (a dropped connection mid-stream, most visibly on a large checkpoint)
+    gets a fresh attempt on a fresh connection."""
+    last_exc: Exception | None = None
+    for attempt in range(1, _TRANSIENT_RETRY_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001 - SDK raises many unrelated types
+            translated = _translate(exc, path)
+            if isinstance(translated, FileNotFoundError):
+                raise translated from exc
+            last_exc = exc
+            if attempt < _TRANSIENT_RETRY_ATTEMPTS:
+                logger.warning(
+                    "Files API call on %s failed on attempt %d/%d (%s); retrying.",
+                    path, attempt, _TRANSIENT_RETRY_ATTEMPTS, exc,
+                )
+                time.sleep(_TRANSIENT_RETRY_BACKOFF_SECONDS * attempt)
+    raise _translate(last_exc, path) from last_exc
 
 
 def open_binary(path: object):

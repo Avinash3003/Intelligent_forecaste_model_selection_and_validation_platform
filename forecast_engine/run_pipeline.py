@@ -106,6 +106,18 @@ LAST_PHASE = PHASE_ORDER[-1]
 # generation nor publish touches it at all, so none of them belongs here.
 _PHASES_RESUMING_KEY_EXECUTION = frozenset({"evaluate_models", "explain_models", "rank_select"})
 
+# Phases whose own checkpoint no longer needs a live fitted estimator on
+# board. Explain is the last stage that reads one (for SHAP); Rank &
+# Select's fallback path fits one fresh, but the only stage that ever read
+# it afterwards, Persist Models, is disabled (see _persist_winning_models
+# below). Past that point every trained candidate's live estimator —
+# every model, every key, a TFT model alone tens of MB — is dead weight
+# that would otherwise be re-pickled and re-uploaded on every remaining
+# task boundary for nothing. This is what a multi-GB checkpoint on a
+# large run actually is: not real state, just an estimator nothing reads
+# any more riding along because nothing ever dropped it.
+_PHASES_WITHOUT_LIVE_MODEL_NEED = frozenset({"explain_models", "rank_select", "generate_insights", "publish_results"})
+
 
 class ForecastEnginePipeline:
     """Runs the engine end to end.
@@ -346,10 +358,23 @@ class ForecastEnginePipeline:
 
         try:
             self.run_phase(stage, context)
+            if stage in _PHASES_WITHOUT_LIVE_MODEL_NEED:
+                self._drop_live_models(context)
         finally:
             checkpoint.save(context, artifacts_root)
 
         return context
+
+    # Strip live fitted estimators once nothing downstream reads them, so
+    # this phase's checkpoint carries only what the next task actually
+    # needs instead of every trained model's real, possibly-large object.
+    def _drop_live_models(self, context: PipelineContext) -> None:
+        if context.training_report is not None:
+            for result in context.training_report.results:
+                result.fitted_model = None
+        if context.production_selection_report is not None:
+            for result in context.production_selection_report.results:
+                result.fitted_model = None
 
     # Override the configured fallback model for this run
     def _apply_fallback_model(self, fallback_model: str) -> None:
