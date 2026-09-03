@@ -114,7 +114,7 @@ def _require_compute(compute: Any) -> Any:
     return compute
 
 
-# The seven Databricks task boundaries, in dependency order. Mirrors
+# The Databricks task boundaries, in dependency order. Mirrors
 # forecast_engine/run_pipeline.py's PHASE_ORDER exactly — kept in sync by
 # hand, since the two packages are process-isolated and never import each
 # other (same convention as this file's NAMING CONTRACT for stage names).
@@ -132,6 +132,7 @@ TASK_KEYS: tuple[str, ...] = (
     "evaluate_models",
     "explain_models",
     "rank_select",
+    "generate_insights",
     "publish_results",
 )
 
@@ -864,12 +865,12 @@ class DatabricksRunner(PipelineRunner):
         """Start one run of ForecastIQ's own Databricks Job.
 
         The job is a real, named, persistent definition this app owns and
-        keeps current — seven tasks wired load_prepare -> build_series ->
+        keeps current — the phases wired load_prepare -> build_series ->
         train_models -> evaluate_models -> explain_models -> rank_select ->
-        publish_results by depends_on, sharing one JOB cluster. So every
-        run lands in one job's run history, and its compute is billed at
-        the Jobs rate and disappears when the run ends, instead of leaving
-        an all-purpose cluster behind per run.
+        generate_insights -> publish_results by depends_on, sharing one JOB
+        cluster. So every run lands in one job's run history, and its
+        compute is billed at the Jobs rate and disappears when the run
+        ends, instead of leaving an all-purpose cluster behind per run.
 
         Ray parallelism stays entirely inside train/evaluate/explain/
         rank_select's own tasks (see forecast_engine.parallel.ray_executor):
@@ -938,8 +939,8 @@ class DatabricksRunner(PipelineRunner):
             logger.warning("Could not look up the ForecastIQ job: %s", safe_detail(exc))
         return None
 
-    # Seven tasks on one shared job cluster, with the per-run paths left as
-    # job parameters `run_now` fills in.
+    # One task per phase on one shared job cluster, with the per-run paths
+    # left as job parameters `run_now` fills in.
     def _job_settings(self, run_id: str, compute: Any, compute_sdk: Any, jobs_sdk: Any) -> dict[str, Any]:
         libraries = self._engine_libraries(compute_sdk)
         tasks = []
@@ -989,7 +990,7 @@ class DatabricksRunner(PipelineRunner):
     # so the job is shared as it is defined, not in a later call that could
     # fail and leave it private.
     # The selected compute is the compute that runs; there is no fallback.
-    # new_job_compute attaches by job_cluster_key so all seven tasks share
+    # new_job_compute attaches by job_cluster_key so every task shares
     # the one job cluster defined alongside them; existing_compute attaches
     # the user's own cluster directly.
     def _attach_compute(self, task: Any, compute: Any) -> None:
@@ -1058,6 +1059,7 @@ class DatabricksRunner(PipelineRunner):
             # Not a secret and not kept in the scope — a version string.
             "AZURE_OPENAI_API_VERSION": self._settings.azure_openai_api_version,
             "LLM_MAX_TOKENS_PER_RUN": _as_env_text(self._settings.llm_max_tokens_per_run),
+            "LLM_INSIGHT_MAX_WORKERS": _as_env_text(self._settings.llm_insight_max_workers),
             "AZURE_OPENAI_PRICE_INPUT_PER_1K": _as_env_text(self._settings.azure_openai_price_input_per_1k),
             "AZURE_OPENAI_PRICE_OUTPUT_PER_1K": _as_env_text(self._settings.azure_openai_price_output_per_1k),
         }

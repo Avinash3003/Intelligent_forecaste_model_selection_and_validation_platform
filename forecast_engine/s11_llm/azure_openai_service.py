@@ -14,6 +14,7 @@ and nothing upstream could reconstruct it afterwards.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 
@@ -38,6 +39,9 @@ class AzureOpenAIService:
     Holds up to two client configurations — primary and fallback (Section
     11/13.2) — each lazily constructed and cached on first use, so a
     deployment that never needs the fallback pays nothing for it.
+
+    One instance is shared by every insight worker, so construction is
+    guarded; the SDK client itself is safe to call concurrently.
     """
 
     # Store config; clients are constructed lazily
@@ -45,6 +49,7 @@ class AzureOpenAIService:
         self._config = config
         self._client = None
         self._fallback_client = None
+        self._client_lock = threading.Lock()
 
     # Whether a call can be attempted: credentials present and openai importable
     def is_available(self, *, use_fallback: bool = False) -> bool:
@@ -191,23 +196,24 @@ class AzureOpenAIService:
     def _get_client(self, azure_openai_cls: type, *, use_fallback: bool) -> object:
         # Building the client only validates arguments locally (no network call),
         # so constructing it lazily here keeps import/construction free of I/O.
-        if use_fallback:
-            if self._fallback_client is None:
-                self._fallback_client = azure_openai_cls(
-                    azure_endpoint=self._config.fallback_endpoint or self._config.endpoint,
-                    api_key=self._config.fallback_api_key or self._config.api_key,
+        with self._client_lock:
+            if use_fallback:
+                if self._fallback_client is None:
+                    self._fallback_client = azure_openai_cls(
+                        azure_endpoint=self._config.fallback_endpoint or self._config.endpoint,
+                        api_key=self._config.fallback_api_key or self._config.api_key,
+                        api_version=self._config.api_version,
+                        timeout=self._config.timeout_seconds,
+                        max_retries=self._config.max_retries,
+                    )
+                return self._fallback_client
+
+            if self._client is None:
+                self._client = azure_openai_cls(
+                    azure_endpoint=self._config.endpoint,
+                    api_key=self._config.api_key,
                     api_version=self._config.api_version,
                     timeout=self._config.timeout_seconds,
                     max_retries=self._config.max_retries,
                 )
-            return self._fallback_client
-
-        if self._client is None:
-            self._client = azure_openai_cls(
-                azure_endpoint=self._config.endpoint,
-                api_key=self._config.api_key,
-                api_version=self._config.api_version,
-                timeout=self._config.timeout_seconds,
-                max_retries=self._config.max_retries,
-            )
-        return self._client
+            return self._client

@@ -59,6 +59,12 @@ AZURE_OPENAI_PRICE_OUTPUT_PER_1K_COMPLEX_ENV_VAR = "AZURE_OPENAI_PRICE_OUTPUT_PE
 # keys, a retry storm) cannot run away unbounded.
 LLM_MAX_TOKENS_PER_RUN_ENV_VAR = "LLM_MAX_TOKENS_PER_RUN"
 
+# How many groups may have a call in flight at once. Insight generation is
+# pure network wait, so this is the difference between a run's LLM time
+# scaling with key count and scaling with key count over this number.
+LLM_INSIGHT_MAX_WORKERS_ENV_VAR = "LLM_INSIGHT_MAX_WORKERS"
+_DEFAULT_INSIGHT_MAX_WORKERS = 8
+
 # Azure OpenAI requires an explicit API version; this is the fallback used
 # only when the environment variable above is not set.
 _DEFAULT_API_VERSION = "2024-10-21"
@@ -117,6 +123,11 @@ class LLMConfig:
     # explicit opt-in, since an accidental low default would silently
     # truncate insights on a deployment that never asked for a budget.
     max_tokens_per_run: int | None = None
+
+    # Bounded parallelism for per-group insight generation, which is
+    # I/O-bound. Raise it only as far as the deployment's tokens-per-minute
+    # quota allows: past that, concurrency buys rate-limit errors.
+    insight_max_workers: int = _DEFAULT_INSIGHT_MAX_WORKERS
 
     # Model routing (Section 13.2). Both optional; a group's decision
     # routes to the simple deployment when it has zero rejected candidates
@@ -190,6 +201,7 @@ class LLMConfig:
             api_version=_env(AZURE_OPENAI_API_VERSION_ENV_VAR, _DEFAULT_API_VERSION),
             prompt_version=_env(LLM_PROMPT_VERSION_ENV_VAR, _DEFAULT_PROMPT_VERSION),
             max_tokens_per_run=_env_int(LLM_MAX_TOKENS_PER_RUN_ENV_VAR),
+            insight_max_workers=_env_int(LLM_INSIGHT_MAX_WORKERS_ENV_VAR) or _DEFAULT_INSIGHT_MAX_WORKERS,
             deployment_name_simple=_env(AZURE_OPENAI_DEPLOYMENT_SIMPLE_ENV_VAR),
             deployment_name_complex=_env(AZURE_OPENAI_DEPLOYMENT_COMPLEX_ENV_VAR),
             fallback_endpoint=_env(AZURE_OPENAI_FALLBACK_ENDPOINT_ENV_VAR),

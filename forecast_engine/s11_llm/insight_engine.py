@@ -15,9 +15,17 @@ Each insight goes through, in order:
 
 Every attempt, including failed and retried ones, is recorded to the trace
 store before returning.
+
+Groups are independent, and a call is almost entirely network wait, so they
+are generated with bounded parallelism rather than one after another. The
+exception is a run with a token ceiling configured: enforcing that exactly
+means knowing what has been spent before deciding on the next group, which
+is sequential by nature, so such a run keeps the one-at-a-time path.
 """
 
 from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
 
 from forecast_engine.config.llm_config import LLMConfig
 from forecast_engine.core.pipeline_result import PipelineResult
@@ -93,22 +101,16 @@ class LLMInsightEngine:
         group_ids = [group.get("group_id") for group in pipeline_result.forecast_groups if group.get("group_id")]
 
         budget = self._config.max_tokens_per_run
-        tokens_used = 0
-        succeeded = 0
-
-        for group_id in group_ids:
-            budget_exhausted = budget is not None and (budget - tokens_used) < _MIN_TOKENS_REMAINING_TO_ATTEMPT
-            if budget_exhausted:
-                report.token_budget_exhausted = True
-
-            insight = self._generate_one(
-                pipeline_result, group_id, trace, use_llm=llm_available and not budget_exhausted
+        if budget is None:
+            insights = self._generate_concurrently(pipeline_result, group_ids, trace, llm_available=llm_available)
+        else:
+            insights = self._generate_within_budget(
+                pipeline_result, group_ids, trace, report, budget=budget, llm_available=llm_available
             )
-            report.groups[group_id] = insight
-            if insight.payload is not None:
-                succeeded += 1
 
-            tokens_used = trace.summary()["total_tokens"] or 0
+        for insight in insights:
+            report.groups[insight.group_id] = insight
+        succeeded = sum(1 for insight in insights if insight.payload is not None)
 
         report.available = succeeded > 0
         if succeeded == len(group_ids) and group_ids:
@@ -123,6 +125,60 @@ class LLMInsightEngine:
         report.token_budget = budget
         report.trace_summary = trace.summary()
         return report
+
+    # Every group at once, bounded by insight_max_workers. Ordered by
+    # group, not by completion, so two runs of the same data report their
+    # insights in the same order.
+    def _generate_concurrently(
+        self,
+        pipeline_result: PipelineResult,
+        group_ids: list[str],
+        trace: LLMTraceStore,
+        *,
+        llm_available: bool,
+    ) -> list[GroupInsight]:
+        workers = max(1, min(self._config.insight_max_workers, len(group_ids)))
+        if workers == 1:
+            return [
+                self._generate_one(pipeline_result, group_id, trace, use_llm=llm_available)
+                for group_id in group_ids
+            ]
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="insight") as pool:
+            return list(
+                pool.map(
+                    lambda group_id: self._generate_one(
+                        pipeline_result, group_id, trace, use_llm=llm_available
+                    ),
+                    group_ids,
+                )
+            )
+
+    # One group at a time, so the ceiling is measured against what has
+    # actually been spent rather than an estimate of calls still in flight.
+    def _generate_within_budget(
+        self,
+        pipeline_result: PipelineResult,
+        group_ids: list[str],
+        trace: LLMTraceStore,
+        report: BusinessInsightReport,
+        *,
+        budget: int,
+        llm_available: bool,
+    ) -> list[GroupInsight]:
+        insights: list[GroupInsight] = []
+        tokens_used = 0
+        for group_id in group_ids:
+            budget_exhausted = (budget - tokens_used) < _MIN_TOKENS_REMAINING_TO_ATTEMPT
+            if budget_exhausted:
+                report.token_budget_exhausted = True
+
+            insights.append(
+                self._generate_one(
+                    pipeline_result, group_id, trace, use_llm=llm_available and not budget_exhausted
+                )
+            )
+            tokens_used = trace.summary()["total_tokens"] or 0
+        return insights
 
     # Generate (or fall back to a template for) one group's insight
     def _generate_one(

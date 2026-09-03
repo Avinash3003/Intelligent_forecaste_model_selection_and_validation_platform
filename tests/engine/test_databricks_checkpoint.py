@@ -129,7 +129,7 @@ def test_checkpoint_load_missing_run_raises_filenotfounderror(tmp_path):
 
 
 @requires_ray
-def test_full_pipeline_via_seven_checkpointed_stage_calls_matches_direct_run(tmp_path):
+def test_full_pipeline_via_checkpointed_stage_calls_matches_direct_run(tmp_path):
     dataset_path = _dataset(tmp_path, keys=3)
     config = ForecastConfiguration(date_column="date", target_column="sales", key_columns=("store",))
 
@@ -145,7 +145,7 @@ def test_full_pipeline_via_seven_checkpointed_stage_calls_matches_direct_run(tmp
     for stage in PHASE_ORDER:
         # A brand new pipeline instance every phase — nothing but what
         # checkpoint.save wrote for the last one crosses into this one, the
-        # closest a single test process can get to seven separate tasks.
+        # closest a single test process can get to one task per phase.
         pipeline = _pipeline(staged_root, parallel_keys=True)
         context = pipeline.run_checkpointed_stage(
             stage,
@@ -164,9 +164,15 @@ def test_full_pipeline_via_seven_checkpointed_stage_calls_matches_direct_run(tmp
     assert staged_winners == direct_winners
     assert set(staged_winners) == {"S1", "S2", "S3"}
 
+    # generate_insights and publish_results are separate tasks, so the
+    # report the first produced has to reach the second through the
+    # checkpoint — MLflow logs it there, and nothing regenerates it.
+    assert context.insight_report is not None
+    assert set(context.insight_report.groups) == {"S1", "S2", "S3"}
+
 
 @requires_ray
-def test_mlflow_tracking_survives_all_seven_checkpointed_tasks(tmp_path):
+def test_mlflow_tracking_survives_every_checkpointed_task(tmp_path):
     """begin() opens the MLflow run in task 1's process only — every later
     task is a fresh process with no run in its own fluent state. Without
     resume() in run_checkpointed_stage, track() at publish_results reports

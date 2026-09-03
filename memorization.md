@@ -57,13 +57,14 @@ flowchart TB
   BE -->|stage dataset + config| UC[(Unity Catalog Volumes<br/>over ADLS Gen2)]
   BE -->|jobs.reset + run_now| JOB[Databricks Job<br/>ForecastIQ Forecast Pipeline]
   JOB --> T1[load_prepare] --> T2[build_series] --> T3[train_models]
-  T3 --> T4[evaluate_models] --> T5[explain_models] --> T6[rank_select] --> T7[publish_results]
+  T3 --> T4[evaluate_models] --> T5[explain_models] --> T6[rank_select]
+  T6 --> T7[generate_insights] --> T8[publish_results]
   T3 -. Ray fan-out per key .-> RAY[(Ray workers)]
   T4 -. Ray .-> RAY
   T5 -. Ray .-> RAY
   T6 -. Ray .-> RAY
-  T7 --> MLF[MLflow tracking + UC Model Registry]
-  T7 --> UC
+  T8 --> MLF[MLflow tracking + UC Model Registry]
+  T8 --> UC
   BE -->|reads summary.json + MLflow| FE
   T7 -->|insights| AOAI[Azure OpenAI]
 ```
@@ -134,7 +135,7 @@ Run id format: `dbx-run-<12 hex>`.
 **Verified live**: Job `968418049567321`, name **"ForecastIQ Forecast Pipeline"**,
 `max_concurrent_runs: 1`, job parameters `dataset, config, summary_out, live_status_out`.
 
-All seven tasks are `python_wheel_task` (package `forecast_engine`, entry point
+All eight tasks are `python_wheel_task` (package `forecast_engine`, entry point
 `forecast-engine`) chained by `depends_on`, **all attached to one shared job cluster**
 `forecastiq_pipeline` (or to the user's existing cluster).
 
@@ -146,14 +147,15 @@ All seven tasks are `python_wheel_task` (package `forecast_engine`, entry point
 | `evaluate_models` | Backtest + forward validation + drift | **Yes** | No | No |
 | `explain_models` | SHAP explainability | **Yes** | No | No |
 | `rank_select` | Rank candidates, pick production model / fallback | **Yes** | No | No |
-| `publish_results` | Forecast export, artifacts, metrics, registry, insights | No | **Yes** | **Yes** |
+| `generate_insights` | Per-key business narrative + artifact mirror | No | No | **Yes** |
+| `publish_results` | Forecast export, artifacts, metrics, model registry | No | **Yes** | No |
 
 Each task is invoked with `--stage <task_key>`, so the DAG node name and the engine
 phase can never drift.
 
 ### Databricks parallelism vs Ray parallelism — read this carefully
 
-- **Databricks task parallelism: NONE by design.** The seven tasks are strictly
+- **Databricks task parallelism: NONE by design.** The tasks are strictly
   sequential (`depends_on`). Each stage must fully complete for *every* key before
   the next begins. This is the "stage barrier".
 - **Ray parallelism: inside a single task.** Within `train_models`, all keys are
@@ -239,7 +241,7 @@ a personal Databricks account (see §23), all backed by ADLS containers on
 |---|---|---|
 | `forecast_files` | `abfss://uploads@stforecastiq13627.dfs.core.windows.net/` | **The user's original uploaded file only.** |
 | `curated_files` | `abfss://curated@…/app` | Preprocessed/curated dataset. |
-| `models_files` | `abfss://models@…/app` | Winning model artifacts. |
+| `models_files` | `abfss://models@…/app` | Winning model `.pkl` artifacts. Nothing writes here now — the stage that did is disabled (§4). |
 | `forecasts_files` | `abfss://forecasts@…/app` | Forecast CSV export. |
 | `artifacts_files` | `abfss://artifacts@…/app` | Run metadata, checkpoint, summary. |
 
@@ -660,9 +662,10 @@ MLflow experiments, the `forecastiq-ray-dev` cluster, and all user datasets in U
 ## 23. Known Problems
 
 **Confirmed:**
-- `publish_results` is still the dominant stage at scale: **29 min for 500 keys**
-  (down from 74 min). Registration is parallel; **LLM insight generation inside publish
-  appears to be sequential per key** and is the likely remaining bottleneck.
+- Publish is still the dominant stage at scale (**29 min for 500 keys**, down from
+  74 min), and it is now split in two: `generate_insights` (LLM) and
+  `publish_results` (export + MLflow + registry). Both halves are parallel per key;
+  registry round trips are what remains.
 - The default node `Standard_DC4as_v5` (16 GB) causes **Ray OOM worker kills** on
   500-key runs with TFT. `Standard_E4ads_v7` (32 GB) does not.
 - MLflow logs `Failed to end span … 'MlflowSpanProcessor' object has no attribute
@@ -675,8 +678,6 @@ MLflow experiments, the `forecastiq-ray-dev` cluster, and all user datasets in U
 - The Azure OpenAI key needs rotation (§20.15).
 
 **Hypotheses (not confirmed):**
-- Publish may be dominated by LLM calls rather than registration at 500 keys —
-  needs profiling.
 - UC `search_model_versions`/`get_model_version` latency (~3 s each) may matter if any
   future code adds per-key registry lookups.
 
@@ -703,6 +704,9 @@ Non-publish stages are 1.9–3.5× slower purely from halved memory + OOM retrie
 - `log_model` without registration 17.4 s; with registration 29.0 s.
 - Artifact payload is 5 files, ~3 KB → cost is per-call overhead, not data volume.
 - Registration, 8 keys: sequential 383.1 s → 8 workers 39.5 s (**9.7×**).
+- Insight generation, 70-key run: 70 calls at 3094 ms average = 217 s sequential.
+  Measured on run `dbx-run-68e76b66e79e`; the same work is now bounded-parallel at
+  `LLM_INSIGHT_MAX_WORKERS` (default 8).
 - Publish retry (idempotent): 71 s → **1.9 s**, 0 new versions.
 - 12-key run publish: 69–87 s.
 - Cold job-cluster start ≈ 350–450 s; the estimator's fallback constant is 396 s.
@@ -712,7 +716,6 @@ Non-publish stages are 1.9–3.5× slower purely from halved memory + OOM retrie
 ## 25. Future Roadmap
 
 **HIGH**
-- Profile and optimise LLM insight generation in `publish_results` (likely sequential).
 - Rotate the exposed Azure OpenAI key.
 - Commit + deploy the `lightning_logs` fix.
 - Make `DATABRICKS_ENGINE_WHEEL_PATH` a directory; delete deprecated App Service settings.

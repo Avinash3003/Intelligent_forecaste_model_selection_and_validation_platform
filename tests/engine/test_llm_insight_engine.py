@@ -10,6 +10,9 @@ without needing network access or credentials.
 from __future__ import annotations
 
 import json
+import re
+import threading
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -368,3 +371,128 @@ def test_llm_disabled_produces_no_calls_and_reports_disabled():
     assert report.status == "disabled"
     assert report.groups == {}
     assert len(service.calls) == 0
+
+
+class _SlowConcurrentService:
+    """Records how many calls overlap, so a test can tell real concurrency
+    from a fast sequential loop.
+
+    Every call answers correctly for whichever group it was asked about, so
+    the engine's own ordering — not the response script — decides which
+    insight lands where.
+    """
+
+    def __init__(self, delay_seconds: float = 0.05) -> None:
+        self._delay = delay_seconds
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.peak_in_flight = 0
+        self.call_count = 0
+
+    def is_available(self, *, use_fallback: bool = False) -> bool:
+        return not use_fallback
+
+    def unavailable_reason(self, *, use_fallback: bool = False) -> str:
+        return "not configured"
+
+    def complete(self, system_prompt, user_prompt, *, deployment=None, use_fallback=False, json_mode=False, max_tokens=None):
+        with self._lock:
+            self.call_count += 1
+            self._in_flight += 1
+            self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
+        try:
+            time.sleep(self._delay)
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+        model, wmape = _model_and_wmape_in(user_prompt)
+        return LLMCompletionResult(
+            text=_valid_json(model, wmape), prompt_tokens=500, completion_tokens=100,
+            total_tokens=600, latency_ms=12.5,
+        )
+
+
+def _model_and_wmape_in(user_prompt: str) -> tuple[str, float]:
+    """The winning model and WMAPE this prompt's own group selected, read
+    back off the rendered context so a scripted answer is grounded in the
+    group it actually answers for — not in whichever model the run happens
+    to name first."""
+    model = re.search(r"^model=(\S+?),", user_prompt, re.MULTILINE)
+    wmape = re.search(r"wmape=([\d.]+)", user_prompt)
+    if not model or not wmape:
+        raise AssertionError(f"No selected model in the prompt: {user_prompt[:400]}")
+    return model.group(1), float(wmape.group(1))
+
+
+def _four_groups() -> PipelineResult:
+    return _make_result(
+        [
+            {"group_id": "1 | 1", "model": "xgboost", "wmape": 8.2},
+            {"group_id": "1 | 2", "model": "lightgbm", "wmape": 15.5},
+            {"group_id": "1 | 3", "model": "prophet", "wmape": 11.0},
+            {"group_id": "1 | 4", "model": "arima", "wmape": 6.4},
+        ]
+    )
+
+
+def test_groups_are_generated_concurrently_not_one_after_another():
+    """Insight generation is network wait, so a run's LLM time should scale
+    with key count over the worker count, not with key count."""
+    config = LLMConfig(
+        enabled=True, endpoint="https://x", api_key="k", deployment_name="gpt-primary",
+        insight_max_workers=4,
+    )
+    service = _SlowConcurrentService()
+
+    report = LLMInsightEngine(config=config, service=service).generate(_four_groups())
+
+    assert service.call_count == 4
+    assert service.peak_in_flight > 1
+    assert report.status == "generated"
+
+
+def test_concurrent_generation_still_reports_groups_in_pipeline_order():
+    """Insights are keyed by group, and two runs of the same data must list
+    them the same way — completion order must not leak into the report."""
+    config = LLMConfig(
+        enabled=True, endpoint="https://x", api_key="k", deployment_name="gpt-primary",
+        insight_max_workers=4,
+    )
+    result = _four_groups()
+
+    report = LLMInsightEngine(config=config, service=_SlowConcurrentService()).generate(result)
+
+    assert list(report.groups) == ["1 | 1", "1 | 2", "1 | 3", "1 | 4"]
+    assert [i.payload.selected_model for i in report.groups.values()] == [
+        "xgboost", "lightgbm", "prophet", "arima",
+    ]
+
+
+def test_worker_count_bounds_how_many_calls_are_in_flight():
+    """The ceiling exists so a large run cannot outrun the deployment's
+    tokens-per-minute quota."""
+    config = LLMConfig(
+        enabled=True, endpoint="https://x", api_key="k", deployment_name="gpt-primary",
+        insight_max_workers=2,
+    )
+    service = _SlowConcurrentService()
+
+    LLMInsightEngine(config=config, service=service).generate(_four_groups())
+
+    assert service.peak_in_flight <= 2
+
+
+def test_a_configured_token_ceiling_keeps_generation_sequential():
+    """The ceiling is counted against tokens actually spent, which cannot be
+    known while calls are still in flight — so a budgeted run gives up the
+    concurrency rather than the enforcement."""
+    config = LLMConfig(
+        enabled=True, endpoint="https://x", api_key="k", deployment_name="gpt-primary",
+        insight_max_workers=4, max_tokens_per_run=100_000,
+    )
+    service = _SlowConcurrentService()
+
+    LLMInsightEngine(config=config, service=service).generate(_four_groups())
+
+    assert service.call_count == 4
+    assert service.peak_in_flight == 1

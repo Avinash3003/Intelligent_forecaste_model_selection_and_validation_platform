@@ -36,7 +36,7 @@ const statusConfig = {
 
 // The infrastructure step that happens BEFORE the phases below: Databricks
 // acquiring the compute this run was submitted to. Rendered as its own block
-// rather than an eighth row, because the phases are the forecast engine's
+// rather than one more row, because the phases are the forecast engine's
 // own stages and this is not one of them.
 const computeConfig = {
   starting: {
@@ -82,7 +82,8 @@ const phaseDescriptions = {
   'Evaluate Models': 'Backtesting and validating every trained model',
   'Explain Models': 'Measuring feature importance for the surviving models',
   'Rank & Select': 'Scoring candidates and choosing a winner per group',
-  'Publish Results': 'Persisting models, exporting forecasts and recording the run',
+  'Generate Insights': 'Writing the business explanation behind every winner',
+  'Publish Results': 'Exporting forecasts and recording the run in MLflow',
 }
 
 // Cosmetic only, never checked against Databricks: a cold cluster spends

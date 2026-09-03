@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     azure_openai_price_input_per_1k: float | None = None
     azure_openai_price_output_per_1k: float | None = None
     llm_max_tokens_per_run: int | None = None
+    # How many insight calls may be in flight at once. Unset uses the
+    # engine's own default; lower it if the deployment's tokens-per-minute
+    # quota cannot absorb that many.
+    llm_insight_max_workers: int | None = None
 
     mlflow_tracking_uri: str | None = None
     mlflow_registry_uri: str | None = None
@@ -335,6 +339,7 @@ class Settings(BaseSettings):
             "AZURE_OPENAI_PRICE_INPUT_PER_1K": _stringify(self.azure_openai_price_input_per_1k),
             "AZURE_OPENAI_PRICE_OUTPUT_PER_1K": _stringify(self.azure_openai_price_output_per_1k),
             "LLM_MAX_TOKENS_PER_RUN": _stringify(self.llm_max_tokens_per_run),
+            "LLM_INSIGHT_MAX_WORKERS": _stringify(self.llm_insight_max_workers),
             "MLFLOW_TRACKING_URI": self.mlflow_tracking_uri,
             "MLFLOW_REGISTRY_URI": self.mlflow_registry_uri,
             "MLFLOW_EXPERIMENT_NAME": self.mlflow_experiment_name,

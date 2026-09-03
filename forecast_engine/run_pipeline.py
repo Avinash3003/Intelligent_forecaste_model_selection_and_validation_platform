@@ -71,11 +71,16 @@ from forecast_engine.utils.exceptions import ConfigurationError, DataQualityErro
 MIN_FORECAST_HORIZON = 6
 MAX_FORECAST_HORIZON = 60
 
-# The seven Databricks task boundaries, each a tuple of the private stage
+# The Databricks task boundaries, each a tuple of the private stage
 # methods below it runs in order. Mirrors backend/app/services/
 # pipeline_stages.py's PIPELINE_PHASES exactly (kept in sync by hand, same
 # convention as PIPELINE_STAGES — see the NAMING CONTRACT note on the class)
 # since the two packages never import each other.
+#
+# Insight generation is its own boundary rather than the first third of
+# publish: it is the run's only external-service dependency, it is the
+# slowest thing publish used to hide, and a run that fails there should say
+# so by name instead of failing a task that also exports and tracks.
 PHASE_STAGE_METHODS: dict[str, tuple[str, ...]] = {
     "load_prepare": (
         "_load_dataset",
@@ -90,20 +95,15 @@ PHASE_STAGE_METHODS: dict[str, tuple[str, ...]] = {
     "evaluate_models": ("_evaluate_models",),
     "explain_models": ("_generate_explainability",),
     "rank_select": ("_select_production_models",),
-    "publish_results": (
-        "_persist_winning_models",
-        "_export_forecasts",
-        "_generate_business_insights",
-        "_mirror_artifacts",
-        "_track_to_mlflow",
-    ),
+    "generate_insights": ("_generate_business_insights", "_mirror_artifacts"),
+    "publish_results": ("_export_forecasts", "_track_to_mlflow"),
 }
 PHASE_ORDER: tuple[str, ...] = tuple(PHASE_STAGE_METHODS)
 FIRST_PHASE = PHASE_ORDER[0]
 LAST_PHASE = PHASE_ORDER[-1]
 # Phases that resume the Ray key-execution state a prior task built —
-# Train is the first phase to touch it (builds fresh) and Publish never
-# touches it at all, so neither belongs here.
+# Train is the first phase to touch it (builds fresh), and neither insight
+# generation nor publish touches it at all, so none of them belongs here.
 _PHASES_RESUMING_KEY_EXECUTION = frozenset({"evaluate_models", "explain_models", "rank_select"})
 
 
@@ -116,8 +116,8 @@ class ForecastEnginePipeline:
 
     # NAMING CONTRACT — one vocabulary across engine and UI. Each
     # `begin_stage(...)` label below (what the UI's stage trail shows) is
-    # deliberately short and Title Case, so it reads uniformly in a
-    # seventeen-row trail. Backend mirror: `backend/app/services/
+    # deliberately short and Title Case, so it reads uniformly down the
+    # whole trail. Backend mirror: `backend/app/services/
     # deployment_service.py`'s PIPELINE_STAGES (kept in sync by
     # tests/backend/test_stage_trail.py).
 
@@ -704,45 +704,35 @@ class ForecastEnginePipeline:
             context.fail_stage(record, exc)
             raise
 
-    # Persist the winning fitted model for each forecast key
-    def _persist_winning_models(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Persist Models")
-        try:
-            # Runs after selection so "the winner" is already decided, and
-            # reads the fitted wrapper the training stage kept on its own
-            # record — nothing is retrained here, and no candidate that lost
-            # is written. A key that cannot be persisted is reported on its
-            # own record rather than ending the run: the forecast itself is
-            # already complete and correct by this point.
-            selection = context.production_selection_report
-            winners = list(selection.results) if selection else []
-            trained = context.training_report.trained_models() if context.training_report else []
-
-            results = self._model_writer.write_all(winners, trained, context.run_id)
-            context.model_storage_results = results
-
-            persisted = sum(1 for item in results if item["persisted"])
-            context.record(models_persisted=persisted)
-            context.complete_stage(
-                record, f"{persisted:,} winning model(s) persisted of {len(results):,} group(s)."
-            )
-        except ForecastEngineError as exc:
-            context.fail_stage(record, exc)
-            raise
-
-    # Export the run's forecast output as one downloadable CSV
-    def _export_forecasts(self, context: PipelineContext) -> None:
-        record = context.begin_stage("Export Forecasts")
-        selection = context.production_selection_report
-        winners = list(selection.results) if selection else []
-
-        result = self._forecast_export_writer.write(winners, context.run_id)
-        context.forecast_export_result = result
-
-        if result["persisted"]:
-            context.complete_stage(record, f"{result['rows']:,} forecast row(s) exported across {len(winners):,} group(s).")
-        else:
-            context.complete_stage(record, result["error"] or "Nothing to export.")
+    # Disabled: nothing downstream reads the per-key .pkl artifacts, so a
+    # run no longer spends time writing them. To restore, uncomment this
+    # method, its entry in PHASE_STAGE_METHODS, and "Persist Models" in
+    # backend/app/services/pipeline_stages.py.
+    # Persist the winning fitted model for each forecast key:
+    # def _persist_winning_models(self, context: PipelineContext) -> None:
+    #     record = context.begin_stage("Persist Models")
+    #     try:
+    #         # Runs after selection so "the winner" is already decided, and
+    #         # reads the fitted wrapper the training stage kept on its own
+    #         # record — nothing is retrained here, and no candidate that lost
+    #         # is written. A key that cannot be persisted is reported on its
+    #         # own record rather than ending the run: the forecast itself is
+    #         # already complete and correct by this point.
+    #         selection = context.production_selection_report
+    #         winners = list(selection.results) if selection else []
+    #         trained = context.training_report.trained_models() if context.training_report else []
+    #
+    #         results = self._model_writer.write_all(winners, trained, context.run_id)
+    #         context.model_storage_results = results
+    #
+    #         persisted = sum(1 for item in results if item["persisted"])
+    #         context.record(models_persisted=persisted)
+    #         context.complete_stage(
+    #             record, f"{persisted:,} winning model(s) persisted of {len(results):,} group(s)."
+    #         )
+    #     except ForecastEngineError as exc:
+    #         context.fail_stage(record, exc)
+    #         raise
 
     # Stage 13 — LLM business insights (Section 6.12)
     def _generate_business_insights(self, context: PipelineContext) -> None:
@@ -789,7 +779,21 @@ class ForecastEnginePipeline:
         persisted = [p for p in result.get("persisted", []) if p["persisted"]]
         context.complete_stage(record, f"{len(persisted):,} artifact file(s) mirrored.")
 
-    # Stage 14 — MLflow experiment tracking & model registry (Section 6.13)
+    # Export the run's forecast output as one downloadable CSV
+    def _export_forecasts(self, context: PipelineContext) -> None:
+        record = context.begin_stage("Export Forecasts")
+        selection = context.production_selection_report
+        winners = list(selection.results) if selection else []
+
+        result = self._forecast_export_writer.write(winners, context.run_id)
+        context.forecast_export_result = result
+
+        if result["persisted"]:
+            context.complete_stage(record, f"{result['rows']:,} forecast row(s) exported across {len(winners):,} group(s).")
+        else:
+            context.complete_stage(record, result["error"] or "Nothing to export.")
+
+    # Stage 16 — MLflow experiment tracking & model registry (Section 6.13)
     def _track_to_mlflow(self, context: PipelineContext) -> None:
         # The pipeline's last stage, run after Business Insights so the LLM
         # Business Summary artifact is available to log. Rebuilds

@@ -10,6 +10,7 @@ produces a plain dict slots straight into it.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -95,6 +96,9 @@ class LLMTraceStore:
     def __init__(self, run_id: str) -> None:
         self._run_id = run_id
         self._traces: list[LLMCallTrace] = []
+        # Groups are generated concurrently, so every mutation of the list
+        # and every read that walks it happens under this.
+        self._lock = threading.Lock()
 
     def start_call(
         self, *, group_id: str, model_name: str, prompt_version: str, deployment: str | None, routing_tier: str,
@@ -110,7 +114,8 @@ class LLMTraceStore:
             request_start_time=datetime.now(timezone.utc),
             attempt_number=attempt_number,
         )
-        self._traces.append(trace)
+        with self._lock:
+            self._traces.append(trace)
         return trace
 
     def finish_call(self, trace: LLMCallTrace) -> None:
@@ -118,7 +123,8 @@ class LLMTraceStore:
 
     @property
     def traces(self) -> list[LLMCallTrace]:
-        return list(self._traces)
+        with self._lock:
+            return list(self._traces)
 
     def summary(self) -> dict[str, Any]:
         """Aggregate figures for the run-level LLM panel.
@@ -128,7 +134,8 @@ class LLMTraceStore:
         computed once here so the backend and the run summary read it
         identically rather than each re-deriving it.
         """
-        if not self._traces:
+        traces = self.traces
+        if not traces:
             return {
                 "call_count": 0,
                 "prompt_tokens": 0,
@@ -145,37 +152,37 @@ class LLMTraceStore:
                 "final_statuses": {},
             }
 
-        latencies = [t.latency_ms for t in self._traces if t.latency_ms is not None]
-        costs = [t.estimated_cost_usd for t in self._traces if t.estimated_cost_usd is not None]
-        cost_available = len(costs) == len([t for t in self._traces if t.total_tokens])
+        latencies = [t.latency_ms for t in traces if t.latency_ms is not None]
+        costs = [t.estimated_cost_usd for t in traces if t.estimated_cost_usd is not None]
+        cost_available = len(costs) == len([t for t in traces if t.total_tokens])
 
-        grounded = sum(1 for t in self._traces if t.grounding_status == "grounded")
-        ungrounded = sum(1 for t in self._traces if t.grounding_status == "ungrounded")
+        grounded = sum(1 for t in traces if t.grounding_status == "grounded")
+        ungrounded = sum(1 for t in traces if t.grounding_status == "ungrounded")
         graded = grounded + ungrounded
 
         final_statuses: dict[str, int] = {}
-        for trace in self._traces:
+        for trace in traces:
             final_statuses[trace.final_status] = final_statuses.get(trace.final_status, 0) + 1
 
         return {
-            "call_count": len(self._traces),
-            "prompt_tokens": sum(t.prompt_tokens or 0 for t in self._traces),
-            "completion_tokens": sum(t.completion_tokens or 0 for t in self._traces),
-            "total_tokens": sum(t.total_tokens or 0 for t in self._traces),
+            "call_count": len(traces),
+            "prompt_tokens": sum(t.prompt_tokens or 0 for t in traces),
+            "completion_tokens": sum(t.completion_tokens or 0 for t in traces),
+            "total_tokens": sum(t.total_tokens or 0 for t in traces),
             "average_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
             "estimated_cost_usd": round(sum(costs), 6) if cost_available and costs else None,
             "cost_available": cost_available and bool(costs),
             # A "retry" is any attempt beyond the first for the same group.
-            "retry_count": sum(1 for t in self._traces if t.attempt_number > 1),
+            "retry_count": sum(1 for t in traces if t.attempt_number > 1),
             "grounded_count": grounded,
             "ungrounded_count": ungrounded,
             "groundedness_rate": round(grounded / graded, 4) if graded else None,
-            "prompt_versions": sorted({t.prompt_version for t in self._traces}),
+            "prompt_versions": sorted({t.prompt_version for t in traces}),
             "final_statuses": final_statuses,
         }
 
     def to_dict(self) -> dict[str, Any]:
-        return {"run_id": self._run_id, "summary": self.summary(), "calls": [t.to_dict() for t in self._traces]}
+        return {"run_id": self._run_id, "summary": self.summary(), "calls": [t.to_dict() for t in self.traces]}
 
 
 def elapsed_ms(started_at: float) -> float:

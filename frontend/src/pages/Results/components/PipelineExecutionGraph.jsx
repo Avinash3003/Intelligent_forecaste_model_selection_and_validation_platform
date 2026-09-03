@@ -8,12 +8,12 @@ import { fetchDeployment, isTerminalStatus } from '../../../services'
 import { formatDuration, formatISTTime, secondsBetween } from '../../../utils/formatDateTime'
 import { cn } from '../../../utils/cn'
 
-// The application's own execution graph — the seven display phases the
+// The application's own execution graph — the display phases the
 // backend already reports (services/pipeline_stages.py PIPELINE_PHASES),
 // drawn as a compact stepper, with the Ray parallel-execution view as its
 // own full-width section below.
 //
-// A view over the same seven phases Databricks itself now runs as real
+// A view over the same phases Databricks itself now runs as real
 // tasks (see backend/app/orchestration/databricks_runner.py's TASK_KEYS) —
 // not a substitute for opening the run in Databricks, which is what shows
 // the actual multi-task DAG with real per-task timing and logs (see the
@@ -22,14 +22,14 @@ import { cn } from '../../../utils/cn'
 // the two can never disagree, and it is strictly a view — nothing here can
 // influence execution.
 //
-// The stepper used to be seven expanded cards (icon, label, status,
+// The stepper used to be one expanded card per phase (icon, label, status,
 // duration, timestamp — four stacked lines each) with the Ray view nested
 // inside whichever one card matched the Train Models phase, squeezed into that one
 // card's ~150px column. Ray parallel execution is the thing actually worth
 // studying on this page; the phase list is a status summary. The stepper
 // below carries the same information in one line per phase, and the
 // reclaimed width goes to Ray having the section's full breadth to render
-// in, not a seventh of it.
+// in, not one phase's slice of it.
 const REFRESH_INTERVAL_MS = 3000
 
 // Same status vocabulary and colours as components/common/PipelineTimeline,

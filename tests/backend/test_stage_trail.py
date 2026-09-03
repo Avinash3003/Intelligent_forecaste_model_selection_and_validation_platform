@@ -40,9 +40,13 @@ def _service() -> DeploymentService:
 
 def test_canonical_stage_list_matches_the_engine_exactly():
     """PIPELINE_STAGES is the progress denominator, so a stage missing from
-    it silently overstates how far along every run is."""
+    it silently overstates how far along every run is.
+
+    Anchored to the start of a line so a commented-out stage — a disabled
+    one is kept in place rather than deleted — is not counted as live.
+    """
     source = (_REPO_ROOT / "forecast_engine" / "run_pipeline.py").read_text()
-    engine_stages = re.findall(r'begin_stage\("([^"]+)"\)', source)
+    engine_stages = re.findall(r'^\s*record = context\.begin_stage\("([^"]+)"\)', source, re.MULTILINE)
 
     assert engine_stages == PIPELINE_STAGES
 

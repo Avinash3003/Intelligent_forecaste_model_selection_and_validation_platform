@@ -180,10 +180,10 @@ class DeploymentService:
         stages = self._to_stage_statuses(listing)
         compute = _compute_status(listing, stages)
 
-        # Counted against the ENGINE's stages, not the seven display phases:
+        # Counted against the ENGINE's stages, not the display phases:
         # the phases are a view for reading, and using them here would move
-        # progress in jumps of a seventh — and would sit wrongly against the
-        # seventeen-stage denominator below.
+        # progress a whole phase at a time — and would sit wrongly against
+        # the per-stage denominator below.
         completed_stages = sum(
             1
             for stage in (listing.stages or [])
@@ -231,11 +231,11 @@ class DeploymentService:
         """The stage trail, always covering the whole pipeline.
 
         The engine reports a stage only once it begins it, so a live run's
-        trail grows one entry at a time. Its seventeen stages are rolled up
-        into the seven display phases (pipeline_stages.PIPELINE_PHASES) —
-        unreached phases stay visible as Pending rather than being dropped,
-        and progress is still counted against the seventeen real stages so it
-        does not jump in sevenths.
+        trail grows one entry at a time. Its stages are rolled up into the
+        display phases (pipeline_stages.PIPELINE_PHASES) — unreached phases
+        stay visible as Pending rather than being dropped, and progress is
+        still counted against the real stages so it does not jump a whole
+        phase at a time.
         """
         reported = {
             canonical_stage_name(stage["name"]): stage
@@ -244,11 +244,11 @@ class DeploymentService:
         }
 
         # A terminal run with no trail at all has nothing to show — inventing
-        # seven Pending phases for a finished run would be a lie.
+        # a column of Pending phases for a finished run would be a lie.
         if not reported and listing.job_status in _TERMINAL_STATUSES:
             return []
 
-        # Rolled up to the seven display phases. A phase spans from the
+        # Rolled up to the display phases. A phase spans from the
         # first of its stages to start until the last to finish, so the
         # elapsed time it reports is real wall clock. Reporting each
         # stage's own engine time instead has understated a run's true
@@ -292,7 +292,7 @@ class DeploymentService:
         # A stage the engine reported that no phase claims (a newly added or
         # renamed stage) is appended as its own row rather than dropped, so
         # the trail can never silently lose real, recorded execution — the
-        # same guarantee the flat seventeen-row trail gave.
+        # same guarantee the flat per-stage trail gave.
         phases.extend(
             StageStatus(
                 label=name,
@@ -378,7 +378,7 @@ def _phase_detail(members: list[dict]) -> str | None:
 # moment compute became ready: it is observed, never timed or guessed, and
 # it is the same signal for both compute modes.
 #
-# Deliberately not a phase. The seven display phases are the engine's own
+# Deliberately not a phase. The display phases are the engine's own
 # stages, and this returns None the moment the engine reports the first of
 # them, handing the trail back over.
 def _compute_status(listing: RunListing, stages: list[StageStatus]) -> ComputeStatus | None:
@@ -404,7 +404,7 @@ def _compute_status(listing: RunListing, stages: list[StageStatus]) -> ComputeSt
         )
     # Failed before a single stage began — the compute itself never came up
     # (quota, a policy rejection, a cluster that could not start). Without
-    # this the trail would show seven Pending phases and no explanation.
+    # this the trail would show every phase Pending and no explanation.
     if listing.job_status is JobStatus.FAILED:
         return ComputeStatus(
             state="failed",
