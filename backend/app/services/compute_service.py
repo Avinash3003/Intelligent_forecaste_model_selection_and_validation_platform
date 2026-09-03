@@ -239,6 +239,16 @@ def message_for_termination(code: str | None, parameters: dict | None = None) ->
     return GENERIC_FAILURE
 
 
+# How long a fetched node catalog (including live Azure vCPU quota) is
+# trusted before the next validation refetches it. Quota is real headroom
+# that other clusters consume and release; a fixed process-lifetime cache
+# would keep reporting a temporary shortage as permanent. Short enough
+# that a freed quota is visible within one Databricks compute cycle, long
+# enough that ordinary repeated validations still answer from cache rather
+# than paying the ~5s full-catalog fetch each time.
+_NODE_CATALOG_TTL_SECONDS = 300
+
+
 class ComputeService:
     """Compute presets, the existing-compute fallback, and real validation."""
 
@@ -249,6 +259,8 @@ class ComputeService:
         self._settings = settings or get_settings()
         self._workspace = workspace
         self._node_catalog: dict[str, dict] | None = None
+        # When the catalog was last actually fetched — see _ensure_catalog.
+        self._node_catalog_fetched_at: float | None = None
         # Guards the catalog fetch so concurrent callers share one — see
         # _ensure_catalog. Per instance, unlike the class-level probe lock
         # above, which exists to keep one probe cluster alive at a time
@@ -444,7 +456,16 @@ class ComputeService:
             daemon=True,
         ).start()
 
-    # The workspace's node catalog, read once per service instance.
+    # The workspace's node catalog, refreshed on a TTL rather than once
+    # per service instance. `available_core_quota` is not static
+    # configuration — it is the subscription's *remaining* headroom, which
+    # falls while another cluster (including this app's own prior runs)
+    # holds a family's cores and recovers once that cluster terminates.
+    # Caching it forever meant a validation that failed once because
+    # something else was briefly using the quota kept failing for the rest
+    # of this process's life, long after that quota was free again — the
+    # exact case a run reported: E4ads_v7 read "0 vCPUs available" from a
+    # process that had not refetched since another cluster released them.
     def _ensure_catalog(self) -> dict | None:
         # Single-flight. Without the lock, a request arriving while
         # startup's own warm-up is still in flight just runs a second fetch
@@ -452,13 +473,24 @@ class ComputeService:
         # 5.13s for its own copy. Holding the lock means it joins the fetch
         # already running and returns the moment that one lands.
         with self._catalog_lock:
-            if self._node_catalog is None:
+            fetched_at = self._node_catalog_fetched_at
+            stale = fetched_at is None or (time.monotonic() - fetched_at) > _NODE_CATALOG_TTL_SECONDS
+            if self._node_catalog is None or stale:
                 try:
                     raw = self._client().api_client.do("GET", "/api/2.1/clusters/list-node-types")
                 except Exception as exc:  # noqa: BLE001
+                    if self._node_catalog is not None:
+                        # A transient refresh failure keeps serving the last
+                        # known catalog rather than breaking every
+                        # validation until the next successful fetch.
+                        logger.warning(
+                            "Could not refresh Databricks node types, reusing the last known catalog: %s", exc
+                        )
+                        return self._node_catalog
                     logger.warning("Could not read Databricks node types: %s", exc)
                     return None
                 self._node_catalog = {n["node_type_id"]: n for n in raw.get("node_types", []) or []}
+                self._node_catalog_fetched_at = time.monotonic()
             return self._node_catalog
 
     def _node_info(self, node_type_id: str) -> dict | None:
