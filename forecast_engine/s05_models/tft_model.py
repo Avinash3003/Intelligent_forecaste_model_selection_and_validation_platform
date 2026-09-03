@@ -18,6 +18,15 @@ from forecast_engine.s05_models.base_model import BaseForecastingModel, Forecast
 from forecast_engine.s01_preprocessing.series_builder import ForecastSeries
 
 
+_QUIET_TRAINER = {
+    "logger": False,
+    "enable_checkpointing": False,
+    "enable_progress_bar": False,
+    "enable_model_summary": False,
+    "default_root_dir": tempfile.gettempdir(),
+}
+
+
 class TemporalFusionTransformerModel(BaseForecastingModel):
     """Attention-based deep forecasting model via pytorch-forecasting."""
 
@@ -78,15 +87,8 @@ class TemporalFusionTransformerModel(BaseForecastingModel):
 
         trainer = Trainer(
             max_epochs=int(self.params.get("max_epochs", 10)),
-            enable_progress_bar=False,
-            enable_checkpointing=False,
-            logger=False,
             accelerator="cpu",
-            # Lightning still roots its scratch output at the working
-            # directory even with logging and checkpointing off, which
-            # littered the repo (and a Databricks task's cwd) with
-            # lightning_logs/version_N. Nothing here is read back.
-            default_root_dir=tempfile.gettempdir(),
+            **_QUIET_TRAINER,
         )
         trainer.fit(network, train_dataloaders=dataloader)
 
@@ -117,7 +119,7 @@ class TemporalFusionTransformerModel(BaseForecastingModel):
             train=False, batch_size=int(self.params.get("batch_size", 64)), num_workers=0
         )
 
-        raw = self._model.predict(dataloader)
+        raw = self._model.predict(dataloader, trainer_kwargs=dict(_QUIET_TRAINER))
         values = [float(value) for value in raw.flatten().tolist()]
 
         if len(values) >= horizon:
