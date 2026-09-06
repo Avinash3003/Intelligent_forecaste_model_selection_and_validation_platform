@@ -21,6 +21,7 @@ export function deployRun({
   selectedModels,
   fallbackModel,
   horizon,
+  enableMlflow,
   aggregationMethod,
   compute,
 }) {
@@ -45,6 +46,7 @@ export function deployRun({
     selected_models: selectedModels,
     fallback_model: fallbackModel,
     horizon,
+    enable_mlflow: enableMlflow,
     // Derived feature columns for XGBoost/LightGBM (Priority C) — a
     // top-level field, not part of `metadata`: it configures how the tree
     // models featurize the target, not a column role assignment.

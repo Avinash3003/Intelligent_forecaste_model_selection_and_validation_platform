@@ -42,26 +42,26 @@ class TrainingReport:
     # Count results that finished as successfully trained
     @property
     def trained_count(self) -> int:
-        return sum(1 for result in self.results if result.status is TrainingStatus.TRAINED)
+        return sum(1 for result in self.results if result.status == TrainingStatus.TRAINED)
 
     # Count results that finished as failed
     @property
     def failed_count(self) -> int:
-        return sum(1 for result in self.results if result.status is TrainingStatus.FAILED)
+        return sum(1 for result in self.results if result.status == TrainingStatus.FAILED)
 
     # Count results that were skipped
     @property
     def skipped_count(self) -> int:
-        return sum(1 for result in self.results if result.status is TrainingStatus.SKIPPED)
+        return sum(1 for result in self.results if result.status == TrainingStatus.SKIPPED)
 
     # Count results whose backing library was unavailable
     @property
     def unavailable_count(self) -> int:
-        return sum(1 for result in self.results if result.status is TrainingStatus.UNAVAILABLE)
+        return sum(1 for result in self.results if result.status == TrainingStatus.UNAVAILABLE)
 
     # Only the successfully fitted models -- the next phase's input
     def trained_models(self) -> list[TrainedModel]:
-        return [result for result in self.results if result.status is TrainingStatus.TRAINED]
+        return [result for result in self.results if result.status == TrainingStatus.TRAINED]
 
     # Serializable summary; individual records are included in full
     def to_dict(self) -> dict[str, Any]:

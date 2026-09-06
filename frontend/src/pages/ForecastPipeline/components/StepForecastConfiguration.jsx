@@ -178,6 +178,20 @@ export default function StepForecastConfiguration({ config, onChange, errors }) 
           )}
         </div>
       </SectionContainer>
+
+      <SectionContainer
+        title="Observability options"
+        subtitle="Configure MLflow tracking and Unity Catalog registration"
+      >
+        <div className="max-w-md">
+          <Checkbox
+            checked={config.enableMlflow}
+            onChange={(checked) => onChange('enableMlflow', checked)}
+            label="Enable MLflow Tracking & Model Registration"
+            description="Logs parameters, metrics, and models to Databricks MLflow. Models are registered to Unity Catalog."
+          />
+        </div>
+      </SectionContainer>
     </div>
   )
 }

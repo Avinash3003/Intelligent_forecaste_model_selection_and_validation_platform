@@ -39,17 +39,17 @@ def _read_rows(uri):
 
 def test_every_group_and_every_date_becomes_a_row(tmp_path):
     winners = [
-        _Winner("1 | 1", forecast=_Forecast(["2024-01", "2024-02"], [10.0, 12.0], [8.0, 9.0], [12.0, 15.0])),
-        _Winner("1 | 2", forecast=_Forecast(["2024-01"], [5.0], [4.0], [6.0])),
+        _Winner("1 | 1", forecast=_Forecast(["2024-01", "2024-02"], [10.0, 12.0])),
+        _Winner("1 | 2", forecast=_Forecast(["2024-01"], [5.0])),
     ]
     result = _writer(tmp_path).write(winners, "run-1")
 
     assert result["persisted"] is True
     assert result["rows"] == 3
     rows = _read_rows(result["uri"])
-    assert rows[0] == ["group_id", "model_name", "date", "value", "lower", "upper"]
-    assert rows[1] == ["1 | 1", "prophet", "2024-01", "10.0", "8.0", "12.0"]
-    assert rows[3] == ["1 | 2", "prophet", "2024-01", "5.0", "4.0", "6.0"]
+    assert rows[0] == ["group_id", "model_name", "date", "value"]
+    assert rows[1] == ["1 | 1", "prophet", "2024-01", "10.0"]
+    assert rows[3] == ["1 | 2", "prophet", "2024-01", "5.0"]
 
 
 def test_a_group_with_no_forecast_is_skipped_not_a_blank_row(tmp_path):
@@ -59,12 +59,12 @@ def test_a_group_with_no_forecast_is_skipped_not_a_blank_row(tmp_path):
     assert result["rows"] == 1
 
 
-def test_missing_bounds_are_written_as_empty_not_fabricated(tmp_path):
-    winners = [_Winner("1 | 1", forecast=_Forecast(["2024-01"], [10.0], None, None))]
+def test_intervals_are_not_written_to_export(tmp_path):
+    winners = [_Winner("1 | 1", forecast=_Forecast(["2024-01"], [10.0], [8.0], [12.0]))]
     result = _writer(tmp_path).write(winners, "run-1")
 
     rows = _read_rows(result["uri"])
-    assert rows[1] == ["1 | 1", "prophet", "2024-01", "10.0", "", ""]
+    assert rows[1] == ["1 | 1", "prophet", "2024-01", "10.0"]
 
 
 def test_no_winners_with_a_forecast_reports_nothing_exported(tmp_path):

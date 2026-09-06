@@ -447,3 +447,25 @@ def test_every_registration_is_attached_to_the_pipeline_run():
     register_winner_models(client, _result(winners), MLflowConfig(), "mlflow-run-1")
 
     assert client.attached.count("mlflow-run-1") >= len(winners)
+
+def test_registration_does_not_depend_on_dummy_nan_intervals():
+    """Verify MLflow infer_signature works without lower/upper bounds.
+    The public model contract should not contain interval fields just to satisfy
+    Unity Catalog's schema enforcement, which originally rejected Any/object from [None].
+    """
+    import pandas as pd
+    from forecast_engine.s12_tracking.frozen_forecast_model import FrozenForecastModel
+    from forecast_engine.s12_tracking.model_registrar import _signature_for
+
+    wrapper = FrozenForecastModel("1 | 1", "xgboost", {"dates": ["2025-01-01"], "values": [1.0]})
+    sig = _signature_for(wrapper)
+    
+    # Signature should contain only the required fields: date and value
+    output_schema = sig.outputs.to_dict()
+    output_names = {col["name"] for col in output_schema}
+    
+    assert "date" in output_names
+    assert "value" in output_names
+    assert "lower" not in output_names
+    assert "upper" not in output_names
+

@@ -62,7 +62,7 @@ class EvaluationPipeline:
 
         # A model that never trained has nothing to evaluate; skipping it
         # here keeps the report aligned with what actually exists.
-        evaluable = [model for model in trained_models if model.status is TrainingStatus.TRAINED]
+        evaluable = [model for model in trained_models if model.status == TrainingStatus.TRAINED]
 
         for trained in evaluable:
             series = series_by_group.get(trained.group_id)

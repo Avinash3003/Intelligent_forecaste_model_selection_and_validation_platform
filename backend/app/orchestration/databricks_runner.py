@@ -803,6 +803,7 @@ class DatabricksRunner(PipelineRunner):
             payload["derived_features"] = list(request.derived_features)
         if request.horizon is not None:
             payload["horizon"] = int(request.horizon)
+        payload["tracking"] = {"enabled": request.enable_mlflow}
         if request.started_by_user_id:
             payload["started_by_user_id"] = request.started_by_user_id
         if request.started_by_display_name:

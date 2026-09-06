@@ -147,22 +147,22 @@ class ProductionSelectionReport:
     # Count groups whose ranked candidate was selected
     @property
     def selected_count(self) -> int:
-        return sum(1 for result in self.results if result.status is FinalSelectionStatus.SELECTED)
+        return sum(1 for result in self.results if result.status == FinalSelectionStatus.SELECTED)
 
     # Count groups that fell back to the configured fallback model
     @property
     def fallback_count(self) -> int:
-        return sum(1 for result in self.results if result.status is FinalSelectionStatus.FALLBACK_USED)
+        return sum(1 for result in self.results if result.status == FinalSelectionStatus.FALLBACK_USED)
 
     # Count groups with no usable model at all
     @property
     def unavailable_count(self) -> int:
-        return sum(1 for result in self.results if result.status is FinalSelectionStatus.NO_MODEL_AVAILABLE)
+        return sum(1 for result in self.results if result.status == FinalSelectionStatus.NO_MODEL_AVAILABLE)
 
     # Count groups whose selection raised an error
     @property
     def failed_count(self) -> int:
-        return sum(1 for result in self.results if result.status is FinalSelectionStatus.FAILED)
+        return sum(1 for result in self.results if result.status == FinalSelectionStatus.FAILED)
 
     # Serialize the aggregate report to a plain dict
     def to_dict(self) -> dict[str, Any]:

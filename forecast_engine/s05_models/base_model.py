@@ -96,7 +96,7 @@ class TrainedModel:
     # Whether this record represents a successfully trained model
     @property
     def is_trained(self) -> bool:
-        return self.status is TrainingStatus.TRAINED
+        return self.status == TrainingStatus.TRAINED
 
     # Serializable training record, excluding the estimator object
     def to_dict(self) -> dict[str, Any]:

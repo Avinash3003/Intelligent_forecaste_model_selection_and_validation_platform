@@ -9,8 +9,7 @@ import SearchBox from '../../components/ui/SearchBox'
 import Pagination from '../../components/common/Pagination'
 import Card from '../../components/ui/Card'
 import LLMCallCard from './components/LLMCallCard'
-// LlmEvaluationSection is intentionally not imported — see the commented-out
-// "LLM Evaluation" block below for why that section is currently hidden.
+import LlmEvaluationSection from './components/LlmEvaluationSection'
 import DatasetRunFilter from '../../components/common/DatasetRunFilter'
 import { useDatasetRunFilter } from '../../hooks/useDatasetRunFilter'
 import { fetchDeployments, fetchLlmObservability, fetchPromptUsage } from '../../services'
@@ -276,23 +275,7 @@ export default function LLMOps() {
         </SectionContainer>
       </div>
 
-      {/* LLM Evaluation — hidden from the UI pending a decision on whether
-          to keep it.
-
-          What it is: the offline regression suite's report (schema
-          validity, groundedness, winner consistency, rejection accuracy,
-          readability over a fixed set of eval cases). It is NOT per-run
-          telemetry — that is "LLM Usage & Performance" above and the
-          per-call detail below, both of which are unaffected by this.
-
-          Why it is always empty here: the section reads a JSON report that
-          `python -m forecast_engine.s11_llm.evaluate` writes to
-          forecast_engine/s11_llm/eval_output/. That path is a gitignored
-          build artifact, so it exists on a developer machine but is never
-          shipped in the deployed App Service image — the panel therefore
-          renders its "no report yet" empty state permanently in production.
-
-          Re-enable by restoring this block; nothing else depends on it.
+      {/* LLM Evaluation — Restored as per Phase 2 requirements */}
       <div className="mb-6">
         <SectionContainer
           title="LLM Evaluation"
@@ -301,7 +284,6 @@ export default function LLMOps() {
           <LlmEvaluationSection />
         </SectionContainer>
       </div>
-      */}
 
       {noCompletedRuns && (
         <div className="mb-6">

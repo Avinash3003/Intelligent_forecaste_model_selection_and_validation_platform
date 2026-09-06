@@ -20,9 +20,9 @@ def test_no_hardcoded_cluster_size_in_the_executor():
     assert "num_cpus=4" not in source
     assert "max_worker_nodes=4" not in source
     # One CPU per key is the intended scheduling grain for every one of
-    # the four stage tasks (train/evaluate/explain/rank_select) -- "1" is
+    # the five stage tasks (train/evaluate/explain/rank_select/publish) -- "1" is
     # the only value num_cpus is ever allowed to state, however many times.
-    assert source.count("num_cpus=") == 4
+    assert source.count("num_cpus=") == 5
     assert all(value == "1" for value in re.findall(r"num_cpus=(\d+)", source))
 
 

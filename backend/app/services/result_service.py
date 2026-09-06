@@ -478,24 +478,12 @@ class ResultService:
 
         forecast = winner.get("forecast") or {}
         values = forecast.get("values") or []
-        lower = forecast.get("lower") or []
-        upper = forecast.get("upper") or []
-
         # Join the two lines by repeating the last actual as the forecast's
         # first point, so the chart draws one continuous series.
         if points and values:
             junction = points[-1]
             junction.forecast = junction.actual
             junction.boundary = True
-            # Anchor the interval band at the boundary too, but only for a
-            # model that produces one. The last actual is an observation,
-            # so its interval has zero width — that is a fact about the
-            # data, not an invented bound, and without it the shaded band
-            # starts one step adrift of the line it belongs to. A model
-            # with no intervals (the tree models) keeps None here and stays
-            # band-free, exactly as before.
-            if lower and upper:
-                junction.lower = junction.upper = junction.actual
 
         forecast_labels = _projected_labels([date for date, _ in history], len(values))
 
@@ -505,8 +493,6 @@ class ResultService:
                     period=f"T{index + 1}",
                     label=forecast_labels[index],
                     forecast=value,
-                    lower=lower[index] if index < len(lower) else None,
-                    upper=upper[index] if index < len(upper) else None,
                 )
             )
 

@@ -6,6 +6,9 @@ dist/
 build/
 *.egg-info/
 
+# Ignore memorization file
+memorization.md
+
 # Environment variables — real values never leave the machine.
 # The `!` lines re-admit the templates, which carry key names but no values;
 # without them `.env.*` would also exclude the examples other developers need.

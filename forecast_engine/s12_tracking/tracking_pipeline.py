@@ -132,7 +132,7 @@ class MLflowTrackingPipeline:
             pass
 
     # Log a finished execution into the open run and close it FINISHED; never raises
-    def track(self, pipeline_result: PipelineResult, summary: dict | None = None) -> TrackingResult:
+    def track(self, pipeline_result: PipelineResult, summary: dict | None = None, registrations: list | None = None) -> TrackingResult:
         result = self._base_result()
 
         if not self._config.enabled:
@@ -169,9 +169,12 @@ class MLflowTrackingPipeline:
             if self._config.log_artifacts:
                 result.artifact_errors = log_all_artifacts(self._client, pipeline_result, self._config)
 
-            result.registrations = register_winner_models(
-                self._client, pipeline_result, self._config, result.run_id
-            )
+            if registrations is not None:
+                result.registrations = registrations
+            else:
+                result.registrations = register_winner_models(
+                    self._client, pipeline_result, self._config, result.run_id
+                )
 
             # Settled before the summary is logged, not after: `summary`
             # was built by the caller from a context whose tracking_result

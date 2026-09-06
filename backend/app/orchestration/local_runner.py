@@ -387,7 +387,14 @@ class LocalRunner(PipelineRunner):
             record.work_dir = work_dir
 
         try:
-            config_path.write_text(json.dumps(request.forecast_configuration))
+            payload = dict(request.forecast_configuration)
+            payload["tracking"] = {"enabled": request.enable_mlflow}
+            if request.started_by_user_id:
+                payload["started_by_user_id"] = request.started_by_user_id
+            if request.started_by_display_name:
+                payload["started_by_display_name"] = request.started_by_display_name
+
+            config_path.write_text(json.dumps(payload))
 
             command = [
                 str(self._settings.forecast_engine_python_path),

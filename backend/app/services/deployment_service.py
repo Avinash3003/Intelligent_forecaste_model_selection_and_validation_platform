@@ -128,6 +128,7 @@ def build_execution_request(
         fallback_model=request.fallback_model,
         horizon=request.horizon,
         derived_features=request.derived_features,
+        enable_mlflow=request.enable_mlflow,
         compute=request.compute,
         started_by_user_id=principal.subject,
         started_by_display_name=principal.display_name or principal.subject,

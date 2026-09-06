@@ -48,6 +48,7 @@ class PipelineExecutionRequest(BaseModel):
     horizon: int | None = None
     # Lag/rolling/calendar features for the tree models, validated by the caller.
     derived_features: list[str] | None = None
+    enable_mlflow: bool = True
     compute: ComputeSelection | None = None
 
     # Always taken from the authenticated user server-side, never from the

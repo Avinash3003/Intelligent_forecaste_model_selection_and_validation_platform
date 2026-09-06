@@ -24,6 +24,8 @@ class DeploymentRequest(BaseModel):
     # validated against the authoritative registry in `deployment_service`
     # before this ever reaches a Runner.
     derived_features: list[str] | None = None
+    # Whether to log to MLflow and register the final models
+    enable_mlflow: bool = True
     # Where the run executes. Required for Databricks execution; the local
     # runner ignores it.
     compute: ComputeSelection | None = None

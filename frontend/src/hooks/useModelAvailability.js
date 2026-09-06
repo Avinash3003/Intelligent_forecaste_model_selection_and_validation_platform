@@ -40,6 +40,7 @@ export default function useModelAvailability() {
   // backend rather than named here — the constraint belongs to the
   // image, not to this picker.
   const [containerOnlyModels, setContainerOnlyModels] = useState([])
+  const [executionMode, setExecutionMode] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -69,6 +70,10 @@ export default function useModelAvailability() {
         if (Array.isArray(response?.container_only_models)) {
           setContainerOnlyModels(response.container_only_models)
         }
+        
+        if (response?.execution_mode) {
+          setExecutionMode(response.execution_mode)
+        }
       })
       .catch(() => {
         // Availability is an enhancement, never a gate. Staying at the
@@ -81,5 +86,5 @@ export default function useModelAvailability() {
     }
   }, [])
 
-  return { unavailable, horizonRange, fallbackModel, containerOnlyModels }
+  return { unavailable, horizonRange, fallbackModel, containerOnlyModels, executionMode }
 }

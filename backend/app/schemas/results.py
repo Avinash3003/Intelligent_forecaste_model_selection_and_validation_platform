@@ -58,8 +58,6 @@ class ForecastPoint(BaseModel):
     label: str | None = None
     actual: float | None = None
     forecast: float | None = None
-    lower: float | None = None
-    upper: float | None = None
     highlight: bool = False
     # True on the single point where observed history ends and the forecast
     # begins. Marked here rather than inferred by the chart so the boundary

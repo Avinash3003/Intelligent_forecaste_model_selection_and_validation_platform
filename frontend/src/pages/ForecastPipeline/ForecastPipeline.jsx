@@ -50,6 +50,7 @@ const initialConfig = {
   horizon: defaultForecastHorizon,
   selectedModels: forecastModels.map((m) => m.id),
   fallbackModel: defaultFallbackModel,
+  enableMlflow: true,
 }
 
 // Maps the backend's snake_case /profile response into the shape the
@@ -182,7 +183,7 @@ export default function ForecastPipeline() {
 
   // The same list the Compute step shows a notice for — read once here
   // so Next and the notice can never disagree about what is blocked.
-  const { containerOnlyModels } = useModelAvailability()
+  const { containerOnlyModels, executionMode } = useModelAvailability()
 
   // Ask for the Databricks link until it exists, then stop.
   //
@@ -344,6 +345,11 @@ export default function ForecastPipeline() {
 
   const handlePrevious = () => {
     if (isBusy) return
+    if (currentStep === 6 && executionMode === 'local') {
+      setCurrentStep(4)
+      setDeployError(null)
+      return
+    }
     if (currentStep > 1) {
       setCurrentStep(currentStep - 1)
       setDeployError(null)
@@ -600,7 +606,11 @@ export default function ForecastPipeline() {
       // is what made entering this step slow (and, on larger datasets, fail
       // outright), so it is skipped rather than fired and ignored.
       // loadEstimate()
-      advanceTo(5)
+      if (executionMode === 'local') {
+        advanceTo(6)
+      } else {
+        advanceTo(5)
+      }
       return
     }
 
@@ -624,6 +634,7 @@ export default function ForecastPipeline() {
           selectedModels: config.selectedModels,
           fallbackModel: config.fallbackModel,
           horizon: config.horizon,
+          enableMlflow: config.enableMlflow,
           // Monthly data needs no roll-up, so no method is sent for it.
           aggregationMethod: aggregationRequired ? aggregationMethod : null,
           compute: toComputePayload(compute),
@@ -666,7 +677,7 @@ export default function ForecastPipeline() {
 
       <Card className="mb-6 p-5">
         <StepIndicator
-          steps={forecastPipelineSteps}
+          steps={executionMode === 'local' ? forecastPipelineSteps.filter(s => s.id !== 5) : forecastPipelineSteps}
           currentStep={currentStep}
           maxReachedStep={deployed ? forecastPipelineSteps.length : maxReachedStep}
           onStepClick={goToStep}
@@ -768,6 +779,7 @@ export default function ForecastPipeline() {
         nextDisabled={nextDisabled}
         onPrevious={handlePrevious}
         onNext={handleNext}
+        nextLabel={currentStep === 4 && executionMode === 'local' ? 'Review & Run' : undefined}
       />
     </PageContainer>
   )

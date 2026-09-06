@@ -45,8 +45,6 @@ if PYFUNC_AVAILABLE:
                 {
                     "date": self.forecast.get("dates", []),
                     "value": values,
-                    "lower": self.forecast.get("lower") or [None] * len(values),
-                    "upper": self.forecast.get("upper") or [None] * len(values),
                 }
             )
 

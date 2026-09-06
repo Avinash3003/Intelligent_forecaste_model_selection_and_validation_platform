@@ -42,7 +42,7 @@ class ExplainabilityPipeline:
         report = ExplainabilityReport()
 
         trained_by_key = {
-            (m.group_id, m.model_name): m for m in trained_models if m.status is TrainingStatus.TRAINED
+            (m.group_id, m.model_name): m for m in trained_models if m.status == TrainingStatus.TRAINED
         }
         series_by_group = {series.group_id: series for series in series_collection}
 

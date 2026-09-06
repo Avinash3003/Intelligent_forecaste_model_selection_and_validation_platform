@@ -19,7 +19,7 @@ from forecast_engine.config.pipeline_config import ForecastExportConfig
 from forecast_engine.core import storage
 from forecast_engine.s03_storage.model_writer import sanitize_forecast_key
 
-_COLUMNS = ("group_id", "model_name", "date", "value", "lower", "upper")
+_COLUMNS = ("group_id", "model_name", "date", "value")
 
 
 class ForecastExportWriter:
@@ -67,7 +67,5 @@ class ForecastExportWriter:
                 continue
             dates = forecast.dates or []
             values = forecast.values or []
-            lower = forecast.lower or [None] * len(values)
-            upper = forecast.upper or [None] * len(values)
-            for date, value, low, high in zip(dates, values, lower, upper):
-                yield (winner.group_id, winner.model_name, date, value, low, high)
+            for date, value in zip(dates, values):
+                yield (winner.group_id, winner.model_name, date, value)

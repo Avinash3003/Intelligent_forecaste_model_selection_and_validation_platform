@@ -189,7 +189,7 @@ class EvaluationResult:
     # Whether this pair survived to ranking
     @property
     def survived(self) -> bool:
-        return self.status is EvaluationStatus.SURVIVED
+        return self.status == EvaluationStatus.SURVIVED
 
     # Rejection reason codes, or empty when not validated
     @property
@@ -257,26 +257,26 @@ class EvaluationReport:
     # Count of results with SURVIVED status
     @property
     def survived_count(self) -> int:
-        return sum(1 for result in self.results if result.status is EvaluationStatus.SURVIVED)
+        return sum(1 for result in self.results if result.status == EvaluationStatus.SURVIVED)
 
     # Count of results with ELIMINATED status
     @property
     def eliminated_count(self) -> int:
-        return sum(1 for result in self.results if result.status is EvaluationStatus.ELIMINATED)
+        return sum(1 for result in self.results if result.status == EvaluationStatus.ELIMINATED)
 
     # Count of results with FAILED status
     @property
     def failed_count(self) -> int:
-        return sum(1 for result in self.results if result.status is EvaluationStatus.FAILED)
+        return sum(1 for result in self.results if result.status == EvaluationStatus.FAILED)
 
     # Count of results with SKIPPED status
     @property
     def skipped_count(self) -> int:
-        return sum(1 for result in self.results if result.status is EvaluationStatus.SKIPPED)
+        return sum(1 for result in self.results if result.status == EvaluationStatus.SKIPPED)
 
     # Models eligible for ranking — Phase 7B's direct input
     def surviving_models(self) -> list[EvaluationResult]:
-        return [result for result in self.results if result.status is EvaluationStatus.SURVIVED]
+        return [result for result in self.results if result.status == EvaluationStatus.SURVIVED]
 
     # Survivors indexed by forecasting group
     def surviving_by_group(self) -> dict[str, list[EvaluationResult]]:

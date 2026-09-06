@@ -275,7 +275,34 @@ _EMPTY_EVALUATION = _dump(EvaluationReport())
 _EMPTY_EXPLAINABILITY = _dump(ExplainabilityReport())
 
 
+
+def _remote_publish(
+    group_id: str,
+    winner_payload: bytes,
+    run_id: str,
+    config: Any,
+    dataset_slug: str,
+    published_version: str | None,
+):
+    task_started = time.time()
+    import pickle
+    from forecast_engine.s12_tracking.model_registrar import _register_one
+    from forecast_engine.s12_tracking.mlflow_client import MLflowClient, sanitize_model_name
+    
+    winner = pickle.loads(winner_payload)
+    client = MLflowClient(config)
+    
+    group_slug = sanitize_model_name(group_id)
+    published = {group_slug: published_version} if published_version else {}
+    
+    result = _register_one(client, winner, run_id, config, dataset_slug, published)
+    
+    worker_id, node_id = _ray_context_ids()
+    return _dump(result), task_started, time.time(), worker_id, node_id
+
+
 def _remote_tasks():
+
     """Decorated lazily, only where Ray is present, so this module stays
     importable in environments that do not have it."""
     import ray as _ray
@@ -285,6 +312,7 @@ def _remote_tasks():
         "evaluate": _ray.remote(num_cpus=1)(_remote_evaluate),
         "explain": _ray.remote(num_cpus=1)(_remote_explain),
         "rank_select": _ray.remote(num_cpus=1)(_remote_rank_select),
+        "publish": _ray.remote(num_cpus=1)(_remote_publish),
     }
 
 
@@ -335,6 +363,7 @@ class StagedKeyExecution:
         self._trained_by_key: dict[str, list[TrainedModel]] = {}
         self._evaluation_by_key: dict[str, EvaluationReport] = {}
         self._explainability_by_key: dict[str, ExplainabilityReport] = {}
+        self._selection_by_key: dict[str, bytes] = {}
 
         self._use_ray = use_ray and ray_available() and bool(series_collection)
         self._topology: dict[str, Any] = {}
@@ -365,6 +394,7 @@ class StagedKeyExecution:
             "trained_by_key": dict(self._trained_by_key),
             "evaluation_by_key": dict(self._evaluation_by_key),
             "explainability_by_key": dict(self._explainability_by_key),
+            "selection_by_key": dict(self._selection_by_key),
             "total_keys": self._total_keys,
         }
 
@@ -382,6 +412,7 @@ class StagedKeyExecution:
         executor._trained_by_key = dict(snapshot.get("trained_by_key", {}))
         executor._evaluation_by_key = dict(snapshot.get("evaluation_by_key", {}))
         executor._explainability_by_key = dict(snapshot.get("explainability_by_key", {}))
+        executor._selection_by_key = dict(snapshot.get("selection_by_key", {}))
         executor._total_keys = snapshot.get("total_keys", len(series_collection))
         return executor
 
@@ -476,9 +507,58 @@ class StagedKeyExecution:
             ranking.duration_seconds += ranking_part.duration_seconds
             selection.results.extend(selection_part.results)
             selection.duration_seconds += selection_part.duration_seconds
+            
+            # Save for publishing
+            if selection_part.results:
+                self._selection_by_key[group_id] = _dump(selection_part.results[0].to_dict())
+                
         return ranking, selection, telemetry
 
+
+    # ---- Stage 5: Publish Models --------------------------------------------
+
+    def run_publishing(
+        self,
+        config: Any,
+        run_id: str,
+        dataset_slug: str,
+        published: dict[str, str],
+        on_progress: ProgressCallback | None = None,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        from forecast_engine.s12_tracking.mlflow_client import sanitize_model_name
+
+        if not getattr(config, "register_winner_model", False):
+            return [], self._telemetry("publish_results", time.time(), total=0, task_records=[])
+            
+        def submit(group_id: str):
+            winner_payload = self._selection_by_key.get(group_id)
+            if winner_payload is None:
+                # Fallback to an empty dict payload to avoid crashing the task loop,
+                # though _register_one will immediately return un-registered.
+                winner_payload = _dump({"forecast_group": group_id, "final_selection_status": "No Model Available"})
+                
+            group_slug = sanitize_model_name(group_id)
+            published_version = published.get(group_slug)
+            
+            if self._use_ray:
+                return self._tasks["publish"].remote(
+                    group_id, winner_payload, run_id, config, dataset_slug, published_version
+                )
+            return _remote_publish(
+                group_id, winner_payload, run_id, config, dataset_slug, published_version
+            )
+
+        by_key, telemetry = self._run_stage("publish_results", submit, on_progress)
+
+        results = []
+        for group_id in self._original_order:
+            if group_id in by_key:
+                results.append(by_key[group_id])
+
+        return results, telemetry
+
     # ---- shared fan-out/collect/telemetry --------------------------------
+
 
     def _run_stage(
         self, stage_name: str, submit, on_progress: ProgressCallback | None = None

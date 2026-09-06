@@ -30,6 +30,7 @@ from forecast_engine.config.evaluation_config import EvaluationConfig
 from forecast_engine.config.explainability_config import ExplainabilityConfig
 from forecast_engine.config.llm_config import LLMConfig
 from forecast_engine.config.mlflow_config import MLflowConfig
+from forecast_engine.s12_tracking.mlflow_client import MLflowClient
 from forecast_engine.config.derived_features_config import apply_to_model_config
 from forecast_engine.config.model_config import ModelConfig
 from forecast_engine.config.pipeline_config import PipelineConfig
@@ -829,6 +830,20 @@ class ForecastEnginePipeline:
         record = context.begin_stage("MLflow Tracking")
         pipeline_result = PipelineResultBuilder().build(context)
 
+        registrations = None
+        if self._parallel_keys and context.key_stage_executor is not None:
+            client = MLflowClient(self._mlflow_config)
+            if client.is_available():
+                published = client.published_versions()
+                dataset_slug = _dataset_slug(pipeline_result, context.run_id)
+                registrations, _ = context.key_stage_executor.run_publishing(
+                    self._mlflow_config,
+                    context.run_id,
+                    dataset_slug,
+                    published,
+                    self._progress(context, record),
+                )
+
         # The stage stays *open* across the tracking call, so anything
         # polling the live-status file sees "MLflow Tracking — Running"
         # instead of a finished 14-stage trail while artifact logging is
@@ -842,7 +857,9 @@ class ForecastEnginePipeline:
         # resolves that: live status reports the truth, the artifact records
         # the outcome.
         summary = _summary_with_stage_completed(context.summary(), record.name)
-        result = self._tracking_pipeline.track(pipeline_result, summary=summary)
+        result = self._tracking_pipeline.track(
+            pipeline_result, summary=summary, registrations=registrations
+        )
         context.tracking_result = result
         context.complete_stage(record, "MLflow tracking complete.")
 

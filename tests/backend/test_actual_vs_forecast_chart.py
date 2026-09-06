@@ -212,41 +212,5 @@ def test_an_unlabelled_forecast_point_still_has_an_identity():
 
 
 # ---------------------------------------------------------------------
-# Prediction intervals — preserved for models that produce them, never
-# fabricated for models that do not
+# Prediction intervals are no longer supported
 # ---------------------------------------------------------------------
-
-
-def test_the_interval_is_preserved_for_a_model_that_produces_one():
-    dates = _months(24)
-    series = [(date, float(index)) for index, date in enumerate(dates)]
-
-    points = _service(series)._actual_vs_forecast(_result(), "1 | 1", _winner(with_interval=True))
-
-    forecast_points = [point for point in points if point.actual is None]
-    assert all(point.lower is not None and point.upper is not None for point in forecast_points)
-
-
-def test_the_band_is_anchored_at_the_boundary_with_zero_width():
-    dates = _months(24)
-    series = [(date, float(index)) for index, date in enumerate(dates)]
-
-    points = _service(series)._actual_vs_forecast(_result(), "1 | 1", _winner(with_interval=True))
-
-    boundary = next(point for point in points if point.boundary)
-    # The last actual is an observation, so its interval has zero width —
-    # a fact about the data, not an invented bound.
-    assert boundary.lower == boundary.upper == boundary.actual
-
-
-def test_no_interval_is_fabricated_for_a_model_without_one():
-    dates = _months(24)
-    series = [(date, float(index)) for index, date in enumerate(dates)]
-
-    points = _service(series)._actual_vs_forecast(
-        _result(), "1 | 1", _winner(with_interval=False)
-    )
-
-    assert all(point.lower is None and point.upper is None for point in points)
-    boundary = next(point for point in points if point.boundary)
-    assert boundary.lower is None and boundary.upper is None

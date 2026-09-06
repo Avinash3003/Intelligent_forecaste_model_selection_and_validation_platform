@@ -9,6 +9,7 @@ export default function WizardFooter({
   nextDisabled,
   onPrevious,
   onNext,
+  nextLabel,
 }) {
   if (deployed) return null
 
@@ -26,7 +27,7 @@ export default function WizardFooter({
       ) : (
         <Button className="flex-row-reverse" onClick={onNext} disabled={loading || nextDisabled}>
           {loading ? <Loader2 size={16} className="animate-spin" /> : <ArrowRight size={16} />}
-          {loading ? 'Please wait…' : 'Next'}
+          {loading ? 'Please wait…' : (nextLabel || 'Next')}
         </Button>
       )}
     </div>
