@@ -11,9 +11,7 @@ memorization.md
 
 .agents/
 
-# Environment variables — real values never leave the machine.
-# The `!` lines re-admit the templates, which carry key names but no values;
-# without them `.env.*` would also exclude the examples other developers need.
+
 .env
 .env.*
 !.env.example
