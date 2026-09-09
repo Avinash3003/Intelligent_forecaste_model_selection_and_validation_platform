@@ -152,7 +152,7 @@ deploy-backend:
     - az account set --subscription $AZURE_SUBSCRIPTION_ID
     - cd backend
     - zip -rq backend-deploy.zip . -x "venv/*" "**/__pycache__/*" ".pytest_cache/*" ".env"
-    - az webapp deployment source config-zip --resource-group $APP_SERVICE_RESOURCE_GROUP --name $BACKEND_APP_NAME --src backend-deploy.zip
+    - az webapp deploy --resource-group "$APP_SERVICE_RESOURCE_GROUP" --name "$BACKEND_APP_NAME" --src-path backend-deploy.zip --type zip
 
 deploy-frontend:
   image: node:20
@@ -173,7 +173,7 @@ deploy-frontend:
     - cd dist
     - zip -rq ../frontend-deploy.zip .
     - cd ..
-    - az webapp deployment source config-zip --resource-group $APP_SERVICE_RESOURCE_GROUP --name $FRONTEND_APP_NAME --src frontend-deploy.zip
+    - az webapp deploy --resource-group "$APP_SERVICE_RESOURCE_GROUP" --name "$FRONTEND_APP_NAME" --src-path frontend-deploy.zip --type zip
 
 deploy-databricks:
   extends: .python
