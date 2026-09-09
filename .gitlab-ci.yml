@@ -146,7 +146,8 @@ deploy-backend:
         - backend/**/*
         - .gitlab-ci.yml
   script:
-    - apk add --no-cache zip
+    - apt-get update
+    - apt-get install -y zip
     - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
     - az account set --subscription $AZURE_SUBSCRIPTION_ID
     - cd backend
