@@ -112,7 +112,7 @@ databricks-bundle-validate:
       apt-get update -qq && apt-get install -y -qq curl unzip >/dev/null
       curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v1.11.0/install.sh | sh
       python -m pip wheel . --no-deps --wheel-dir dist
-      cd databricks && databricks bundle validate -t dev
+      cd databricks && databricks bundle validate -t prod
   variables:
     DATABRICKS_AUTH_TYPE: oauth-m2m
     BUNDLE_VAR_cicd_service_principal_id: "$DATABRICKS_CLIENT_ID"
