@@ -474,7 +474,7 @@ class ComputeService:
         # already running and returns the moment that one lands.
         with self._catalog_lock:
             fetched_at = self._node_catalog_fetched_at
-            stale = fetched_at is None or (time.monotonic() - fetched_at) > _NODE_CATALOG_TTL_SECONDS
+            stale = fetched_at is not None and (time.monotonic() - fetched_at) > _NODE_CATALOG_TTL_SECONDS
             if self._node_catalog is None or stale:
                 try:
                     raw = self._client().api_client.do("GET", "/api/2.1/clusters/list-node-types")
