@@ -169,6 +169,7 @@ deploy-frontend:
     - az account set --subscription $AZURE_SUBSCRIPTION_ID
     - cd frontend
     - npm ci
+    - export VITE_API_BASE_URL="https://avinash-forecastiq-backend.azurewebsites.net"
     - npm run build
     - cd dist
     - zip -rq ../frontend-deploy.zip .

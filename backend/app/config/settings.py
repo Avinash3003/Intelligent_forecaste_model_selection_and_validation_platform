@@ -21,7 +21,10 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     debug: bool = True
 
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "https://avinash-forecastiq-frontend.azurewebsites.net",
+    ]
 
     upload_dir: str = "uploads"
     max_upload_size_mb: int = 200
