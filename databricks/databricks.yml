@@ -41,9 +41,9 @@ variables:
     default: forecasting
 
 
-  volume:
-    description: Existing Unity Catalog external volume holding the original uploaded datasets.
-    default: forecast_files
+  artifacts_volume:
+    description: Existing Unity Catalog external volume holding pipeline output artifacts.
+    default: artifacts_files
 
 
   mlflow_experiment:
@@ -63,15 +63,14 @@ variables:
     description: Value for AZURE_OPENAI_DEPLOYMENT_NAME. Empty disables LLM insights.
     default: ""
 
-  volumes_root:
+  artifacts_volumes_root:
     description: >-
-      Unity Catalog Volume root. forecast_engine reads and writes with
+      Unity Catalog Volume root for run artifacts. forecast_engine reads and writes with
       pandas/pathlib, which need POSIX paths — UC Volumes provide those over the
       existing ADLS containers, where abfss:// URIs would not be directly
       readable. A UC volume path is /Volumes/<catalog>/<schema>/<volume>, so the
-      volume name must be included: forecastiq.forecasting.forecast_files is an
-      EXTERNAL volume over the deployment's `uploads` container.
-    default: /Volumes/${var.catalog}/${var.schema}/${var.volume}
+      volume name must be included.
+    default: /Volumes/${var.catalog}/${var.schema}/${var.artifacts_volume}
 
   cicd_service_principal_id:
     description: >-
@@ -134,9 +133,9 @@ targets:
             - name: config
               default: ""
             - name: summary_out
-              default: ${var.volumes_root}/runs/{{job.run_id}}/summary.json
+              default: ${var.artifacts_volumes_root}/runs/{{job.run_id}}/summary.json
             - name: live_status_out
-              default: ${var.volumes_root}/runs/{{job.run_id}}/live_status.json
+              default: ${var.artifacts_volumes_root}/runs/{{job.run_id}}/live_status.json
             - name: azure_openai_endpoint
               default: ${var.azure_openai_endpoint}
             - name: azure_openai_api_key
@@ -184,7 +183,7 @@ targets:
   prod:
     mode: production
     workspace:
-     
+      host: https://adb-7405607192344908.8.azuredatabricks.net
       root_path: /Workspace/Users/${var.cicd_service_principal_id}/.bundle/${bundle.name}/${bundle.target}
     
     variables:

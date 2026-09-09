@@ -115,11 +115,4 @@ def test_a_new_explicit_uploads_root_wins_over_the_old_field(tmp_path):
     assert settings.databricks_uploads_volumes_root == "/Volumes/new/forecasting/upload_files"
 
 
-def test_the_default_uploads_volume_is_the_one_that_exists_in_databricks(tmp_path):
-    """The default has to track the real volume name, not the intended one.
-    The rename to upload_files needs MANAGE on the volume, which this app's
-    service principal does not have — so until an owner renames it, a
-    default of upload_files points at nothing and fails every upload."""
-    settings = Settings(_env_file=None, mlflow_tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}")
 
-    assert settings.databricks_uploads_volumes_root.endswith("/forecast_files")

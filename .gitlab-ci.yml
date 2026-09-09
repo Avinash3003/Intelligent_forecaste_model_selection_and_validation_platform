@@ -9,6 +9,10 @@
 
 stages:
   - test
+  - deploy-docker
+  - deploy-backend
+  - deploy-frontend
+  - deploy-databricks
 
 default:
   interruptible: true
@@ -112,3 +116,82 @@ databricks-bundle-validate:
   variables:
     DATABRICKS_AUTH_TYPE: oauth-m2m
     BUNDLE_VAR_cicd_service_principal_id: "$DATABRICKS_CLIENT_ID"
+
+deploy-docker:
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  stage: deploy-docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - forecast_engine/**/*
+        - Dockerfile
+        - pyproject.toml
+        - .gitlab-ci.yml
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+  script:
+    - if [ -z "$AZURE_CLIENT_SECRET" ]; then echo "Missing AZURE_CLIENT_SECRET"; exit 1; fi
+    - docker login $ACR_LOGIN_SERVER -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET
+    - docker build -t $ACR_LOGIN_SERVER/forecastiq-runtime:latest -t $ACR_LOGIN_SERVER/forecastiq-runtime:$CI_COMMIT_SHA -f Dockerfile .
+    - docker push $ACR_LOGIN_SERVER/forecastiq-runtime:latest
+    - docker push $ACR_LOGIN_SERVER/forecastiq-runtime:$CI_COMMIT_SHA
+
+deploy-backend:
+  image: mcr.microsoft.com/azure-cli
+  stage: deploy-backend
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - backend/**/*
+        - .gitlab-ci.yml
+  script:
+    - apk add --no-cache zip
+    - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+    - az account set --subscription $AZURE_SUBSCRIPTION_ID
+    - cd backend
+    - zip -r backend.zip . -x "venv/*" "**/__pycache__/*" ".pytest_cache/*"
+    - az webapp deploy --resource-group $APP_SERVICE_RESOURCE_GROUP --name $BACKEND_APP_NAME --src-path backend.zip
+
+deploy-frontend:
+  image: node:20
+  stage: deploy-frontend
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - frontend/**/*
+        - .gitlab-ci.yml
+  script:
+    - apt-get update && apt-get install -y zip curl
+    - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+    - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
+    - az account set --subscription $AZURE_SUBSCRIPTION_ID
+    - cd frontend
+    - npm ci
+    - npm run build
+    - cd dist
+    - zip -r ../frontend.zip .
+    - cd ..
+    - az webapp deploy --resource-group $APP_SERVICE_RESOURCE_GROUP --name $FRONTEND_APP_NAME --src-path frontend.zip
+
+deploy-databricks:
+  extends: .python
+  stage: deploy-databricks
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - forecast_engine/**/*
+        - databricks/**/*
+        - pyproject.toml
+        - .gitlab-ci.yml
+  variables:
+    DATABRICKS_AUTH_TYPE: oauth-m2m
+    BUNDLE_VAR_cicd_service_principal_id: "$DATABRICKS_CLIENT_ID"
+  script:
+    - if [ -z "$DATABRICKS_CLIENT_SECRET" ]; then echo "Missing DATABRICKS_CLIENT_SECRET"; exit 1; fi
+    - apt-get update -qq && apt-get install -y -qq curl unzip >/dev/null
+    - curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v1.11.0/install.sh | sh
+    - python -m pip wheel . --no-deps --wheel-dir dist
+    - cd databricks
+    - databricks bundle deploy -t prod

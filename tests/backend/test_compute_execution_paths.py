@@ -272,7 +272,7 @@ def test_docker_image_is_absent_when_dcs_is_not_configured(settings, dataset):
 def test_new_compute_attaches_the_configured_docker_image(settings, dataset):
     dcs_settings = settings.model_copy(
         update={
-            "databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1",
+            "databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1",
             "databricks_docker_image_username": "sp-forecastiq-dcs-acrpull",
             "databricks_docker_image_password": "super-secret-value",
         }
@@ -282,7 +282,7 @@ def test_new_compute_attaches_the_configured_docker_image(settings, dataset):
     runner.submit(_request(dataset, NEW_COMPUTE))
     cluster = _submitted_job_cluster(workspace)
 
-    assert cluster.docker_image.url == "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"
+    assert cluster.docker_image.url == "testacr.azurecr.io/forecastiq-runtime:v1"
     assert cluster.docker_image.basic_auth.username == "sp-forecastiq-dcs-acrpull"
     assert cluster.docker_image.basic_auth.password == "super-secret-value"
     # Every other field is untouched -- DCS is additive, not a rewrite.
@@ -302,7 +302,7 @@ def test_dcs_downgrades_the_runtime_to_its_standard_non_ml_equivalent(settings, 
     kind"). Leaving it unset and downgrading spark_version alone submits
     cleanly; Databricks infers the flag from the version string."""
     dcs_settings = settings.model_copy(
-        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+        update={"databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1"}
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
@@ -319,7 +319,7 @@ def test_dcs_sets_the_single_user_name_for_the_job_triggered_cluster(settings, d
     principal every other Databricks call in this process authenticates
     as, resolved the same way compute_service's own probe already does."""
     dcs_settings = settings.model_copy(
-        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+        update={"databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1"}
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
@@ -396,7 +396,7 @@ def test_docker_image_url_is_never_hardcoded_in_python(settings, dataset):
     """Two different configured URLs must produce two different clusters --
     proof the value comes from settings, not a literal in the runner."""
     first_settings = settings.model_copy(
-        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+        update={"databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1"}
     )
     first_ws = _FakeWorkspace()
     DatabricksRunner(first_settings, workspace_client=first_ws).submit(_request(dataset, NEW_COMPUTE))
@@ -415,7 +415,7 @@ def test_docker_image_without_credentials_has_no_basic_auth(settings, dataset):
     """A public or already-cached image needs no credential -- basic_auth
     must not be forced onto a spec that never asked for it."""
     dcs_settings = settings.model_copy(
-        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+        update={"databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1"}
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))
@@ -431,7 +431,7 @@ def test_existing_compute_path_never_touches_docker_image(settings, dataset):
     configured for new job compute."""
     dcs_settings = settings.model_copy(
         update={
-            "databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1",
+            "databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1",
             "databricks_docker_image_username": "sp-forecastiq-dcs-acrpull",
             "databricks_docker_image_password": "super-secret-value",
         }
@@ -450,7 +450,7 @@ def test_the_acr_password_never_reaches_a_run_id_or_error_message(settings, data
     guarantee every other Databricks credential on this class already has."""
     dcs_settings = settings.model_copy(
         update={
-            "databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1",
+            "databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1",
             "databricks_docker_image_username": "sp-forecastiq-dcs-acrpull",
             "databricks_docker_image_password": "super-secret-value",
         }
@@ -477,7 +477,7 @@ def test_dcs_runs_the_job_this_runner_defined_itself(settings, dataset):
     wrote in the same call, and DCS goes through that same path as every
     other compute selection rather than a separate one."""
     dcs_settings = settings.model_copy(
-        update={"databricks_docker_image_url": "avinashforecastiqacr.azurecr.io/forecastiq-runtime:v1"}
+        update={"databricks_docker_image_url": "testacr.azurecr.io/forecastiq-runtime:v1"}
     )
     workspace = _FakeWorkspace()
     DatabricksRunner(dcs_settings, workspace_client=workspace).submit(_request(dataset, NEW_COMPUTE))

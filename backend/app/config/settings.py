@@ -167,27 +167,18 @@ class Settings(BaseSettings):
     # Still "forecast_files": that is the volume's real name in Databricks.
     # Renaming it needs MANAGE, which this app's service principal does not
     # have, so the default has to track the infrastructure rather than lead
-    # it — a default naming a volume that does not exist fails every upload.
-    # None means "not explicitly set"; resolved below.
+    # Base Unity Catalog routing for this environment
+    databricks_catalog: str = "forecastiq"
+    databricks_schema: str = "forecasting"
+
     databricks_uploads_volumes_root: str | None = None
-    # Deprecated name, still honored: the deployed App Service sets
-    # DATABRICKS_VOLUMES_ROOT, and dropping this field made pydantic ignore
-    # it silently and fall through to the default instead.
-    databricks_volumes_root: str = "/Volumes/forecastiq/forecasting/forecast_files"
-
-    # UC volume for the curated dataset. Separate from uploads so raw and
-    # derived data keep their own lifecycle. Cloud execution only.
-    databricks_curated_volumes_root: str = "/Volumes/forecastiq/forecasting/curated_files"
-
-    # UC volume for each key's winning fitted model.
-    databricks_models_volumes_root: str = "/Volumes/forecastiq/forecasting/models_files"
-
-    # UC volume for the exported forecast CSV.
-    databricks_forecasts_volumes_root: str = "/Volumes/forecastiq/forecasting/forecasts_files"
-
-    # UC volume for run artifacts: pipeline summary, live status, run
-    # config, and the mirrored insights/LLM trace. Never original input.
-    databricks_artifacts_volumes_root: str = "/Volumes/forecastiq/forecasting/artifacts_files"
+    databricks_curated_volumes_root: str | None = None
+    databricks_models_volumes_root: str | None = None
+    databricks_forecasts_volumes_root: str | None = None
+    databricks_artifacts_volumes_root: str | None = None
+    
+    # Deprecated legacy field
+    databricks_volumes_root: str | None = None
 
     azure_storage_connection_string: str | None = None
     # Dataset preview reads uploads back from ADLS. A read-only, expiring
@@ -207,12 +198,26 @@ class Settings(BaseSettings):
     azure_client_id: str | None = None
     azure_client_secret: str | None = None
 
-    # Falls back to the deprecated field only when the new one was not
-    # explicitly given — an explicit new value always wins.
     @model_validator(mode="after")
-    def _resolve_uploads_volumes_root(self) -> "Settings":
+    def _resolve_volumes_roots(self) -> "Settings":
+        base = f"/Volumes/{self.databricks_catalog}/{self.databricks_schema}"
+        
+        # Support old env var
         if self.databricks_uploads_volumes_root is None:
-            self.databricks_uploads_volumes_root = self.databricks_volumes_root
+            self.databricks_uploads_volumes_root = self.databricks_volumes_root or f"{base}/upload_files"
+            
+        if self.databricks_curated_volumes_root is None:
+            self.databricks_curated_volumes_root = f"{base}/curated_files"
+            
+        if self.databricks_models_volumes_root is None:
+            self.databricks_models_volumes_root = f"{base}/models_files"
+            
+        if self.databricks_forecasts_volumes_root is None:
+            self.databricks_forecasts_volumes_root = f"{base}/forecasts_files"
+            
+        if self.databricks_artifacts_volumes_root is None:
+            self.databricks_artifacts_volumes_root = f"{base}/artifacts_files"
+
         return self
 
     @property
