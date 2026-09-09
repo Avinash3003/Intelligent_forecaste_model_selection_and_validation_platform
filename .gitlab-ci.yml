@@ -117,28 +117,28 @@ databricks-bundle-validate:
     DATABRICKS_AUTH_TYPE: oauth-m2m
     BUNDLE_VAR_cicd_service_principal_id: "$DATABRICKS_CLIENT_ID"
 
-deploy-docker:
-  image: docker:24.0.5
-  services:
-    - docker:24.0.5-dind
-  stage: deploy-docker
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      changes:
-        - Dockerfile
-        - pyproject.toml
-        - .gitlab-ci.yml
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-  script:
-    - if [ -z "$AZURE_CLIENT_SECRET" ]; then echo "Missing AZURE_CLIENT_SECRET"; exit 1; fi
-    - docker login $ACR_LOGIN_SERVER -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET
-    - docker build -t $ACR_LOGIN_SERVER/forecastiq-runtime:latest -t $ACR_LOGIN_SERVER/forecastiq-runtime:$CI_COMMIT_SHA -f Dockerfile .
-    - docker push $ACR_LOGIN_SERVER/forecastiq-runtime:latest
-    - docker push $ACR_LOGIN_SERVER/forecastiq-runtime:$CI_COMMIT_SHA
+# deploy-docker:
+#   image: docker:24.0.5
+#   services:
+#     - docker:24.0.5-dind
+#   stage: deploy-docker
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+#       changes:
+#         - Dockerfile
+#         - pyproject.toml
+#         - .gitlab-ci.yml
+#   variables:
+#     DOCKER_HOST: tcp://docker:2375
+#   script:
+#     - if [ -z "$AZURE_CLIENT_SECRET" ]; then echo "Missing AZURE_CLIENT_SECRET"; exit 1; fi
+#     - docker login $ACR_LOGIN_SERVER -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET
+#     - docker build -t $ACR_LOGIN_SERVER/forecastiq-runtime:latest -t $ACR_LOGIN_SERVER/forecastiq-runtime:$CI_COMMIT_SHA -f Dockerfile .
+#     - docker push $ACR_LOGIN_SERVER/forecastiq-runtime:latest
+#     - docker push $ACR_LOGIN_SERVER/forecastiq-runtime:$CI_COMMIT_SHA
 
 deploy-backend:
-  image: mcr.microsoft.com/azure-cli
+  image: python:3.12-slim
   stage: deploy-backend
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -146,13 +146,13 @@ deploy-backend:
         - backend/**/*
         - .gitlab-ci.yml
   script:
-    - apt-get update
-    - apt-get install -y zip
+    - apt-get update -qq && apt-get install -y -qq zip curl >/dev/null
+    - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
     - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
     - az account set --subscription $AZURE_SUBSCRIPTION_ID
     - cd backend
-    - zip -r backend.zip . -x "venv/*" "**/__pycache__/*" ".pytest_cache/*"
-    - az webapp deploy --resource-group $APP_SERVICE_RESOURCE_GROUP --name $BACKEND_APP_NAME --src-path backend.zip
+    - zip -rq backend-deploy.zip . -x "venv/*" "**/__pycache__/*" ".pytest_cache/*" ".env"
+    - az webapp deployment source config-zip --resource-group $APP_SERVICE_RESOURCE_GROUP --name $BACKEND_APP_NAME --src backend-deploy.zip
 
 deploy-frontend:
   image: node:20
@@ -163,7 +163,7 @@ deploy-frontend:
         - frontend/**/*
         - .gitlab-ci.yml
   script:
-    - apt-get update && apt-get install -y zip curl
+    - apt-get update -qq && apt-get install -y -qq zip curl >/dev/null
     - curl -sL https://aka.ms/InstallAzureCLIDeb | bash
     - az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET --tenant $AZURE_TENANT_ID
     - az account set --subscription $AZURE_SUBSCRIPTION_ID
@@ -171,9 +171,9 @@ deploy-frontend:
     - npm ci
     - npm run build
     - cd dist
-    - zip -r ../frontend.zip .
+    - zip -rq ../frontend-deploy.zip .
     - cd ..
-    - az webapp deploy --resource-group $APP_SERVICE_RESOURCE_GROUP --name $FRONTEND_APP_NAME --src-path frontend.zip
+    - az webapp deployment source config-zip --resource-group $APP_SERVICE_RESOURCE_GROUP --name $FRONTEND_APP_NAME --src frontend-deploy.zip
 
 deploy-databricks:
   extends: .python
